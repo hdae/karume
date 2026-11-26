@@ -254,6 +254,7 @@ describe("the gemma4-bench entry", () => {
           hostMarks: false,
           signal: true,
           integerGemv: false,
+          drafter: false,
           sessionOptions: {},
           pipelineOptions: {},
           sampler: { temperature: 0 },
@@ -319,6 +320,32 @@ describe("the gemma4-bench entry", () => {
       expect(unused.result().summary[1]).toMatch(/ · outputs identical · candidates not used$/);
       const without = await benchOf([REGULAR_ARM]);
       expect(without.result().summary[1]).toMatch(/ · outputs identical$/);
+    });
+
+    it("says a drafter arm's tokens per cycle and accepted drafts over its warm chats, and records the arm as such", async () => {
+      const speculation = {
+        cycles: 2,
+        draftRuns: 2,
+        drafted: 6,
+        accepted: 1,
+        delivered: 3,
+        acceptedHistogram: [1, 1, 0, 0],
+      };
+      const { result } = await benchOf([REGULAR_ARM, { ...REGULAR_ARM, drafter: true }], {
+        speculation,
+      });
+      const { summary, data } = result();
+      expect(summary[1]).toMatch(/^arm 1 Gemma 4 e2b bf16 · .* · outputs identical$/);
+      expect(summary[2]).toMatch(
+        /^arm 2 Gemma 4 e2b bf16 \(drafter\) · .* · outputs identical · 1\.500 tokens\/cycle \(accepted 1\/6 drafts over 2 cycles\)$/,
+      );
+      // The tokens of one cycle arrive together: the interval between two is no decode step's time
+      expect(summary[1]).toContain(" · token interval ");
+      expect(summary[2]).not.toContain("token interval");
+      expect(data.arms.map(({ drafter }) => drafter)).toEqual([false, true]);
+      expect(data.chats.filter(({ arm }) => arm === 1).map(({ stop }) => stop.speculation)).toEqual(
+        [speculation, speculation],
+      );
     });
 
     it("records an arm sent without a signal as such", async () => {

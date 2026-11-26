@@ -6,7 +6,8 @@
  *
  * For a split arm (one timed pass per dispatch) the summary also breaks the decode GPU time down per
  * op family and pipeline key ({@link SplitSummary}); for an arm in the tap's host mode it has the
- * host's segments of a decode token ({@link HostSummary}).
+ * host's segments of a decode token ({@link HostSummary}); for a drafter arm the speculation's
+ * cycles summed over the warm chats ({@link SpeculationCounts}).
  */
 
 import { familyOfKey, OP_FAMILY_LABELS, type OpFamily } from "./family.ts";
@@ -42,7 +43,22 @@ export type SummaryInput = {
   readonly tokenIdsSha256: string;
   readonly measurement: ChatMeasurement;
   /** The chat's stop, for the counters of the path its decode steps took (absent = none reported). */
-  readonly stop?: { readonly candidateSelection?: CandidateCounts };
+  readonly stop?: {
+    readonly candidateSelection?: CandidateCounts;
+    readonly speculation?: SpeculationCounts;
+  };
+};
+
+/**
+ * The speculation's counters of a drafter arm's chats (`StopRecord.speculation`): the verify runs
+ * (one per cycle), the drafts produced and accepted, and the tokens the cycles committed —
+ * `delivered / cycles` is the tokens per cycle.
+ */
+export type SpeculationCounts = {
+  readonly cycles: number;
+  readonly drafted: number;
+  readonly accepted: number;
+  readonly delivered: number;
 };
 
 /**
@@ -110,6 +126,8 @@ export type ArmPromptSummary = {
    * without it read the whole row at every step.
    */
   readonly candidateSelection?: CandidateCounts;
+  /** The speculation's counters summed over the warm chats (present when a warm chat's stop reports them). */
+  readonly speculation?: SpeculationCounts;
 };
 
 /**
@@ -302,6 +320,11 @@ export const summarizeRuns = (
       const selections = warm.flatMap(({ stop }) =>
         stop?.candidateSelection === undefined ? [] : [stop.candidateSelection],
       );
+      const speculations = warm.flatMap(({ stop }) =>
+        stop?.speculation === undefined ? [] : [stop.speculation],
+      );
+      const sum = (read: (counts: SpeculationCounts) => number): number =>
+        speculations.reduce((total, counts) => total + read(counts), 0);
       entries.push({
         arm,
         prompt,
@@ -317,6 +340,16 @@ export const summarizeRuns = (
                 count: Math.max(...selections.map(({ count }) => count)),
                 steps: selections.reduce((sum, { steps }) => sum + steps, 0),
                 fallbacks: selections.reduce((sum, { fallbacks }) => sum + fallbacks, 0),
+              },
+            }),
+        ...(speculations.length === 0
+          ? {}
+          : {
+              speculation: {
+                cycles: sum(({ cycles }) => cycles),
+                drafted: sum(({ drafted }) => drafted),
+                accepted: sum(({ accepted }) => accepted),
+                delivered: sum(({ delivered }) => delivered),
               },
             }),
       });

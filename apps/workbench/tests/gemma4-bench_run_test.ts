@@ -82,6 +82,20 @@ describe("the bench loop", () => {
     }
   });
 
+  it("sends a drafter arm's chats with speculative always, and no other arm's with speculative at all", async () => {
+    const { world } = await runBench({
+      arms: [arm("e2b"), { ...arm("e2b"), drafter: true }],
+      settings: { ...SETTINGS, rounds: 1, prompts: ["few-ids"] },
+    });
+    expect(world.sentOptions.map((options) => options.speculative)).toEqual([
+      undefined,
+      undefined,
+      "always",
+      "always",
+    ]);
+    expect(Object.hasOwn(world.sentOptions[0], "speculative")).toBe(false);
+  });
+
   it("enables the probe only for a tapped arm's chats, and measures the tap only there", async () => {
     const { world, probe, chats } = await runBench({
       arms: [arm("e2b", true), arm("e2b-control", false)],

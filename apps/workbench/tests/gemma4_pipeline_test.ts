@@ -113,7 +113,7 @@ describe("the workbench's Gemma 4 pipeline builder", () => {
     });
   });
 
-  it("leaves out what the input does not name: no f16 KV, no expert cache, no callback", async () => {
+  it("leaves out what the input does not name: no f16 KV, no expert cache, no callback, no drafter", async () => {
     const { calls } = await build(INPUT);
     for (const name of [
       "fullStateStorage",
@@ -121,8 +121,33 @@ describe("the workbench's Gemma 4 pipeline builder", () => {
       "onRunDiagnostics",
       "onProgress",
       "fusionRules",
+      "speculative",
     ]) {
       expect(Object.hasOwn(calls[0].options, name), name).toBe(false);
     }
+  });
+
+  it("builds the drafter a load asks for on gemma.Pipeline, at the drafter's own draft count", async () => {
+    for (const mount of ["gemma4", "gemma4-qat"] as const) {
+      const { calls } = await build({ ...INPUT, load: { ...INPUT.load, mount, drafter: true } });
+      expect(calls[0].options).toEqual({
+        gpu: GPU,
+        quant: "i4",
+        signal: SIGNAL,
+        model: "e2b",
+        speculative: {},
+      });
+    }
+  });
+
+  it("refuses a mobile load with the drafter, before any read", async () => {
+    const calls: Call[] = [];
+    await expect(
+      buildGemmaPipelineWith(fakeEntryPoints(calls), {
+        ...INPUT,
+        load: { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4", drafter: true },
+      }),
+    ).rejects.toThrow("gemma4QatMobile.Pipeline has no MTP drafter");
+    expect(calls).toEqual([]);
   });
 });

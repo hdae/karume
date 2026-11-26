@@ -12,7 +12,7 @@ const SIGNAL = new AbortController().signal;
 const FORM = "<mount>/<model>[@<preset>][:<switch>]…";
 const MOUNTS = "gemma4, gemma4-qat, gemma4-qat-mobile";
 const SWITCHES =
-  "tap-off, split, host, linear-reorder, default-gemv, general-sequential, integer, ple-gpu, ahead2, ahead4, ahead8, no-signal, sampled";
+  "tap-off, split, host, linear-reorder, default-gemv, general-sequential, integer, ple-gpu, ahead2, ahead4, ahead8, drafter, no-signal, sampled";
 
 /** The drafts of `text` (the grammar alone; no distribution is read). */
 const draftsOf = (text: string) => parseArmsText(text).map(({ draft }) => draft);
@@ -44,6 +44,7 @@ describe("the arms text", () => {
     ["ahead2", { tap: true, decodeAhead: "2" }],
     ["ahead4", { tap: true, decodeAhead: "4" }],
     ["ahead8", { tap: true, decodeAhead: "8" }],
+    ["drafter", { tap: true, drafter: true }],
   ] as const)("reads the switch %s", (name, switches) => {
     expect(draftsOf(`gemma4/e2b:${name}`)).toEqual([
       { key: { mount: "gemma4", model: "e2b" }, ...switches },

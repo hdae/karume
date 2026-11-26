@@ -4,9 +4,8 @@
  * GPU tap on, split per dispatch, in its host mode or off × linear at the level `reorder` × the
  * GEMV choices of the device's profile, of the default profile, or without the sequential variant's
  * per-shape exceptions × the integer GEMV × the PLE on the host or the GPU × the decode run-ahead
- * depth × with or without a signal × the bench's sampler or the distribution's — visited in A B B A
- * rounds over a fixed
- * prompt set, `chats` fresh chats per prompt and visit (chat 0 is the cold one and is left out of
+ * depth × the MTP drafter or not × with or without a signal × the bench's sampler or the
+ * distribution's — visited in A B B A rounds over a fixed prompt set, `chats` fresh chats per prompt and visit (chat 0 is the cold one and is left out of
  * the summary). It reports wall-clock decode figures and, through the GPU tap
  * (`src/gemma4-bench/tap.ts`), the GPU time and the dispatches, passes and submits per token, or —
  * in the tap's host mode — the host's segments of a decode token.
@@ -87,7 +86,12 @@ const buildArmPipeline = async (
     await buildGemmaPipeline({
       ref: arm.distribution.ref,
       gpu,
-      load: { mount: arm.mount, model: arm.model, quant: arm.quant },
+      load: {
+        mount: arm.mount,
+        model: arm.model,
+        quant: arm.quant,
+        ...(arm.drafter === true ? { drafter: true } : {}),
+      },
       signal,
       ...(arm.session === undefined ? {} : { sessionOptions: arm.session }),
       ...(arm.pipeline === undefined ? {} : { pipelineOptions: arm.pipeline }),
@@ -98,7 +102,7 @@ const entry: Entry = {
   id: "gemma4-bench",
   title: "Gemma 4 decode bench",
   description:
-    "Decode A/B of Gemma 4 arms (model × preset × GPU tap on, split per dispatch, in its host mode or off × linear at reorder × the profile's GEMV choices, the default profile's or none of the sequential exceptions × integer GEMV × PLE on the GPU × decode run-ahead depth × signal × sampler) in A B B A rounds over a fixed prompt set, one pipeline resident at a time: decode tokens/s and ms/token, through the GPU tap the GPU time and dispatches, passes and submits per token, and in the tap's host mode the host's segments of a decode token.",
+    "Decode A/B of Gemma 4 arms (model × preset × GPU tap on, split per dispatch, in its host mode or off × linear at reorder × the profile's GEMV choices, the default profile's or none of the sequential exceptions × integer GEMV × PLE on the GPU × decode run-ahead depth × MTP drafter × signal × sampler) in A B B A rounds over a fixed prompt set, one pipeline resident at a time: decode tokens/s and ms/token, through the GPU tap the GPU time and dispatches, passes and submits per token, and in the tap's host mode the host's segments of a decode token.",
   // The minima are the bench's own (a warm chat besides the cold one, a decode token after the
   // prefill's, one round); the maxima only bound a typo.
   parameters: [
@@ -106,7 +110,7 @@ const entry: Entry = {
       kind: "text",
       name: "arms",
       label:
-        "Arms, comma-separated, arm 1 the one the others are compared with; an arm is <mount>/<model>[@<preset>][:<switch>]… with a mount of gemma4, gemma4-qat, gemma4-qat-mobile, no preset for the manifest's default, and the switches tap-off (the tap is on otherwise), split (one timed pass per dispatch), host (wall-clock marks at the WebGPU calls instead of pass timing: the host's segments of a token), linear-reorder (linear at the level reorder on a preset that does not declare it), default-gemv (the device's table without GEMV choices of its own: the default profile's) and general-sequential (no per-shape exception of the sequential GEMV) — with either, every visit of every arm takes a device of its own —, integer (integer GEMV), ple-gpu (PLE on the GPU), ahead2 / ahead4 / ahead8 (decode run-ahead depth; needs ple-gpu except on 12b), no-signal (chats sent without an AbortSignal) and sampled (the distribution's sampler with seed 0 for this arm) — e.g. gemma4/e2b,gemma4-qat/e2b@i4-fast:integer (empty: one arm per mount whose mirror is present, its default model and preset, regular Gemma 4 first)",
+        "Arms, comma-separated, arm 1 the one the others are compared with; an arm is <mount>/<model>[@<preset>][:<switch>]… with a mount of gemma4, gemma4-qat, gemma4-qat-mobile, no preset for the manifest's default, and the switches tap-off (the tap is on otherwise), split (one timed pass per dispatch), host (wall-clock marks at the WebGPU calls instead of pass timing: the host's segments of a token), linear-reorder (linear at the level reorder on a preset that does not declare it), default-gemv (the device's table without GEMV choices of its own: the default profile's) and general-sequential (no per-shape exception of the sequential GEMV) — with either, every visit of every arm takes a device of its own —, integer (integer GEMV), ple-gpu (PLE on the GPU), ahead2 / ahead4 / ahead8 (decode run-ahead depth; needs ple-gpu except on 12b), drafter (the model's MTP drafter: speculative decode, every chat sent with speculative always; only where the manifest ships one, not with ple-gpu or a run-ahead depth), no-signal (chats sent without an AbortSignal) and sampled (the distribution's sampler with seed 0 for this arm) — e.g. gemma4/e2b,gemma4/e2b:drafter,gemma4-qat/e2b@i4-fast:integer (empty: one arm per mount whose mirror is present, its default model and preset, regular Gemma 4 first)",
       default: "",
     },
     {

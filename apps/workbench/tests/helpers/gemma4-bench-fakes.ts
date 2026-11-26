@@ -1,4 +1,9 @@
-import type { ChatOptions, ChatStop, ChatStream } from "@karume/models/gemma";
+import type {
+  ChatOptions,
+  ChatStop,
+  ChatStream,
+  GenerationSpeculation,
+} from "@karume/models/gemma";
 
 import type { HostCall } from "../../src/gemma4-bench/measure.ts";
 import type { BenchDependencies, BenchPipeline, BenchProbe } from "../../src/gemma4-bench/run.ts";
@@ -22,6 +27,11 @@ export type BenchFakeOptions = {
     readonly steps: number;
     readonly fallbacks: number;
   };
+  /**
+   * The speculation every chat sent with `speculative: "always"` reports in its stop (absent:
+   * none — the chats of an arm without the drafter never report it).
+   */
+  readonly speculation?: GenerationSpeculation;
 };
 
 /** What the fakes saw over a run. */
@@ -161,6 +171,9 @@ export const fakeBenchDependencies = (options: BenchFakeOptions = {}) => {
                 ...(options.candidateSelection === undefined
                   ? {}
                   : { candidateSelection: options.candidateSelection }),
+                ...(options.speculation === undefined || chatOptions.speculative !== "always"
+                  ? {}
+                  : { speculation: options.speculation }),
               });
               return "text";
             },

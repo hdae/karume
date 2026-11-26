@@ -16,7 +16,13 @@ import {
   visitOrder,
 } from "../src/gemma4-bench/plan.ts";
 
-import { MOBILE, QAT, REGULAR } from "./helpers/gemma4-bench-manifests.ts";
+import {
+  MOBILE,
+  QAT,
+  QAT_WITH_DRAFTERS,
+  REGULAR,
+  REGULAR_WITH_DRAFTER,
+} from "./helpers/gemma4-bench-manifests.ts";
 
 const MANIFESTS = {
   "gemma4-qat": parseManifest(QAT),
@@ -303,6 +309,107 @@ describe("the arms", () => {
     ] as const) {
       expect(armLabel(arm)).toBe(label);
     }
+  });
+});
+
+describe("the drafter switch", () => {
+  const WITH_DRAFTER = {
+    gemma4: parseManifest(REGULAR_WITH_DRAFTER),
+    "gemma4-qat-mobile": parseManifest(MOBILE),
+  };
+  const regular = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
+    key: { mount: "gemma4", model: "e2b" },
+    tap: true,
+    ...patch,
+  });
+
+  it("marks the arm on a model whose manifest ships the drafter, at any of its presets", () => {
+    for (const quant of [undefined, "bf16-fast"]) {
+      const arm = armOf(
+        resolveArm(
+          regular({ drafter: true, ...(quant === undefined ? {} : { quant }) }),
+          WITH_DRAFTER,
+        ),
+      );
+      expect(arm.drafter).toBe(true);
+      // The drafter changes neither the Session nor the pipeline options the arm passes
+      expect(arm).not.toHaveProperty("session");
+      expect(arm).not.toHaveProperty("pipeline");
+    }
+    expect(armOf(resolveArm(regular(), WITH_DRAFTER))).not.toHaveProperty("drafter");
+    expect(armOf(resolveArm(regular({ drafter: false }), WITH_DRAFTER))).not.toHaveProperty(
+      "drafter",
+    );
+  });
+
+  it("refuses the drafter where the model ships none, on the mobile line, with the PLE on the GPU or with a run-ahead depth", () => {
+    for (const [given, error] of [
+      [
+        regular({ key: { mount: "gemma4", model: "e4b" }, drafter: true }),
+        "The gemma4 model 'e4b' ships no MTP drafter (its manifest entry declares no 'drafter' weights).",
+      ],
+      [
+        draft({ drafter: true }),
+        "gemma4QatMobile.Pipeline has no MTP drafter (its line ships none).",
+      ],
+      [
+        regular({ drafter: true, pleOnGpu: true }),
+        "The drafter cannot go with ple-gpu (the pipeline keeps the drafter's per-layer inputs on the host).",
+      ],
+      [
+        regular({ drafter: true, pleOnGpu: true, decodeAhead: "4" }),
+        "The drafter cannot go with ple-gpu (the pipeline keeps the drafter's per-layer inputs on the host).",
+      ],
+    ] as const) {
+      expect(resolveArm(given, WITH_DRAFTER)).toEqual({ ok: false, error });
+    }
+  });
+
+  it("refuses the drafter in the tap's host mode, and keeps it with the split tap", () => {
+    expect(resolveArm(regular({ drafter: true, hostMarks: true }), WITH_DRAFTER)).toEqual({
+      ok: false,
+      error:
+        "The drafter cannot go with host (the host segments cut the interval between two tokens into one decode step, and the tokens of one speculative cycle arrive together).",
+    });
+    const split = armOf(resolveArm(regular({ drafter: true, split: true }), WITH_DRAFTER));
+    expect(split.drafter).toBe(true);
+    expect(split.split).toBe(true);
+  });
+
+  it("refuses the drafter with a run-ahead depth on a model without a PLE (12B)", () => {
+    const qat = { "gemma4-qat": parseManifest(QAT_WITH_DRAFTERS) };
+    expect(
+      resolveArm(
+        { key: { mount: "gemma4-qat", model: "12b" }, tap: true, drafter: true, decodeAhead: "2" },
+        qat,
+      ),
+    ).toEqual({
+      ok: false,
+      error:
+        "The drafter cannot go with a decode run-ahead depth (a speculative turn verifies drafts instead of taking greedy steps).",
+    });
+    expect(
+      armOf(
+        resolveArm({ key: { mount: "gemma4-qat", model: "12b" }, tap: true, drafter: true }, qat),
+      ).drafter,
+    ).toBe(true);
+  });
+
+  it("is named in the label after the preset", () => {
+    expect(
+      armLabel({ mount: "gemma4", model: "e2b", quant: "bf16", tap: true, drafter: true }),
+    ).toBe("Gemma 4 e2b bf16 (drafter)");
+    expect(
+      armLabel({
+        mount: "gemma4",
+        model: "e2b",
+        quant: "bf16",
+        tap: false,
+        drafter: true,
+        linearReorder: true,
+        session: { numerics: { ops: { linear: "reorder" } } },
+      }),
+    ).toBe("Gemma 4 e2b bf16 (drafter) (linear reorder) (tap off)");
   });
 });
 

@@ -2,12 +2,13 @@
  * What the decode bench runs: the prompt set, the arms (a model of one of the three Gemma 4
  * distributions × a preset × the tap on, on and split per dispatch, in the host mode, or off × linear
  * at the level `reorder` or as the preset declares × the integer GEMV on or off × the PLE on the host
- * or the GPU × the decode run-ahead depth × a signal passed or not × the bench's sampler or the
- * distribution's), the workload (chats, new tokens, rounds, sampler) and the order the arms are
- * visited in. Pure, so `vp test` covers it.
+ * or the GPU × the decode run-ahead depth × the MTP drafter or not × a signal passed or not × the
+ * bench's sampler or the distribution's), the workload (chats, new tokens, rounds, sampler) and the
+ * order the arms are visited in. Pure, so `vp test` covers it.
  */
 
 import {
+  entryPointOf,
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
@@ -120,6 +121,11 @@ export type ArmDraft = {
   readonly pleOnGpu?: boolean;
   /** Greedy decode steps per GPU batch (the pipeline option `decodeAhead`; absent = 1). */
   readonly decodeAhead?: DecodeAhead;
+  /**
+   * Decode with the model's MTP drafter: the pipeline is built with it (`speculative` of
+   * `fromPretrained`) and every chat is sent with `speculative: "always"` (absent = no drafter).
+   */
+  readonly drafter?: boolean;
 };
 
 /** The run-ahead depths the bench offers (1 = off — one step per batch). */
@@ -210,6 +216,12 @@ export type BenchArm = {
   readonly session?: ArmSessionOptions;
   /** The pipeline options passed explicitly (absent = none — {@link ArmPipelineOptions}). */
   readonly pipeline?: ArmPipelineOptions;
+  /**
+   * Whether the arm decodes with the model's MTP drafter: its pipeline is built with the drafter and
+   * every chat is sent with `speculative: "always"` — speculation in every cycle, no self-tuning
+   * gate, so the arm times speculative decode itself (absent = no drafter, one run per token).
+   */
+  readonly drafter?: true;
   /** The distribution's declared sampler (for the "distribution's sampler" choice). */
   readonly declaredSampler?: DefaultSampler;
 };
@@ -249,11 +261,12 @@ export const armLabel = (
     | "profile"
     | "session"
     | "pipeline"
+    | "drafter"
   >,
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
-    arm.linearReorder === true ? " (linear reorder)" : ""
-  }${(arm.profile ?? []).map((name) => ` (${PROFILE_SWITCH_LABELS[name]})`).join("")}${
+    arm.drafter === true ? " (drafter)" : ""
+  }${arm.linearReorder === true ? " (linear reorder)" : ""}${(arm.profile ?? []).map((name) => ` (${PROFILE_SWITCH_LABELS[name]})`).join("")}${
     arm.session?.integerGemv === true ? " (integer)" : ""
   }${
     arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
@@ -288,9 +301,10 @@ export type ArmResolution =
 /**
  * A draft → its arm, or why it cannot run (a missing manifest, a model or a preset the manifest does
  * not have — named with the ones it has —, a QAT model the entry point refuses, linear at `reorder`
- * asked of a preset that declares it — the arm would be its base under another label —, or a
- * run-ahead depth without the PLE on the GPU — the pipeline refuses that pair too, but only after the
- * arm was started).
+ * asked of a preset that declares it — the arm would be its base under another label —, a run-ahead
+ * depth without the PLE on the GPU, or the drafter where the model ships none, on the mobile QAT
+ * line, with the PLE on the GPU or with a run-ahead depth — the pipeline refuses those pairs too, but
+ * only after the arm was started).
  */
 export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResolution => {
   const { mount, model } = draft.key;
@@ -325,6 +339,10 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       error:
         "Decode ahead needs PLE on GPU (each step's token stays on the GPU, so its PLE gather must run there).",
     };
+  }
+  if (draft.drafter === true) {
+    const refusal = drafterRefusal(draft, manifest);
+    if (refusal !== undefined) return { ok: false, error: refusal };
   }
   const pipeline: ArmPipelineOptions = {
     ...(draft.pleOnGpu === true ? { pleResidency: "gpu" } : {}),
@@ -364,9 +382,42 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       ...(draft.sampled === true ? { samplerKind: "distribution" as const } : {}),
       ...(Object.keys(session).length === 0 ? {} : { session }),
       ...(Object.keys(pipeline).length === 0 ? {} : { pipeline }),
+      ...(draft.drafter === true ? { drafter: true } : {}),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),
     },
   };
+};
+
+/** The manifest's weights role of the MTP drafter (`gemma4/distribution.py`). */
+const DRAFTER_ROLE = "drafter";
+
+/**
+ * Why a drafter arm cannot run, or `undefined`: the mobile QAT line ships no drafter and its entry
+ * point takes none; a model whose manifest entry declares no `drafter` weights ships none; the
+ * pipeline refuses the drafter with the PLE on the GPU (the drafter's per-layer inputs stay on the
+ * host) and with a decode run-ahead depth (a speculative turn verifies drafts instead of taking
+ * greedy steps); and the tap's host mode cuts the interval between two tokens into one decode
+ * step's segments, while the tokens of one cycle arrive together. The split breakdown goes with the
+ * drafter: it divides the whole decode window by the decode tokens, as the decode ms per token does.
+ */
+const drafterRefusal = (draft: ArmDraft, manifest: Manifest): string | undefined => {
+  const { mount, model } = draft.key;
+  if (entryPointOf(mount) !== "gemma.Pipeline") {
+    return "gemma4QatMobile.Pipeline has no MTP drafter (its line ships none).";
+  }
+  if (!Object.hasOwn(manifest.models[model].weights, DRAFTER_ROLE)) {
+    return `The ${mount} model '${model}' ships no MTP drafter (its manifest entry declares no '${DRAFTER_ROLE}' weights).`;
+  }
+  if (draft.pleOnGpu === true) {
+    return "The drafter cannot go with ple-gpu (the pipeline keeps the drafter's per-layer inputs on the host).";
+  }
+  if (Number(draft.decodeAhead ?? "1") >= 2) {
+    return "The drafter cannot go with a decode run-ahead depth (a speculative turn verifies drafts instead of taking greedy steps).";
+  }
+  if (draft.hostMarks === true) {
+    return "The drafter cannot go with host (the host segments cut the interval between two tokens into one decode step, and the tokens of one speculative cycle arrive together).";
+  }
+  return undefined;
 };
 
 /**

@@ -17,6 +17,7 @@ import {
   type ArmPromptSummary,
   type CandidateCounts,
   hostSummaryText,
+  type SpeculationCounts,
   splitSummaryText,
 } from "./summary.ts";
 
@@ -27,9 +28,12 @@ const fixed = (value: number | undefined, digits: number): string =>
  * One arm and prompt in a line: the arm's label, the median decode rate (and the max), the median
  * decode ms per token, the median over the chats (and the least) of the chat's median interval
  * between two tokens, the ratio of the decode ms per token to arm 1's on the same prompt, the median GPU ms per token of a
- * tapped arm, whether its warm chats generated the same tokens, and — when a chat's stop reports
- * the candidate selection — where the sampled decode steps drew from. Rates at 0.1, times and
- * ratios at 0.001.
+ * tapped arm, whether its warm chats generated the same tokens, — when a chat's stop reports the
+ * candidate selection — where the sampled decode steps drew from, and — for a drafter arm — the
+ * tokens per cycle and the drafts accepted. A drafter arm's line has no token interval: the tokens
+ * of one cycle arrive together, so the interval between two tokens is not a decode step's time
+ * (its median falls near 0 or near a cycle's time by how many drafts are accepted). Rates at 0.1,
+ * times and ratios at 0.001.
  */
 const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
   const { spreads } = entry;
@@ -39,7 +43,7 @@ const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
     benchPrompt(entry.prompt).label,
     `decode ${rate === undefined ? "— tok/s" : `${rate.median.toFixed(1)} tok/s (max ${rate.max.toFixed(1)})`}`,
     `${fixed(spreads.decodeMsPerToken?.median, 3)} ms/token`,
-    ...(spreads.tokenIntervalMsMedian === undefined
+    ...(spreads.tokenIntervalMsMedian === undefined || arm.drafter === true
       ? []
       : [
           `token interval ${fixed(spreads.tokenIntervalMsMedian.median, 3)} ms (min ${fixed(spreads.tokenIntervalMsMedian.min, 3)})`,
@@ -52,8 +56,13 @@ const armPromptLine = (entry: ArmPromptSummary, arm: BenchArm): string => {
       : []),
     entry.distinctOutputs === 1 ? "outputs identical" : `outputs ${entry.distinctOutputs} distinct`,
     ...(entry.candidateSelection === undefined ? [] : [candidateText(entry.candidateSelection)]),
+    ...(entry.speculation === undefined ? [] : [speculationText(entry.speculation)]),
   ].join(" · ");
 };
+
+/** A drafter arm's cycles over its warm chats: tokens per cycle, and the drafts accepted. */
+const speculationText = ({ cycles, drafted, accepted, delivered }: SpeculationCounts): string =>
+  `${cycles === 0 ? "—" : (delivered / cycles).toFixed(3)} tokens/cycle (accepted ${accepted}/${drafted} drafts over ${cycles} cycles)`;
 
 /**
  * Where the warm chats' sampled decode steps drew from: the GPU's candidates (how many were asked

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { buildBenchData } from "../src/gemma4-bench/data.ts";
 import type { RunArm } from "../src/gemma4-bench/run.ts";
 
-const armOf = (options: Pick<RunArm, "session" | "pipeline"> = {}): RunArm => ({
+const armOf = (options: Pick<RunArm, "session" | "pipeline" | "drafter"> = {}): RunArm => ({
   mount: "gemma4-qat-mobile",
   model: "e2b",
   quant: "i4-fast",
@@ -47,6 +47,18 @@ describe("the bench's data", () => {
         pipelineOptions: { pleResidency: "gpu", decodeAhead: 4 },
       },
     ]);
+  });
+
+  it("records per arm whether it decoded with the MTP drafter", () => {
+    const data = buildBenchData({
+      timestampQuery: true,
+      complete: true,
+      settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
+      arms: [armOf(), armOf({ drafter: true })],
+      visits: [],
+      chats: [],
+    });
+    expect(data.arms.map(({ drafter }) => drafter)).toEqual([false, true]);
   });
 
   it("records per arm the GEMV choices its devices ran with when the bench has them, and no such field otherwise", () => {

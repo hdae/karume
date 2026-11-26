@@ -46,8 +46,9 @@ const ARM_FORM = "<mount>/<model>[@<preset>][:<switch>]…";
  * preset that does not declare it), `default-gemv` and `general-sequential` (the profile switches —
  * `PROFILE_SWITCHES` of `./plan.ts`), `integer` (the integer GEMV), `ple-gpu` (the PLE on the GPU),
  * `ahead2` / `ahead4` / `ahead8` (the decode run-ahead depth; one step per batch otherwise),
- * `no-signal` (the chats are sent without an `AbortSignal`) and `sampled` (the distribution's sampler
- * with seed 0, whatever the bench's `sampler` is).
+ * `drafter` (the model's MTP drafter: speculative decode in every cycle), `no-signal` (the chats are
+ * sent without an `AbortSignal`) and `sampled` (the distribution's sampler with seed 0, whatever the
+ * bench's `sampler` is).
  */
 const ARM_SWITCHES = [
   "tap-off",
@@ -61,6 +62,7 @@ const ARM_SWITCHES = [
   "ahead2",
   "ahead4",
   "ahead8",
+  "drafter",
   "no-signal",
   "sampled",
 ] as const;
@@ -108,6 +110,7 @@ const parseArm = (text: string, position: number): NamedArm => {
   let sampled = false;
   let integerGemv = false;
   let pleOnGpu = false;
+  let drafter = false;
   let decodeAhead: DecodeAhead | undefined;
   const seen = new Set<ArmSwitch>();
   for (const name of switchTexts) {
@@ -147,6 +150,9 @@ const parseArm = (text: string, position: number): NamedArm => {
         break;
       case "ple-gpu":
         pleOnGpu = true;
+        break;
+      case "drafter":
+        drafter = true;
         break;
       default:
         if (decodeAhead !== undefined) {
@@ -197,6 +203,7 @@ const parseArm = (text: string, position: number): NamedArm => {
       ...(integerGemv ? { integerGemv: true } : {}),
       ...(pleOnGpu ? { pleOnGpu: true } : {}),
       ...(decodeAhead === undefined ? {} : { decodeAhead }),
+      ...(drafter ? { drafter: true } : {}),
     },
   };
 };

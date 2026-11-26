@@ -5,7 +5,8 @@
  * pipeline through it (the session A/B's arms and probes, the decode bench's arms), so they load a
  * model the same way. The Playground's chat page keeps a builder of its own.
  *
- * No MTP drafter and no image embedder: the workbench's measurements run neither.
+ * No image embedder: the workbench's measurements run none. The MTP drafter is built only when a
+ * load asks for it ({@link GemmaLoad.drafter} — the decode bench's drafter arm).
  */
 
 import {
@@ -30,6 +31,12 @@ export type GemmaLoad = {
   readonly quant: string;
   /** Store the full-layer KV in f16 (`fullStateStorage` of `fromPretrained`); absent = f32. */
   readonly fullStateStorage?: "f16";
+  /**
+   * Build the model's MTP drafter too (`speculative` of `fromPretrained`, at the drafter's own
+   * draft count): `gemma.Pipeline` only — `gemma4QatMobile.Pipeline` has no drafter, so such a
+   * load is refused before any read. Absent = no drafter.
+   */
+  readonly drafter?: true;
   /**
    * Keep only `slots` experts of each routed layer on the GPU (`expertCache` of `fromPretrained` —
    * a mixture-of-experts model only), one count for every layer or one per layer; absent = every
@@ -91,7 +98,8 @@ const ENTRY_POINTS: GemmaEntryPoints<Pipeline, gemma4QatMobile.Pipeline> = {
 
 /**
  * Builds through `entryPoints`: the options every build passes to both entry points, plus the
- * model. A mobile model other than `e2b` / `e4b` is refused here, before any read.
+ * model (and on `gemma.Pipeline` the drafter a load asks for). A mobile model other than `e2b` /
+ * `e4b`, and a mobile load with the drafter, are refused here, before any read.
  */
 export const buildGemmaPipelineWith = async <Regular, Mobile>(
   entryPoints: GemmaEntryPoints<Regular, Mobile>,
@@ -112,7 +120,15 @@ export const buildGemmaPipelineWith = async <Regular, Mobile>(
     ...(onProgress === undefined ? {} : { onProgress }),
   };
   if (entryPointOf(load.mount) === "gemma.Pipeline") {
-    return await entryPoints.regular(ref, { ...common, model: load.model });
+    return await entryPoints.regular(ref, {
+      ...common,
+      model: load.model,
+      // `k` left out: the drafter's own draft count (the graph's exits).
+      ...(load.drafter === true ? { speculative: {} } : {}),
+    });
+  }
+  if (load.drafter === true) {
+    throw new Error("gemma4QatMobile.Pipeline has no MTP drafter (its line ships none)");
   }
   const { model } = load;
   if (!isQatModel(model)) {

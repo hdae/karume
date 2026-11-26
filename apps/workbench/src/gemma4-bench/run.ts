@@ -9,6 +9,10 @@
  * explicitly. The runner never asks for Session diagnostics: a pipeline built without
  * `onRunDiagnostics` keeps its on-GPU greedy selection, which is the decode path measured.
  *
+ * A chat of a drafter arm is sent with `speculative: "always"` (speculation in every cycle, no
+ * self-tuning gate); a chat of any other arm passes no `speculative`, and its pipeline has no
+ * drafter, so it decodes one run per token.
+ *
  * A chat is sent with the run's signal unless its arm says otherwise (`noSignal`). An arm in the
  * tap's host mode gets a signal of its own that follows the run's and notes when it is checked
  * ({@link markedSignal}): the generation loop checks its signal at the boundary before a run (after
@@ -164,6 +168,7 @@ const runChat = async (input: {
     const stream = pipeline.chat(messages, {
       maxNewTokens: settings.newTokens,
       sampler: arm.sampler,
+      ...(arm.drafter === true ? { speculative: "always" as const } : {}),
       ...(chatSignal === undefined ? {} : { signal: chatSignal }),
       // The same callback work in both tap states (the probe reads 0 when off).
       onPrefill: () => {

@@ -45,6 +45,12 @@ export type ArmRecord = {
   /** Whether the arm ran the integer GEMV (`integerGemv: true` passed explicitly). */
   readonly integerGemv: boolean;
   /**
+   * Whether the arm decoded with the model's MTP drafter: built with `speculative` (the drafter's own
+   * draft count) and every chat sent with `speculative: "always"`; its chats' stops carry
+   * `speculation`.
+   */
+  readonly drafter: boolean;
+  /**
    * The Session options passed to `fromPretrained` explicitly, on top of the preset's declaration
    * (`{}` = none).
    */
@@ -124,6 +130,7 @@ export const buildBenchData = (input: {
       hostMarks: arm.hostMarks === true,
       signal: arm.noSignal !== true,
       integerGemv: arm.session?.integerGemv === true,
+      drafter: arm.drafter === true,
       sessionOptions: arm.session ?? {},
       pipelineOptions: arm.pipeline ?? {},
       sampler: arm.sampler,

@@ -143,6 +143,31 @@ describe("the candidate selection in the summary", () => {
   });
 });
 
+describe("the speculation in the summary", () => {
+  const counts = (cycles: number, drafted: number, accepted: number, delivered: number) => ({
+    ...run(0, 10),
+    stop: { speculation: { cycles, drafted, accepted, delivered } },
+  });
+
+  it("adds up the cycles, drafts and tokens of a drafter arm's warm chats", () => {
+    const [entry] = summarizeRuns(
+      [
+        { ...counts(99, 297, 50, 149), cold: true },
+        counts(40, 120, 30, 70),
+        counts(38, 114, 34, 72),
+      ],
+      1,
+      PROMPTS,
+    );
+    expect(entry.speculation).toEqual({ cycles: 78, drafted: 234, accepted: 64, delivered: 142 });
+  });
+
+  it("is absent for an arm whose chats did not speculate", () => {
+    const [entry] = summarizeRuns([run(0, 10), run(0, 10)], 1, PROMPTS);
+    expect(Object.hasOwn(entry, "speculation")).toBe(false);
+  });
+});
+
 describe("a spread", () => {
   it("takes the mean of the middle two for an even count", () => {
     expect(spreadOf([4, 1, 3, 2])).toEqual({ count: 4, min: 1, median: 2.5, max: 4 });

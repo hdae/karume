@@ -21,12 +21,14 @@ export const PIPELINE_CONFIG = {
 
 /**
  * The manifest's JSON text: `models` (the first is the default), each with `presets` (name →
- * session declaration, labelled `<name> label`) and `defaultPreset`.
+ * session declaration, labelled `<name> label`) and `defaultPreset`; the models of `drafters` also
+ * declare the MTP drafter's weights (role `drafter`, `i8`), which every preset of theirs names.
  */
 export const gemmaBenchManifestText = (input: {
   readonly models: readonly string[];
   readonly presets: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly defaultPreset: string;
+  readonly drafters?: readonly string[];
 }): string =>
   JSON.stringify({
     format: "karume/6",
@@ -38,11 +40,23 @@ export const gemmaBenchManifestText = (input: {
         {
           pipeline: "gemma4/1",
           assets: {},
-          weights: { model: { i4: container(`${model}/model.krm`) } },
+          weights: {
+            model: { i4: container(`${model}/model.krm`) },
+            ...((input.drafters ?? []).includes(model)
+              ? { drafter: { i8: container(`${model}/drafter.krm`) } }
+              : {}),
+          },
           quants: Object.fromEntries(
             Object.entries(input.presets).map(([name, session]) => [
               name,
-              { weights: { model: "i4" }, session, label: `${name} label` },
+              {
+                weights: {
+                  model: "i4",
+                  ...((input.drafters ?? []).includes(model) ? { drafter: "i8" } : {}),
+                },
+                session,
+                label: `${name} label`,
+              },
             ]),
           ),
           defaultQuant: input.defaultPreset,
@@ -59,11 +73,30 @@ export const REGULAR = gemmaBenchManifestText({
   defaultPreset: "bf16",
 });
 
+/**
+ * Regular Gemma 4 as its published mirror ships it at 0.24.0: E2B (default) with its MTP drafter,
+ * E4B without one, at `bf16` and `bf16-fast`.
+ */
+export const REGULAR_WITH_DRAFTER = gemmaBenchManifestText({
+  models: ["e2b", "e4b"],
+  presets: { bf16: {}, "bf16-fast": { numerics: { level: "reorder" } } },
+  defaultPreset: "bf16",
+  drafters: ["e2b"],
+});
+
 /** The q4_0 QAT line: E2B (default), E4B, 12B and 26B at `i4` (default) and `i4-fast`. */
 export const QAT = gemmaBenchManifestText({
   models: ["e2b", "e4b", "12b", "26b"],
   presets: { i4: {}, "i4-fast": { numerics: { level: "reorder" }, packedStaticQuantize: true } },
   defaultPreset: "i4",
+});
+
+/** {@link QAT} with the MTP drafters its mirror ships (E2B, E4B and 12B; 26B has none). */
+export const QAT_WITH_DRAFTERS = gemmaBenchManifestText({
+  models: ["e2b", "e4b", "12b", "26b"],
+  presets: { i4: {}, "i4-fast": { numerics: { level: "reorder" }, packedStaticQuantize: true } },
+  defaultPreset: "i4",
+  drafters: ["e2b", "e4b", "12b"],
 });
 
 /**
