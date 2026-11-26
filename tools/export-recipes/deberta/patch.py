@@ -73,6 +73,17 @@ def build_rel_pos_tables(
     return c2p_pos, p2c_pos
 
 
+# Third-party code notice (decided 2026-11-26 — `deberta/THIRD_PARTY_NOTICES.md`).
+# `_external_disentangled_attention_bias` below is adapted from
+# `DisentangledSelfAttention.disentangled_attention_bias` in huggingface/transformers
+# (`src/transformers/models/deberta_v2/modeling_deberta_v2.py`, `transformers==5.14.1`). The
+# shared-key c2p + p2c path is kept statement by statement; building the relative-position tables
+# (the clamp and `build_rpos`) was replaced by receiving them, and the branches for the other
+# `pos_att_type` / `share_att_key` settings were dropped. License: Apache License, Version 2.0
+# (http://www.apache.org/licenses/LICENSE-2.0).
+# Upstream copyright notice, copied verbatim from the header of that file:
+#
+#   Copyright 2020 Microsoft and the Hugging Face Inc. team.
 def _external_disentangled_attention_bias(
     self: nn.Module,
     query_layer: torch.Tensor,
