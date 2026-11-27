@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import tempfile
+import textwrap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -33,6 +34,7 @@ from anima.card import (
     ATTRIBUTION_NOTICE,
     NVIDIA_NOTICE,
     RIGHTS_GRANT_STATEMENT,
+    notice_upstreams,
     render_2_9b_card,
     render_base_card,
     render_extra_card,
@@ -217,54 +219,66 @@ CONTAINER_MODIFICATION = (
 
 
 # SPEC: docs/spec/distribution-cards.md#noticemd
-def notice_markdown(modifications: tuple[str, ...]) -> str:
-    """`NOTICE.md` at the root of the distribution repository.
+def notice_markdown(models: Sequence[str], modifications: tuple[str, ...]) -> str:
+    """`NOTICE.md` at the root of the distribution repository, for a build of `models`.
 
-    One page satisfies the latter half of §3(a) (stating that the rights are granted directly by
-    the Company — {@link RIGHTS_GRANT_STATEMENT}) + §3(b) (display of the Attribution Notice) +
-    §3(d)(i) (stating the modification **inside the Attribution Notice**) + §3(d)(iii) (not to be
-    mistaken for an official product). The verbatim block is {@link ATTRIBUTION_NOTICE} (source of
-    truth: `anima/card.py`); the rest describes facts on the Karume side. The modifications are
-    placed inside the Notice section rather than in a section of their own to match the wording of
-    §3(d)(i) ("include in the Attribution Notice") strictly.
+    The common structure of every notice (the spec): what is redistributed — each upstream of the
+    models by its repository ID ({@link anima.card.notice_upstreams}) — and the license by its full
+    title; then the statements the licenses require in their own words; the changes; the closing
+    paragraph. One page satisfies the latter half of §3(a) (stating that the rights are granted
+    directly by the Company — {@link RIGHTS_GRANT_STATEMENT}) + §3(b) (display of the Attribution
+    Notice) + §3(d)(i) (stating the modification **in the Attribution Notice**) + §3(d)(iii) (not
+    to be mistaken for an official product) + the NVIDIA agreement's §3.1 / §3.2. The license
+    prescribes the words of the Attribution Notice, not a layout, so the notice is the verbatim
+    {@link ATTRIBUTION_NOTICE} (source of truth: `anima/card.py`) followed at once by the statement
+    of the modification and the list of the changes, keeping the two together as §3(d)(i) asks.
     """
+    named = notice_upstreams(models)
+    spelled = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+    opening = textwrap.fill(
+        f"This repository redistributes modified forms of {spelled}, which are licensed under the"
+        f" {CIRCLESTONE_LICENSE_TITLE}; the full license text is distributed alongside this"
+        " repository as LICENSE.md.",
+        width=100,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
     return (
         "\n".join(
             [
-                "# Notice",
+                "# NOTICE",
                 "",
-                "## Attribution Notice",
+                opening,
+                "",
+                RIGHTS_GRANT_STATEMENT,
                 "",
                 ATTRIBUTION_NOTICE,
                 "",
                 "As required by the license, this Attribution Notice also states that the",
                 "applicable CircleStone Model has been modified: this distribution is a Derivative",
-                "of the CircleStone Anima model, modified as follows:",
+                "of the CircleStone Anima model. The following changes were made:",
                 "",
                 *modifications,
                 "",
-                "## Not an official product",
+                "No retraining and no fine-tuning were performed. The original checkpoints are not"
+                " distributed here.",
                 "",
                 "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
                 "approved or validated by CircleStone Labs LLC.",
                 "",
                 # NVIDIA Open Model License §3.1 / §3.2 (rulings 39 a / 40 a, 2026-10-29).
-                "## NVIDIA Open Model License",
-                "",
                 NVIDIA_NOTICE,
-                "",
-                "## License",
-                "",
-                RIGHTS_GRANT_STATEMENT,
-                "",
-                "The full license text is distributed alongside this repository as LICENSE.md.",
             ]
         )
         + "\n"
     )
 
 
-#: Notice of the official repository (karume-anima — CircleStone's 5 variants together).
+#: The full title of the license the notices name (the first line of the bundled text,
+#: {@link LICENSE_SOURCE_PATH}).
+CIRCLESTONE_LICENSE_TITLE = "CircleStone Labs Non-Commercial License v1.2"
+
+#: The changes of the official repository (karume-anima — CircleStone's 5 variants together).
 #: The old base notice's "added an int4 series" contradicted the actual distribution, which had no
 #: i4 preset (corrected on 2026-09-01 — the same-day ruling that removed i4 from every model removed
 #: the int4 line itself; the LoRA baking line of the old turbo notice also went away with the move
@@ -274,45 +288,34 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
 #: only float series (the f16 one left the distribution), so no line names an f16 series any more:
 #: bf16 keeps the upstream BF16 values unchanged (no rounding, no quantization), and the int8
 #: series is the only one whose values differ from upstream.
-OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
-    (
-        CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
-        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
-        "  unchanged (no rounding or quantization).",
-    )
+OFFICIAL_MODIFICATIONS: tuple[str, ...] = (
+    CONTAINER_MODIFICATION,
+    "- An int8-quantized series of the transformer was added alongside the bf16 one.",
+    "- The bf16 series of every component keeps the values of the upstream BF16 weights",
+    "  unchanged (no rounding or quantization).",
 )
 
-#: Notice of the extra repository (karume-anima-extra — third-party fine-tunes). The origins are
-#: left to the README (the same reason as the NOTE above).
-EXTRA_NOTICE_MARKDOWN = notice_markdown(
-    (
-        CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
-        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
-        "  unchanged (no rounding or quantization).",
-        "- Every model in this repository is a community fine-tune of the CircleStone",
-        "  Anima base model; its origin, author and license terms are stated in README.md.",
-    )
+#: The changes of the extra repository (karume-anima-extra — third-party fine-tunes). The origins
+#: are left to the README (the same reason as the NOTE above).
+EXTRA_MODIFICATIONS: tuple[str, ...] = (
+    *OFFICIAL_MODIFICATIONS,
+    "- Every model in this repository is a community fine-tune of the CircleStone",
+    "  Anima base model; its origin, author and license terms are stated in README.md.",
 )
 
-#: Notice of the 2.9B repository (karume-anima-2.9b — Anima-2.9B). The upstream file is BF16
+#: The changes of the 2.9B repository (karume-anima-2.9b — Anima-2.9B). The upstream file is BF16
 #: throughout (928 tensors, header read 2026-11-24), so the bf16 line holds as in the other two.
 #: The model is a third party's modification of the CircleStone model, not Karume's, so the line
-#: that says so names it as such and leaves the origin to the README (the same reason as extra's).
-ANIMA_2_9B_NOTICE_MARKDOWN = notice_markdown(
-    (
-        CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
-        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
-        "  unchanged (no rounding or quantization).",
-        "- The model in this repository is a third party's layer expansion of the CircleStone",
-        "  Anima base model: its transformer was deepened from 28 to 40 blocks. For an accurate",
-        "  description of how it was made and trained, refer to the upstream model card",
-        "  (https://huggingface.co/Gazingstars123/Anima-2.9B). Its origin, author and license",
-        "  terms are stated in README.md.",
-    )
+#: that says so names it as such and refers to the upstream card for how it was made.
+ANIMA_2_9B_MODIFICATIONS: tuple[str, ...] = (
+    *OFFICIAL_MODIFICATIONS,
+    "- The model in this repository is a third party's layer expansion of the CircleStone",
+    "  Anima base model: its transformer was deepened from 28 to 40 blocks. For an accurate",
+    "  description of how it was made and trained, refer to the upstream model card",
+    "  (`Gazingstars123/Anima-2.9B`). Its origin, author and license terms are stated in",
+    "  README.md.",
 )
+
 
 #: Relative output paths (**inside a model subtree**) — the one place the placement table and the
 #: manifest share. They are looked up by role name only, so the spelling cannot move independently
@@ -735,6 +738,12 @@ OFFICIAL_MODELS: tuple[str, ...] = (
 )
 EXTRA_MODELS: tuple[str, ...] = ("anima-wai-v1.0", "anima-copycat-20260610")
 ANIMA_2_9B_MODELS: tuple[str, ...] = (ANIMA_2_9B_MODEL_NAME,)
+
+#: The notices of the three repositories as published (every model of each — a build of fewer
+#: models gets the notice of those, `dist.ROOT_FILES`).
+OFFICIAL_NOTICE_MARKDOWN = notice_markdown(OFFICIAL_MODELS, OFFICIAL_MODIFICATIONS)
+EXTRA_NOTICE_MARKDOWN = notice_markdown(EXTRA_MODELS, EXTRA_MODIFICATIONS)
+ANIMA_2_9B_NOTICE_MARKDOWN = notice_markdown(ANIMA_2_9B_MODELS, ANIMA_2_9B_MODIFICATIONS)
 
 
 @dataclass(frozen=True)
@@ -1531,6 +1540,13 @@ def license_markdown() -> str:
             )
         ],
     )
+
+
+# SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
+def anima_root_files(models: Sequence[str], *, modifications: tuple[str, ...]) -> dict[str, str]:
+    """The legal texts of a build of `models` (the driver replaces a Pipeline's fixed set with them
+    — `dist.ROOT_FILES`): the notice names the upstreams of those models only."""
+    return root_files(notice_markdown(models, modifications))
 
 
 def root_files(notice: str) -> dict[str, str]:

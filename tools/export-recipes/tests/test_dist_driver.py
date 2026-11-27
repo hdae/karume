@@ -618,15 +618,6 @@ class TestThePinsOfEveryPublishedCard:
 #: (docs/spec/distribution-cards.md#sections-and-their-order).
 STANDARD_PREAMBLE = ("What is this", "Base weights and attribution", "Models", "Usage")
 PREAMBLES = {
-    "karume-anima": ("What is this", "Models and their origins", "License", "Models", "Usage"),
-    "karume-anima-extra": (
-        "What is this",
-        "Models and their origins",
-        "License",
-        "Models",
-        "Usage",
-    ),
-    "karume-anima-2.9b": ("What is this", "Models and their origins", "License", "Models", "Usage"),
     "karume-gemma4-qat-mobile": ("Base weights and attribution", "Models"),
 }
 
@@ -840,12 +831,9 @@ class TestTheLicenseNamesOfEveryPublishedRepository:
         assert [name for name in _SHORT_LICENSE_NAMES if name in notice] == []
 
 
-#: The notices that do not name every `base_model` of their card by its repository ID yet: the
-#: Anima ones, whose notices take the common structure in a commit of their own
+#: The notices that do not name every `base_model` of their card by its repository ID: none
 #: (docs/spec/distribution-cards.md#noticemd).
-NOTICES_WITHOUT_EVERY_UPSTREAM_ID = frozenset(
-    {"karume-anima", "karume-anima-extra", "karume-anima-2.9b"}
-)
+NOTICES_WITHOUT_EVERY_UPSTREAM_ID: frozenset[str] = frozenset()
 
 
 class TestTheUpstreamsEveryNoticeNames:
@@ -867,18 +855,16 @@ class TestTheUpstreamsEveryNoticeNames:
         assert bool(unnamed) is (directory in NOTICES_WITHOUT_EVERY_UPSTREAM_ID), unnamed
 
 
-#: The three Anima repositories, whose notice follows the CircleStone license's layout.
-ANIMA_REPOSITORIES = frozenset({"karume-anima", "karume-anima-extra", "karume-anima-2.9b"})
-
 _APACHE = ("apache", "the Apache License, Version 2.0")
 _MIT = ("mit", "the MIT License")
+_CIRCLESTONE = ("circlestone", "the CircleStone Labs Non-Commercial License v1.2")
 
 #: Repository → the primary license text `LICENSE.md` begins with, and the title its `NOTICE.md`
 #: names it by (docs/spec/distribution-cards.md#licensemd and #noticemd).
 PRIMARY_LICENSES = {
-    "karume-anima": ("circlestone", None),
-    "karume-anima-extra": ("circlestone", None),
-    "karume-anima-2.9b": ("circlestone", None),
+    "karume-anima": _CIRCLESTONE,
+    "karume-anima-extra": _CIRCLESTONE,
+    "karume-anima-2.9b": _CIRCLESTONE,
     "karume-birefnet-hr": _MIT,
     "karume-lucida": _MIT,
     "karume-depth-anything-v2": _APACHE,
@@ -928,11 +914,6 @@ class TestTheNoticeOfEveryPublishedRepository:
         notice = _root_files(pipeline, models)[NOTICE_FILENAME]
         text = _normalized(notice)
 
-        if directory in ANIMA_REPOSITORIES:
-            assert notice.startswith("# Notice\n\n## Attribution Notice\n")
-            assert "modified as follows:" in text
-            assert "No retraining and no fine-tuning were performed." not in text
-            return
         _, title = PRIMARY_LICENSES[directory]
         changes = text.index("The following changes were made:")
         assert notice.startswith("# NOTICE\n\n")

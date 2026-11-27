@@ -13,12 +13,12 @@ that do not exist** in the manifest.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 
-from _shared.upstream import hf_upstreams
+from _shared.upstream import UPSTREAM_AUTHORS, hf_upstreams
 from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -121,7 +121,7 @@ PERMISSIONS_RETRIEVED = "2026-08-22"
 UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     "anima-turbo-v1.1": UpstreamModel(
         title="Anima Turbo v1.1",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.1.safetensors",
         permissions=(),
@@ -129,7 +129,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     ),
     "anima-v1.0": UpstreamModel(
         title="Anima Base v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
         file=None,
         permissions=(),
@@ -137,7 +137,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     ),
     "anima-aesthetic-v1.1": UpstreamModel(
         title="Anima Aesthetic v1.1",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.1.safetensors",
         permissions=(),
@@ -148,7 +148,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     # necessarily better").
     "anima-turbo-v1.0": UpstreamModel(
         title="Anima Turbo v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.0.safetensors",
         permissions=(),
@@ -156,7 +156,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     ),
     "anima-aesthetic-v1.0": UpstreamModel(
         title="Anima Aesthetic v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.0.safetensors",
         permissions=(),
@@ -194,7 +194,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     # (`inputs/anima/anima-2.9b-original/REVISION.txt`).
     "anima-2.9b-preview-v1": UpstreamModel(
         title="Anima-2.9B preview v1",
-        author="Gazingstars123",
+        author=UPSTREAM_AUTHORS["Gazingstars123"],
         source="https://huggingface.co/Gazingstars123/Anima-2.9B",
         file="Anima-2.9B-preview-v1.safetensors",
         permissions=(),
@@ -375,7 +375,7 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "first part carries the graph and model descriptors).",
         RUNTIME_SENTENCE,
         "",
-        'Its card (at the revision listed under "Models and their origins" below) describes it',
+        'Its card (at the commit listed under "Base weights and attribution" below) describes it',
         "as follows:",
         "",
         *(line for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION for line in (f"> {quote}", "")),
@@ -520,10 +520,40 @@ def _source(upstream: UpstreamModel) -> str:
     return link if upstream.version is None else f"{link} (version `{upstream.version}`)"
 
 
-def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
-    """Origins per model (**only the models in this repository**, listed from the manifest).
+#: The changes this repository made, as the attribution section sums them up (the notice lists
+#: them in full — `anima.distribution`); the same for the three repositories, whose notices add only
+#: what their models are.
+ANIMA_CHANGES = (
+    "- **Changes made here** (listed in full in `NOTICE.md`): conversion into the Karume container",
+    "  format, and an int8-quantized series of the transformer beside the bf16 one; the bf16",
+    "  series of every component keeps the upstream BF16 values unchanged. No retraining and no",
+    "  fine-tuning.",
+)
 
-    MUST: the list comes from the manifest — holding the origin table independently of the
+
+def _model_lines(name: str) -> list[str]:
+    """One model of the repository: what it is, who made it, and where it was converted from (with
+    its pin), followed by the permissions its source page lists when it has any."""
+    upstream = _upstream_model(name)
+    converted = "" if upstream.file is None else f"`{upstream.file}` of "
+    permissions = (
+        f" Permissions listed on the source page (as of {PERMISSIONS_RETRIEVED}):"
+        if upstream.permissions
+        else ""
+    )
+    return [
+        f"- **`{name}`** — {upstream.title}, by {upstream.author}: {converted}"
+        f"{_source(upstream)}.{permissions}",
+        *(f"  - `{key}`: {value}" for key, value in upstream.permissions),
+    ]
+
+
+def _attribution(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
+    """The attribution section: where each model of the repository comes from, then the license
+    terms — the **combination** of the upstream redistribution terms and the third-party
+    fine-tunes' permissions — the changes and the upstream cards.
+
+    MUST: the models come from the manifest — holding the origin table independently of the
     assembly arguments means that the day the repository is assembled with one model left out, a
     card carrying "the attribution of a model that is not included" goes out.
 
@@ -532,42 +562,11 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
     orders in the same card (it actually happened — `anima-copycat-…` came first and was pointed
     out, 2026-08-22). The manifest order is the assembly order itself, with the default model
     first, and it is also the order recommended to the reader.
+
+    The Attribution Notice is also shown verbatim in the card (the display requirement of §3(b)),
+    and the statement of the rights grant in the latter half of §3(a)
+    ({@link RIGHTS_GRANT_STATEMENT}) is emitted from the same single constant as `NOTICE.md`.
     """
-    lines = [
-        "## Models and their origins",
-        "",
-        *intro,
-    ]
-    for name in manifest["models"]:
-        upstream = _upstream_model(name)
-        lines += [
-            "",
-            f"### `{name}` — {upstream.title}",
-            "",
-            f"- **Author**: {upstream.author}",
-            f"- **Source**: {_source(upstream)}",
-        ]
-        if upstream.file is not None:
-            lines.append(f"- **Converted from**: `{upstream.file}`")
-        if upstream.permissions:
-            lines += [
-                "",
-                f"Permissions listed on the source page (as of {PERMISSIONS_RETRIEVED}):",
-                "",
-                *(f"- `{key}`: {value}" for key, value in upstream.permissions),
-            ]
-    return lines
-
-
-def _base_license(manifest: Mapping[str, Any]) -> list[str]:
-    """Licence section — the **combination** of the upstream redistribution terms and the
-    third-party fine-tunes' permissions.
-
-    The Notice text is also shown verbatim in the card (the same reason as on the turbo side — the
-    display requirement of §3(b)). The statement of the rights grant in the latter half of §3(a)
-    ({@link RIGHTS_GRANT_STATEMENT}) is also emitted from the same single constant as `NOTICE.md`.
-    """
-    # Manifest order, as in the origins section (the same MUST — no two orders in one card).
     fine_tunes = [name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions]
     same_license = [
         name
@@ -575,7 +574,11 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         if dict(UPSTREAM_MODELS[name].permissions).get("allowDifferentLicense") == "false"
     ]
     lines = [
-        "## License",
+        "## Base weights and attribution",
+        "",
+        *intro,
+        "",
+        *(line for name in manifest["models"] for line in _model_lines(name)),
         "",
         "Every model here derives from the CircleStone Anima base model and is licensed",
         f"**{ANIMA_METADATA.license_name}** v1.2 (non-commercial use only). This repository ships",
@@ -610,9 +613,31 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
         " approved or",
         "  validated by CircleStone Labs LLC.",
+        *ANIMA_CHANGES,
         *upstream_cards(_upstream_card_links(manifest)),
     ]
     return lines
+
+
+def notice_upstreams(models: Sequence[str]) -> list[str]:
+    """How `NOTICE.md` names the upstreams of `models` (`anima.distribution.notice_markdown`): each
+    HF source and the base model's Diffusers repository by its repository ID in code font, a
+    source without one by its title and page address — the upstreams `base_model` and the house
+    sentence name, in the same order."""
+    off_hub = [
+        f"{upstream.title} (`{upstream.source.removeprefix('https://')}`)"
+        for upstream in (_upstream_model(name) for name in models)
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    repos = [
+        upstream.source.removeprefix(_HF_URL)
+        for upstream in (_upstream_model(name) for name in models)
+        if upstream.source.startswith(_HF_URL)
+    ]
+    return [
+        *off_hub,
+        *(f"`{repo}`" for repo in dict.fromkeys([*repos, *ANIMA_METADATA.base_model])),
+    ]
 
 
 def _upstream_card_links(manifest: Mapping[str, Any]) -> list[str]:
@@ -626,7 +651,7 @@ def _upstream_card_links(manifest: Mapping[str, Any]) -> list[str]:
     return [*off_hub, *(hf_link(repo) for repo in _anima_metadata(manifest).base_model)]
 
 
-#: Introduction of the origins section (the facts differ per repository — official / extra).
+#: Introduction of the attribution section (the facts differ per repository).
 #: Where the shared components come from (the text encoder, VAE and tokenizers of the base model's
 #: Diffusers repository, at the commit they were read at).
 _SHARED_COMPONENTS = (
@@ -708,9 +733,7 @@ def render_base_card(
             _introduction(manifest, ANIMA_OFFICIAL_TITLE),
             _official_overview(manifest),
             [""],
-            _origins(manifest, OFFICIAL_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, OFFICIAL_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],
@@ -737,9 +760,7 @@ def render_extra_card(
             _introduction(manifest, ANIMA_EXTRA_TITLE),
             _extra_overview(manifest),
             [""],
-            _origins(manifest, EXTRA_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, EXTRA_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],
@@ -771,9 +792,7 @@ def render_2_9b_card(
             _introduction(manifest, ANIMA_2_9B_TITLE),
             _2_9b_overview(manifest),
             [""],
-            _origins(manifest, ANIMA_2_9B_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, ANIMA_2_9B_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],

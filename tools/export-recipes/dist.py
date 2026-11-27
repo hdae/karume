@@ -194,6 +194,19 @@ ROOT_FILES: Mapping[str, Callable[[Sequence[str]], Mapping[str, str]]] = {
     "irodori": irodori_distribution.irodori_root_files,
     # The notice names the checkpoint of each model built.
     "siglip2": siglip2_distribution.siglip2_root_files,
+    # The notices name the upstreams of the models built.
+    "anima": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.OFFICIAL_MODIFICATIONS,
+    ),
+    "anima-extra": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.EXTRA_MODIFICATIONS,
+    ),
+    "anima-2.9b": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.ANIMA_2_9B_MODIFICATIONS,
+    ),
 }
 
 #: Keeps the UX of the old `karume dist` (no arguments) on the driver side.

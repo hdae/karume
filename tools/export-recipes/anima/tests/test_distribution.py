@@ -58,6 +58,7 @@ from anima.distribution import (
     ANIMA_WEIGHTS,
     CALIB_PROVENANCE_FILE,
     EXTRA_MODELS,
+    EXTRA_MODIFICATIONS,
     EXTRA_NOTICE_MARKDOWN,
     EXTRA_PIPELINE,
     EXTRA_REPO_NAME,
@@ -2975,7 +2976,9 @@ class TestLegalTexts:
         )
 
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
-        assert notice == EXTRA_NOTICE_MARKDOWN
+        # The notice of the model built (the driver passes the models — `dist.ROOT_FILES`).
+        assert notice == notice_markdown(("anima-wai-v1.0",), EXTRA_MODIFICATIONS)
+        assert "copycat" not in notice
         self._assert_license_layout((out_dir / "LICENSE.md").read_bytes())
         assert ATTRIBUTION_NOTICE in notice
 
@@ -3002,7 +3005,7 @@ class TestLegalTexts:
         in the `NOTICE.md` placed in both repositories — if only one path forgot the constant,
         that repository alone would lack §3(a).
         """
-        assert RIGHTS_GRANT_STATEMENT in notice_markdown(("- A modification.",))
+        assert RIGHTS_GRANT_STATEMENT in notice_markdown(OFFICIAL_MODELS, ("- A modification.",))
         official = (self._run(tmp_path / "official") / "NOTICE.md").read_text(encoding="utf-8")
         extra_out = self._run(
             tmp_path / "extra",
@@ -3017,8 +3020,8 @@ class TestLegalTexts:
         self, tmp_path: Path
     ) -> None:
         """NVIDIA Open Model License §3.1 / §3.2 — the attribution notice, verbatim on its own
-        line, and "Built on NVIDIA Cosmos", from the one shared constant, in its own section
-        before the license statement.
+        line, and "Built on NVIDIA Cosmos", from the one shared constant, after the closing
+        paragraph (where the notice puts the statements a license requires in its own words).
 
         Checked in both repositories' `NOTICE.md`, like the rights-grant statement above — a
         repository whose path forgot the constant would lack the §3.1 notice.
@@ -3035,23 +3038,26 @@ class TestLegalTexts:
             assert NVIDIA_NOTICE in notice
             assert "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" in lines
             assert "Built on NVIDIA Cosmos." in lines
-            _, _, after_disclaimer = notice.partition("## Not an official product")
-            nvidia_section, _, _ = after_disclaimer.partition("## License")
-            assert "## NVIDIA Open Model License\n" in nvidia_section
-            assert NVIDIA_NOTICE in nvidia_section
+            _, _, after_closing = notice.partition(
+                "No retraining and no fine-tuning were performed."
+            )
+            assert NVIDIA_NOTICE in after_closing
+            assert notice.endswith(NVIDIA_NOTICE + "\n")
 
     def test_the_notice_states_the_modifications_inside_the_attribution_notice(
         self, tmp_path: Path
     ) -> None:
-        """§3(d)(i) — states that it was modified **inside the Attribution Notice**."""
+        """§3(d)(i) — states that it was modified **in the Attribution Notice**: the statement and
+        the list of the changes follow the verbatim notice at once."""
         text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
-        # The modifications are not a separate section but inside the Attribution Notice
-        # section (before the next heading).
-        notice_section = text.split("## Not an official product")[0]
-        assert "## Attribution Notice" in notice_section
+        _, _, after_notice = text.partition(ATTRIBUTION_NOTICE + "\n\n")
+        notice_section, _, _ = after_notice.partition("No retraining and no fine-tuning")
+        assert notice_section.startswith(
+            "As required by the license, this Attribution Notice also states that the\n"
+        )
         flat = self._flat(notice_section)
         assert flat.count("this Attribution Notice also states that") == 1
-        assert flat.count("modified as follows:") == 1
+        assert flat.count("The following changes were made:") == 1
         # The modifications actually made (conversion to the container format and the added
         # quantized series) are listed.
         assert "converted into the container format" in flat
@@ -3074,8 +3080,9 @@ class TestLegalTexts:
             "This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
             " approved or validated by CircleStone Labs LLC." in self._flat(text)
         )
-        assert text.endswith(
-            "The full license text is distributed alongside this repository as LICENSE.md.\n"
+        assert (
+            "the full license text is distributed alongside this repository as LICENSE.md."
+            in self._flat(text)
         )
 
     def test_the_assembled_card_displays_the_attribution_too(self, tmp_path: Path) -> None:

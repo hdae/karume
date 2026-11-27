@@ -85,8 +85,9 @@ item "The model cards and notices across repositories".
 The level-2 sections come in this order:
 
 1. `## What is this` — except on `karume-gemma4-qat-mobile`, which has four unheaded lines in its place.
-2. The attribution: `## Base weights and attribution`, or, on the three Anima repositories, `## Models and their
-   origins` (one `### `<model>` — <title>` block per model) followed by `## License`.
+2. The attribution: `## Base weights and attribution`. On the three Anima repositories it lists each model as a bullet
+   (title, author, source and pin, the permissions its source page lists), then the license terms and the notices
+   the CircleStone and NVIDIA licenses require in their own words.
 3. `## Models` — the model table of `karume.modelcard.models`.
 4. `## Usage` — except on `karume-gemma4-qat-mobile`.
 5. The family's own sections, where it has any: `## Long context` (`karume-gemma4-qat`); `## Prompts`, `## Accepted
@@ -134,11 +135,11 @@ The level-2 sections come in this order:
   not by the text's title. Two kinds of words keep a license's own name: a clause the card cites ("per Apache 2.0
   §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). The three Gemma 4 cards
   are the exception: they write "licensed **Apache 2.0**", with the license page and the text linked.
-- Sixteen cards (all but the three Anima ones) carry a "**Changes made here**" bullet in the attribution section
-  summarising the changes. Its pointer differs: "(also listed in `NOTICE.md`…)" on eleven cards, "(listed in full in
-  `NOTICE.md`…)" on `karume-gemma4-qat-mobile`, `karume-moss-image`, `karume-umt5-xxl` and `karume-wan2.2`, none on
-  `karume-sbv2-jvnv`. Every Apache 2.0 card adds "per Apache 2.0 §4(b)". The Anima cards' `## License` paragraph
-  says that `NOTICE.md` holds the attribution notices and the list of modifications.
+- Every card carries a "**Changes made here**" bullet in the attribution section summarising the changes. Its pointer
+  differs: "(also listed in `NOTICE.md`…)" on eleven cards, "(listed in full in `NOTICE.md`…)" on the three Anima
+  cards, `karume-gemma4-qat-mobile`, `karume-moss-image`, `karume-umt5-xxl` and `karume-wan2.2`, none on
+  `karume-sbv2-jvnv`. Every Apache 2.0 card adds "per Apache 2.0 §4(b)". The Anima cards' license paragraph says
+  that `NOTICE.md` holds the attribution notices and the list of modifications.
 - A sentence an upstream license requires in its own words is kept as it is, beside the non-endorsement sentence,
   which does not stand in for it: the CircleStone attribution and rights-grant notices and the NVIDIA notice (Anima),
   the Black Forest Labs non-endorsement (MOSS-Image).
@@ -189,13 +190,17 @@ The level-2 sections come in this order:
   paragraph, verbatim: the Gemma `NOTICE` line first in `karume-irodori-v4-large`, the Black Forest Labs
   non-endorsement in `karume-moss-image`, the share-alike statement after the closing in `karume-sbv2-jvnv`, the
   upstream use-policy quotation after the closing in `karume-embeddinggemma-2`.
-- The three Anima notices open with `# Notice` and follow the CircleStone license's layout: `## Attribution Notice`
-  (the notice, then the modifications after "modified as follows:"), `## Not an official product`, `## NVIDIA Open
-  Model License`, `## License`. They have no closing paragraph.
+- The three Anima notices take the same structure, keeping every statement the CircleStone and NVIDIA licenses
+  require: after the opening paragraph, the rights-grant statement of CircleStone §3(a) and the Attribution Notice of
+  §3(b) verbatim, followed at once by the statement of §3(d)(i) that the model was modified ("As required by the
+  license, this Attribution Notice also states that …") and "The following changes were made:" with the list; after
+  the closing paragraph, the non-endorsement statement of §3(d)(iii) and the NVIDIA notice (§3.1 / §3.2). The license
+  prescribes the words of the Attribution Notice and that the statement of the modification is included in it, not
+  a layout, so the notices have no headings of their own.
 - A notice names each upstream — every `base_model` of its card — by its repository ID in code font
   (`` `<owner>/<name>` ``), without a link, and a Karume repository it references the same way
-  (`` `hdae/<name>` ``); it does not point at `README.md` for an upstream's name. The three Anima notices name theirs
-  in prose.
+  (`` `hdae/<name>` ``); it does not point at `README.md` for an upstream's name. A Civitai fine-tune, which has no
+  repository ID, is named by its title and its page address in code font (`karume-anima-extra`).
 
 ## LICENSE.md
 

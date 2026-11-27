@@ -367,8 +367,7 @@ class TestOfficialCard:
         """NVIDIA Open Model License §3.1 / §3.2 — the same constant as `NOTICE.md`, inside the
         License section, with the verbatim attribution notice on its own line and "Built on
         NVIDIA Cosmos" (§3.2 asks for it in the product documentation)."""
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         lines = section.split("\n")
         assert NVIDIA_NOTICE in section
         assert "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" in lines
@@ -376,8 +375,7 @@ class TestOfficialCard:
 
     def test_the_license_section_says_license_md_holds_both_texts(self, card: str) -> None:
         """`LICENSE.md` is no longer one text: the card must not call it "the full license text"."""
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         flat = " ".join(section.split())
         assert "(the full license text)" not in flat
         assert (
@@ -392,8 +390,7 @@ class TestOfficialCard:
         It is the first thing a reader wants to know, so the License section names it (checked
         against the primary source 2026-09-01).
         """
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         flat = " ".join(section.split())
         assert (
             "Outputs you generate are yours to use for any purpose, including commercially" in flat
@@ -403,16 +400,14 @@ class TestOfficialCard:
     def test_the_license_section_points_at_the_two_files_shipped_alongside(self, card: str) -> None:
         """The license text of §3(a) and the Notice of §3(d) are shipped alongside — the card says
         where they are."""
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         assert "`LICENSE.md`" in section
         assert "`NOTICE.md`" in section
 
     def test_the_license_section_names_the_bundled_version(self, card: str) -> None:
         """The section names the version of the text shipped as `LICENSE.md` (v1.2 — ruling 37 a,
         2026-10-29); the §2(e) it cites for Outputs is the v1.2 numbering."""
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         flat = " ".join(section.split())
         title = LICENSE_SOURCE_PATH.read_text(encoding="utf-8").splitlines()[0]
         assert title == "CircleStone Labs Non-Commercial License v1.2"
@@ -422,8 +417,7 @@ class TestOfficialCard:
     def test_the_license_section_denies_any_official_standing(self, card: str) -> None:
         """§3(d)(iii) — must not be mistaken for an official or endorsed product (checked as **a
         sentence**, regardless of where lines wrap)."""
-        _, _, license_section = card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(card)
         assert (
             "not an official product of CircleStone Labs LLC, and it is not endorsed, approved or"
             " validated by CircleStone Labs LLC." in " ".join(section.split())
@@ -442,10 +436,9 @@ class TestOfficialCard:
     def test_it_lists_the_origin_of_every_model_in_the_manifest(self, card: str) -> None:
         for name in (OFFICIAL_DEFAULT, OFFICIAL_SECOND):
             upstream = UPSTREAM_MODELS[name]
-            assert f"### `{name}` — {upstream.title}" in card
-            assert upstream.author in card
+            assert f"- **`{name}`** — {upstream.title}, by {upstream.author}:" in card
             assert upstream.source in card
-            assert f"- **Converted from**: `{upstream.file}`" in card
+            assert f": `{upstream.file}` of " in card
 
     def test_it_lists_the_origins_in_manifest_order(self, card: str) -> None:
         """The origins section keeps the manifest's order — the same order as the `models` table and
@@ -459,7 +452,7 @@ class TestOfficialCard:
         assert order != sorted(order), (
             "an order that equals name order cannot test the ordering claim"
         )
-        positions = [card.index(f"### `{name}` — ") for name in order]
+        positions = [card.index(f"- **`{name}`** — ") for name in order]
         assert positions == sorted(positions)
 
     def test_it_refuses_a_model_whose_origin_is_unknown(self) -> None:
@@ -623,14 +616,11 @@ class TestLayeredCard:
     def test_it_lists_the_origin_with_the_revision_read(self, layered_card: str) -> None:
         upstream = UPSTREAM_MODELS[LAYERED]
         assert upstream.source == "https://huggingface.co/Gazingstars123/Anima-2.9B"
-        assert f"### `{LAYERED}` — {upstream.title}" in layered_card
-        assert f"- **Author**: {upstream.author}" in layered_card
         assert (
-            "- **Source**: [Gazingstars123/Anima-2.9B](https://huggingface.co/Gazingstars123/Anima-2.9B)"
-            " at commit `9f9cb502dbae7a616c3cc5a530633427fe735665`"
-        ) in layered_card.splitlines()
-        assert (
-            "- **Converted from**: `Anima-2.9B-preview-v1.safetensors`"
+            f"- **`{LAYERED}`** — {upstream.title}, by {upstream.author}:"
+            " `Anima-2.9B-preview-v1.safetensors` of"
+            " [Gazingstars123/Anima-2.9B](https://huggingface.co/Gazingstars123/Anima-2.9B)"
+            " at commit `9f9cb502dbae7a616c3cc5a530633427fe735665`."
         ) in layered_card.splitlines()
 
     def test_a_row_without_a_revision_prints_none(self, card: str, extra_card: str) -> None:
@@ -654,8 +644,7 @@ class TestLayeredCard:
     def test_it_carries_every_legal_text_and_no_third_party_permission_note(
         self, layered_card: str
     ) -> None:
-        _, _, license_section = layered_card.partition("## License")
-        section, _, _ = license_section.partition("## Models")
+        section = _attribution_section(layered_card)
         flat = " ".join(section.split())
         for text in (ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT, NVIDIA_NOTICE):
             assert text in section
@@ -685,8 +674,7 @@ class TestLayeredCard:
         headings = [line for line in layered_card.splitlines() if line.startswith("## ")]
         assert headings == [
             "## What is this",
-            "## Models and their origins",
-            "## License",
+            "## Base weights and attribution",
             "## Models",
             "## Usage",
             f"## Model: {LAYERED}",
@@ -748,8 +736,7 @@ class TestSections:
         headings = [line for line in card.splitlines() if line.startswith("## ")]
         assert headings == [
             "## What is this",
-            "## Models and their origins",
-            "## License",
+            "## Base weights and attribution",
             "## Models",
             "## Usage",
             f"## Model: {OFFICIAL_DEFAULT}",
@@ -762,8 +749,7 @@ class TestSections:
         headings = [line for line in extra_card.splitlines() if line.startswith("## ")]
         assert headings == [
             "## What is this",
-            "## Models and their origins",
-            "## License",
+            "## Base weights and attribution",
             "## Models",
             "## Usage",
             f"## Model: {EXTRA_DEFAULT}",
@@ -979,6 +965,13 @@ class TestPipelineGate:
         manifest["models"][OFFICIAL_SECOND]["pipeline"] = "sbv2/1"
         with pytest.raises(ValueError, match="sbv2/1"):
             _official(manifest)
+
+
+def _attribution_section(card: str) -> str:
+    """The card's attribution section (`## Base weights and attribution`, up to `## Models`)."""
+    _, _, rest = card.partition("## Base weights and attribution")
+    section, _, _ = rest.partition("## Models")
+    return section
 
 
 def _license_fields(front_matter: str) -> list[str]:

@@ -52,7 +52,8 @@ from anima.distribution import (
     ANIMA_BASE_MODEL_NAME,
     ANIMA_MODELS,
     ANIMA_QUANT_ABBREVIATIONS,
-    CONTAINER_MODIFICATION,
+    OFFICIAL_MODELS,
+    OFFICIAL_MODIFICATIONS,
     anima_model,
     anima_plan,
     anima_sources,
@@ -84,14 +85,12 @@ EVAL_PIPELINE = "anima-i4-adaln8-eval"
 #: rule at `root_files` below, "do not practise building a distribution without the modification
 #: notice", would not hold.
 EVAL_NOTICE_MARKDOWN = notice_markdown(
+    OFFICIAL_MODELS,
     (
-        CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the bf16 one.",
-        "- The bf16 series of every component keeps the values of the upstream BF16 weights",
-        "  unchanged (no rounding or quantization).",
+        *OFFICIAL_MODIFICATIONS,
         "- A GPTQ-calibrated int4-quantized series of the transformer was added for local",
         "  evaluation; its adaLN linears and the linears outside the blocks stay int8.",
-    )
+    ),
 )
 
 
