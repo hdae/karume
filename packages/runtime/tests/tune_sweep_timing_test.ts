@@ -15,7 +15,9 @@
 // The GEMV sweep's skipping at M = 4 and 8: a reorder candidate its M = 1 group leaves unadoptable is
 // not measured there (faults: a candidate ×1.05 the default's choice at M = 1, one screened at M = 1);
 // a run narrowed to M = 4 skips nothing. With the explore set's rule, M = 4 prepares only the three
-// fastest rows of M = 1 and the row-blocked form of their lanes (fault: the full set's rule).
+// fastest rows of M = 1 and the row-blocked form of their lanes (fault: the full set's rule), and
+// times a carried row whose row-blocked form goes on however far beyond the margin it is (fault: the
+// margin alone).
 //
 // The GEMV sweep's progress steps: each phase of a row count counts from 0 to its total (fault: a
 // kernel screened, so the calibration counts one kernel fewer than the quick look).
@@ -56,6 +58,7 @@ import {
   gemvBaseline,
   gemvCandidates,
   gemvExploreCarriedFromM1,
+  gemvExploreQuickLookGoesOn,
   type GemvMeasurementPlan,
   gemvProfileChoice,
   gemvProgram,
@@ -84,6 +87,7 @@ import {
   warmStart,
 } from "../src/tune/harness.ts";
 import {
+  EXPLORE_QUICK_LOOK_MARGIN,
   QUICK_LOOK_MARGIN,
   WARM_START_MAX_NS,
   WARM_START_MIN_NS,
@@ -857,6 +861,58 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
     assertEquals(rowAt(result.rows, 4, "staged-l32").rounds?.length, 2);
     // staged-l2 at ×2 the default's choice: screened by this group's quick look, not skipped
     assertEquals(rowAt(result.rows, 4, "staged-l2").screened, true);
+  });
+
+  it("times at M = 4, with the explore set's rule, the unblocked form of a carried row whose row-blocked form goes on, however far the margin would screen it (fault: the margin alone)", async () => {
+    // At M = 1 staged-l16 is ×1.43 the default's parallel-l4. At M = 4 (a parallel kernel's key does
+    // not hold M: the same times) it is ×1.4 the reference staged-l4r4, beyond the margin, while its
+    // row-blocked staged-l16r4 is faster than the reference
+    const one = namedPlan(PLE_CASE, 1, ["parallel-l4", "staged-l16"]);
+    const four = namedPlan(PLE_CASE, 4, [
+      "staged-l4r4",
+      "parallel-l4",
+      "staged-l16",
+      "staged-l16r4",
+    ]);
+    assertEquals(four.profile.reorder, "staged-l4r4");
+    const keyIn = (plan: GemvMeasurementPlan, name: string): string => {
+      const candidate = plan.candidates.find((entry) => entry.name === name);
+      if (candidate === undefined) throw new Error(name);
+      return keyAt(PLE_CASE, plan.m, candidate);
+    };
+    const exploreTimes = new Map([
+      [keyIn(one, "parallel-l4"), 10_000],
+      [keyIn(one, "staged-l16"), 7_000],
+      [keyIn(four, "staged-l4r4"), 5_000],
+      [keyIn(four, "staged-l16r4"), 4_000],
+    ]);
+    const sweepExplore = (rule: boolean) =>
+      withContext({ gpuNs: byKey(exploreTimes) }, (context) =>
+        sweepGemvCase(context, PLE_CASE, [one, four], {
+          rounds: 2,
+          tolerance: WIDE,
+          quickLookMargin: EXPLORE_QUICK_LOOK_MARGIN,
+          carriedFromM1: gemvExploreCarriedFromM1,
+          ...(rule ? { quickLookGoesOn: gemvExploreQuickLookGoesOn } : {}),
+        }),
+      );
+    const kept = await sweepExplore(true);
+    for (const name of ["staged-l4r4", "staged-l16", "staged-l16r4"]) {
+      const row = rowAt(kept.rows, 4, name);
+      assertEquals(
+        [row.screened, row.skipped, row.rounds?.length],
+        [undefined, undefined, 2],
+        name,
+      );
+    }
+    // The default's row of M = 1 is no candidate (the derivation reads it as the reference): the
+    // margin screens it
+    assertEquals(rowAt(kept.rows, 4, "parallel-l4").screened, true);
+    assertEquals(kept.summaries.find(({ m }) => m === 4)?.screened, 1);
+    // The control: the margin alone screens staged-l16 out
+    const margin = await sweepExplore(false);
+    assertEquals(rowAt(margin.rows, 4, "staged-l16").screened, true);
+    assertEquals(rowAt(margin.rows, 4, "staged-l16r4").rounds?.length, 2);
   });
 
   it("skips nothing at M = 4 when its M = 1 baseline was not timed: that group reads nothing (fault: the baseline's pipeline cannot be made at M = 1)", async () => {

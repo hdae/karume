@@ -348,9 +348,7 @@ export type GemvM1Group = {
  */
 export const gemvCarriedFromM1 = (
   m: number,
-  candidate: Pick<GemvCandidate, "name" | "class"> & {
-    readonly choice?: Pick<LinearGemvChoice, "lanes" | "parallelRows"> | LinearGemmChoice;
-  },
+  candidate: Pick<GemvCandidate, "name" | "class"> & { readonly choice?: CarriedChoice },
   references: { readonly exact: string; readonly reorder: string },
   first: GemvM1Group | undefined,
 ): boolean => {
@@ -359,17 +357,21 @@ export const gemvCarriedFromM1 = (
   // The default's choice at M = 1 is its row's own kernel: where the row carries a row block, the
   // reference at `m` is the row-blocked one, and this is what shows whether the block pays here
   if (candidate.name === first.profile.reorder) return true;
-  // The GEMM (a float-stored weight's reference) has no lanes and no row block
-  const { choice } = candidate;
-  const lanes =
-    choice !== undefined && "parallelRows" in choice && choice.parallelRows !== undefined
-      ? choice.lanes
-      : undefined;
+  const lanes = rowBlockLanes(candidate.choice);
   if (lanes === undefined) return carriedByItsRow(candidate.name, first);
   return [gemvParallelName("parallel", lanes), gemvParallelName("staged", lanes)].some(
     (base) => base === first.profile.reorder || carriedByItsRow(base, first),
   );
 };
+
+/** The candidate's choice as the rules of what M = 1 carries read it. */
+type CarriedChoice = Pick<LinearGemvChoice, "lanes" | "parallelRows"> | LinearGemmChoice;
+
+/** The lanes of a row-blocked candidate (`undefined` for any other — the GEMM has no lanes and no row block). */
+const rowBlockLanes = (choice: CarriedChoice | undefined): number | undefined =>
+  choice !== undefined && "parallelRows" in choice && choice.parallelRows !== undefined
+    ? choice.lanes
+    : undefined;
 
 /** Whether the M = 1 row of `name` leaves the candidate adoptable ({@link gemvCarriedFromM1}'s conditions). */
 const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
@@ -403,6 +405,18 @@ const PARALLEL_ROW_LANES: ReadonlyMap<string, number> = new Map(
 );
 
 /**
+ * The plain or staged rows of a case's M = 1 group that the `explore` set carries for their own
+ * times ({@link gemvExploreCarriedFromM1}): the {@link GEMV_EXPLORE_CARRIED_ROWS} fastest that their
+ * rows leave adoptable.
+ */
+const exploreFastestRows = (first: GemvM1Group): string[] =>
+  first.rows
+    .filter((row) => PARALLEL_ROW_LANES.has(row.candidate) && carriedByItsRow(row.candidate, first))
+    .toSorted((a, b) => (a.perDispatch ?? 0) - (b.perDispatch ?? 0))
+    .slice(0, GEMV_EXPLORE_CARRIED_ROWS)
+    .map((row) => row.candidate);
+
+/**
  * {@link gemvCarriedFromM1} for the `explore` set: of the reorder candidates that rule carries to a
  * `no-regression` row count, only the {@link GEMV_EXPLORE_CARRIED_ROWS} fastest plain or staged rows
  * of the M = 1 group — a row a table can hold; the subgroup form is a Session option the derivation
@@ -420,23 +434,57 @@ export const gemvExploreCarriedFromM1: typeof gemvCarriedFromM1 = (
   if (first === undefined || gemvGroupRole(m, candidate.class) !== "no-regression") return true;
   if (candidate.name === references.exact || candidate.name === references.reorder) return true;
   if (candidate.name === first.profile.reorder) return true;
-  const fastest = first.rows
-    .filter((row) => PARALLEL_ROW_LANES.has(row.candidate) && carriedByItsRow(row.candidate, first))
-    .toSorted((a, b) => (a.perDispatch ?? 0) - (b.perDispatch ?? 0))
-    .slice(0, GEMV_EXPLORE_CARRIED_ROWS)
-    .map((row) => row.candidate);
+  const fastest = exploreFastestRows(first);
   if (PARALLEL_ROW_LANES.has(candidate.name)) return fastest.includes(candidate.name);
-  const { choice } = candidate;
-  const lanes =
-    choice !== undefined && "parallelRows" in choice && choice.parallelRows !== undefined
-      ? choice.lanes
-      : undefined;
+  const lanes = rowBlockLanes(candidate.choice);
   // Neither a plain or staged row nor a row-blocked form: the subgroup form
   if (lanes === undefined) return false;
   return (
     PARALLEL_ROW_LANES.get(first.profile.reorder) === lanes ||
     fastest.some((name) => PARALLEL_ROW_LANES.get(name) === lanes)
   );
+};
+
+/**
+ * Which kernels of an `explore` group go on after the quick look, given those whose quick time its
+ * margin lets go on (`goesOn`, in the order of `kernels`) and the case's M = 1 group of the same run:
+ * at a `no-regression` row count, also every plain or staged row that M = 1 carries for its own time
+ * (one of the {@link GEMV_EXPLORE_CARRIED_ROWS} fastest it leaves adoptable — not the default's
+ * choice at `reorder` at M = 1, which the derivation reads as the reference, never as a candidate)
+ * whenever a row-blocked form of its lanes goes on.
+ *
+ * The derivation reads every row block of a candidate against the candidate's own kernel at that row
+ * count (gemv-derive.ts's `rowBlockReadings`): without that kernel's time no row block has evidence,
+ * and the candidate cannot be adopted. The reference there is often itself row-blocked, so where a
+ * row block pays the unblocked kernel is far slower than the reference, and the explore set's margin
+ * screens it out — on an RTX 3080 Ti (the two `full` records of 2026-11-26/27) the unblocked
+ * staged-l16 at ×1.13 to ×1.22 the reference lost two adoptions in both explore runs. A row block
+ * screened out itself leaves nothing to read its base against, so its base is not kept for it.
+ *
+ * Without the run's M = 1 group, the margin alone decides. Pure.
+ */
+export const gemvExploreQuickLookGoesOn = (
+  m: number,
+  kernels: readonly (Pick<GemvCandidate, "name" | "class"> & { readonly choice?: CarriedChoice })[],
+  goesOn: readonly boolean[],
+  first: GemvM1Group | undefined,
+): boolean[] => {
+  if (first === undefined) return [...goesOn];
+  const bases = exploreFastestRows(first).filter((name) => name !== first.profile.reorder);
+  const blocked = new Set(
+    kernels.flatMap((kernel, index) => {
+      const lanes = rowBlockLanes(kernel.choice);
+      return goesOn[index] === true && lanes !== undefined ? [lanes] : [];
+    }),
+  );
+  return kernels.map((kernel, index) => {
+    if (goesOn[index] === true) return true;
+    if (gemvGroupRole(m, kernel.class) !== "no-regression" || !bases.includes(kernel.name)) {
+      return false;
+    }
+    const lanes = PARALLEL_ROW_LANES.get(kernel.name);
+    return lanes !== undefined && blocked.has(lanes);
+  });
 };
 
 /** The value of `grid` next below and next above `value`, and `value` itself. */

@@ -9,11 +9,12 @@
  * 1. the **sentinels** ({@link gemvSentinels}) — a few cases spread over the table's shapes — are
  *    measured with every candidate;
  * 2. every other case measures, at M = 1, the references, the winners of its nearest sentinel of
- *    the same storage ({@link gemvExploreSelection}: the fastest sequential variant and the fastest
- *    plain or staged parallel row whose checks held) and their neighbours on the candidate grid; a
- *    case for which no sentinel of its storage has winners measures every candidate. A neighbour is what
- *    finds the winner when the prediction is one step off; without them the prediction alone loses
- *    it on most shapes of a device whose winners vary.
+ *    the same storage ({@link gemvExploreSelection}: the fastest sequential variant, and the fastest
+ *    plain or staged parallel row with every other one the derivation could adopt there, whose
+ *    checks held) and their neighbours on the candidate grid; a case for which no sentinel of its
+ *    storage has winners measures every candidate. A neighbour is what finds the winner when the
+ *    prediction is one step off; without them the prediction alone loses it on most shapes of a
+ *    device whose winners vary.
  * What M = 4 and 8 measure of a case follows from its own M = 1 group
  * (gemv-candidates.ts's `gemvExploreCarriedFromM1`).
  *
@@ -27,9 +28,11 @@
 import {
   GEMV_COLS,
   GEMV_LANES,
+  GEMV_MIN_SPEEDUP,
   GEMV_UNROLLS,
   type GemvCandidateClass,
   gemvParallelName,
+  gemvProfileChoice,
   gemvSequentialName,
 } from "./gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, type GemvSweepStorage } from "./gemv-cases.ts";
@@ -212,48 +215,75 @@ export const gemvGridNeighbours = (name: string): string[] => {
   ];
 };
 
-/** The fastest row of `rows` that `keep` takes and whose check held (the first of equals). */
-const fastest = (
+/** The rows of `rows` that `keep` takes and whose check held, fastest first (equals in their order). */
+const heldRows = (
   rows: readonly GemvExploreRow[],
   keep: (row: GemvExploreRow) => boolean,
-): string | undefined => {
-  let best: (GemvExploreRow & { readonly perDispatch: number }) | undefined;
-  for (const row of rows) {
-    if (!keep(row) || !held(row)) continue;
-    if (best === undefined || row.perDispatch < best.perDispatch) best = row;
-  }
-  return best?.candidate;
+): (GemvExploreRow & { readonly perDispatch: number })[] =>
+  rows
+    .filter(
+      (row): row is GemvExploreRow & { readonly perDispatch: number } => keep(row) && held(row),
+    )
+    .toSorted((a, b) => a.perDispatch - b.perDispatch);
+
+/**
+ * The parallel rows a sentinel predicts, fastest first (none when it has no plain or staged row whose
+ * check held): its fastest plain or staged row, and every other one the derivation could adopt in
+ * this group — at least {@link GEMV_MIN_SPEEDUP} faster than the class's reference there, the
+ * default's choice at `reorder` at M = 1 (only the fastest when that reference has no time). Rows a
+ * few percent apart are equally the sentinel's winners as far as its one group tells, and the
+ * case's own winner may lie next to any of them on the grid: on an RTX 3080 Ti (the two `full`
+ * records of 2026-11-26/27) staged-l32 led staged-l16 by 1 to 2 % at the nearest i4 sentinel, and
+ * three i4 cases whose full records adopt staged-l8 — staged-l16's neighbour, two lane steps from
+ * staged-l32 — were measured without it in both explore runs.
+ */
+const parallelWinners = (sentinel: GemvExploreEvidence): string[] => {
+  const rows = heldRows(sentinel.rows, (row) => PARALLEL_GRID.has(row.candidate));
+  const [first, ...others] = rows;
+  if (first === undefined) return [];
+  const referenceName = gemvProfileChoice(sentinel.gemvCase, 1, "reorder").name;
+  const reference = sentinel.rows.find((row) => row.candidate === referenceName);
+  const time = reference?.error === undefined ? reference?.perDispatch : undefined;
+  if (time === undefined || !Number.isFinite(time)) return [first.candidate];
+  return [
+    first.candidate,
+    ...others
+      .filter((row) => time / row.perDispatch >= GEMV_MIN_SPEEDUP)
+      .map(({ candidate }) => candidate),
+  ];
 };
 
 /**
- * The winner of the nearest sentinel of the case's storage that has one (the first of equally near
+ * The winners of the nearest sentinel of the case's storage that has any (the first of equally near
  * ones). A sentinel of another storage does not predict: the storage decides the decode, so its
  * winners say nothing of the case's. The i4 group length may differ.
  */
 const predicted = (
   gemvCase: GemvCase,
   sentinels: readonly GemvExploreEvidence[],
-  winnerOf: (rows: readonly GemvExploreRow[]) => string | undefined,
-): string | undefined => {
-  let winner: string | undefined;
+  winnersOf: (sentinel: GemvExploreEvidence) => readonly string[],
+): readonly string[] => {
+  let winners: readonly string[] = [];
   let nearest = Number.POSITIVE_INFINITY;
   for (const sentinel of sentinels) {
     if (sentinel.gemvCase.storage !== gemvCase.storage) continue;
     const distance = gemvCaseDistance(gemvCase, sentinel.gemvCase);
     if (distance >= nearest) continue;
-    const one = winnerOf(sentinel.rows);
-    if (one === undefined) continue;
-    winner = one;
+    const found = winnersOf(sentinel);
+    if (found.length === 0) continue;
+    winners = found;
     nearest = distance;
   }
-  return winner;
+  return winners;
 };
 
 /**
  * The candidates a case that is no sentinel measures at M = 1, by name (the sweep measures the
  * references whatever the list holds): the fastest sequential variant of the nearest sentinel of the
- * case's storage that has one, the fastest plain or staged parallel row of the nearest sentinel of
- * that storage that has one, and the grid neighbours of both. A subgroup row does not predict (a
+ * case's storage that has one; the fastest plain or staged parallel row of the nearest sentinel of
+ * that storage that has one, with every other plain or staged row of that sentinel at least
+ * {@link GEMV_MIN_SPEEDUP} faster than the default's choice at `reorder` there
+ * ({@link parallelWinners}); and the grid neighbours of each. A subgroup row does not predict (a
  * table holds no such row), and neither does a sentinel of another storage.
  *
  * `undefined` — measure every candidate — when no sentinel given of the case's storage has a winner
@@ -264,19 +294,16 @@ export const gemvExploreSelection = (
   gemvCase: GemvCase,
   sentinels: readonly GemvExploreEvidence[],
 ): string[] | undefined => {
-  const sequential = predicted(gemvCase, sentinels, (rows) =>
-    fastest(rows, (row) => SEQUENTIAL_GRID.has(row.candidate)),
+  const sequential = predicted(gemvCase, sentinels, ({ rows }) =>
+    heldRows(rows, (row) => SEQUENTIAL_GRID.has(row.candidate))
+      .slice(0, 1)
+      .map(({ candidate }) => candidate),
   );
-  const parallel = predicted(gemvCase, sentinels, (rows) =>
-    fastest(rows, (row) => PARALLEL_GRID.has(row.candidate)),
-  );
-  if (sequential === undefined || parallel === undefined) return undefined;
+  const parallel = predicted(gemvCase, sentinels, parallelWinners);
+  if (sequential.length === 0 || parallel.length === 0) return undefined;
   return [
-    ...new Set([
-      sequential,
-      ...gemvGridNeighbours(sequential),
-      parallel,
-      ...gemvGridNeighbours(parallel),
-    ]),
+    ...new Set(
+      [...sequential, ...parallel].flatMap((winner) => [winner, ...gemvGridNeighbours(winner)]),
+    ),
   ];
 };

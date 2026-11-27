@@ -44,7 +44,9 @@
  * with every candidate; every other case measures at M = 1 the references and the candidates its
  * nearest sentinels of its storage predict (`gemvExploreSelection` over the sentinels the caller measured earlier,
  * `sentinelEvidence`, and those this call measured so far), and at M = 4 and 8 what its own M = 1
- * group carries.
+ * group carries. There its quick look does not screen out a carried plain or staged row whose
+ * row-blocked form goes on (`gemvExploreQuickLookGoesOn`): the derivation reads a row block against
+ * that unblocked kernel.
  *
  * Correctness, per row:
  * - identical class: every output word equals the baseline's (`compareBufferWords`); a difference
@@ -72,6 +74,7 @@ import {
   GEMV_CANDIDATE_SETS,
   gemvCarriedFromM1,
   gemvExploreCarriedFromM1,
+  gemvExploreQuickLookGoesOn,
   gemvGroupRole,
   gemvKernelsAt,
   gemvMeasurementPlans,
@@ -376,6 +379,12 @@ export type GemvCaseSettings = {
    * (default `gemvCarriedFromM1`; the `explore` set's `gemvExploreCarriedFromM1`).
    */
   readonly carriedFromM1?: typeof gemvCarriedFromM1;
+  /**
+   * Which kernels go on after the quick look, given those its margin lets go on and the case's M = 1
+   * group (default: those alone; the `explore` set's `gemvExploreQuickLookGoesOn`, which keeps the
+   * base of a row block that goes on).
+   */
+  readonly quickLookGoesOn?: typeof gemvExploreQuickLookGoesOn;
 };
 
 export type GemvCaseHooks = {
@@ -794,7 +803,7 @@ export const sweepGemvCase = async (
           lookedCount += 1;
           step("quick-look", lookedCount, toLook);
         }
-        const goesOn = quickLookGoesOn(
+        const byMargin = quickLookGoesOn(
           kernels.map((kernel) => ({
             name: kernel.head.candidate,
             class: kernel.head.class,
@@ -814,6 +823,18 @@ export const sweepGemvCase = async (
               ? { against: "reference", reference: plan.profile.reorder }
               : { against: "fastest" },
         );
+        // The margin lets a kernel without a quick time go on, a skipped or failed one too: only one
+        // still prepared goes on, and only such a one may keep the base of its row block
+        const going = kernels.map(
+          (kernel, index) => kernel.state.kind === "prepared" && byMargin[index] === true,
+        );
+        const goesOn =
+          settings.quickLookGoesOn?.(
+            m,
+            kernels.map(({ candidate }) => candidate),
+            going,
+            m1Group,
+          ) ?? going;
         kernels.forEach((kernel, index) => {
           const { state } = kernel;
           if (state.kind !== "prepared" || goesOn[index] === true) return;
@@ -1306,8 +1327,8 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
       // What a case that is no sentinel is predicted from: the sentinels measured earlier, then
       // those of this call as each is measured (the plan puts them first)
       const evidence: GemvExploreEvidence[] = [...plan.sentinelEvidence];
-      const carriedFromM1 =
-        plan.candidateSet === "explore" ? gemvExploreCarriedFromM1 : gemvCarriedFromM1;
+      const explore = plan.candidateSet === "explore";
+      const carriedFromM1 = explore ? gemvExploreCarriedFromM1 : gemvCarriedFromM1;
       for (const [index, gemvCase] of plan.cases.entries()) {
         if (gpu.lost !== undefined) break;
         if (options.signal?.aborted === true) {
@@ -1330,7 +1351,13 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
           context,
           gemvCase,
           plans,
-          { rounds: plan.rounds, tolerance, quickLookMargin: plan.quickLookMargin, carriedFromM1 },
+          {
+            rounds: plan.rounds,
+            tolerance,
+            quickLookMargin: plan.quickLookMargin,
+            carriedFromM1,
+            ...(explore ? { quickLookGoesOn: gemvExploreQuickLookGoesOn } : {}),
+          },
           {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             onProgress: (message) => notify?.({ kind: "status", message }),

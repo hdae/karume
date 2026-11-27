@@ -200,7 +200,12 @@ is what shows whether the block pays on the device.
 The `explore` set carries less ([below](#the-explore-set)): of the reorder candidates the rule above measures, only
 the three fastest plain or staged rows of the case's M = 1 group (`gemvExploreCarriedFromM1`) and the row-blocked
 forms of their lanes; the subgroup form is not carried. The references, the default's choice at `reorder` at M = 1
-and the row-blocked forms of its lanes are measured as above. The others are skipped rows.
+and the row-blocked forms of its lanes are measured as above. The others are skipped rows. Its quick look at 4 and 8
+rows (step 3) does not screen out one of those three rows — unless it is the default's choice at `reorder` at M = 1 —
+when a row-blocked form of its lanes goes on (`gemvExploreQuickLookGoesOn`): the derivation reads every row block of
+a candidate against the candidate's own kernel at that row count, so without that kernel's time no row block has
+evidence and the candidate is not adopted. A row-blocked form that is screened out itself keeps nothing; without the
+run's M = 1 group of the case the margin alone decides.
 
 1. Every kernel's pipeline is made first, so that no compile leaves the device idle between the steps below. The
    kernels are the baseline, the default profile's choice at `reorder` and the candidates of the set (those the
@@ -225,9 +230,10 @@ and the row-blocked forms of its lanes are measured as above. The others are ski
    the kernels whose check held elsewhere, again without the subgroup form. A class in which no kernel that could be
    adopted has a quick time has no bar: all its kernels go on. A subgroup kernel is screened against the bar like
    any other. A kernel whose check failed goes on or
-   is screened by its own time like any other, and its row records the check of step 4. The others are screened
-   rows. The rule and its evidence are measurement.ts's `QUICK_LOOK_MARGIN` (×1.25) and, for the `explore` set,
-   `EXPLORE_QUICK_LOOK_MARGIN` (×1.10: replayed on the GEMV sweep records of 2026-11-18/19, it left the
+   is screened by its own time like any other, and its row records the check of step 4. The `explore` set also lets
+   the base of a row block go on at 4 and 8 rows ([above](#how-the-gemv-sweep-times-a-row-count)). The others are
+   screened rows. The rule and its evidence are measurement.ts's `QUICK_LOOK_MARGIN` (×1.25) and, for the `explore`
+   set, `EXPLORE_QUICK_LOOK_MARGIN` (×1.10: replayed on the GEMV sweep records of 2026-11-18/19, it left the
    derivation's decisions unchanged on the RTX 5070 Ti, 0 of 116, and changed 2 of 214 on the Apple M2, each within
    2 %; ×1.05 lost adoptions on both).
 4. Every kernel that goes on, the baseline first, runs once from a zeroed output and is calibrated from its quick
@@ -271,16 +277,19 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
 - Every other case measures at M = 1, besides the references, the fastest sequential variant and the fastest plain
   or staged parallel row — each among the rows whose check held, timed (a finite time), not screened, skipped or
   failed — of the nearest sentinel of the case's storage that has one (the first of equally near ones; the i4 group
-  length may differ), and their neighbours on the candidate grid: one step of the columns per workgroup or of the
-  words read ahead; one step of the lanes, and the other of plain and staged at the same lanes
-  (`gemvExploreSelection`). A sentinel of another storage does not predict: the storage decides the decode. A name
+  length may differ), with every other plain or staged row of that sentinel, among the same rows, that is at least
+  ×1.10 faster than the default's choice at `reorder` there (none when that choice has no time there), and their
+  neighbours on the candidate grid: one step of the columns per workgroup or of the words read ahead; one step of the
+  lanes, and the other of plain and staged at the same lanes (`gemvExploreSelection`). A sentinel of another storage
+  does not predict: the storage decides the decode. A name
   the case has no candidate of on the device selects nothing. When no sentinel of the case's storage has a winner of
   one of the two classes, the case measures every candidate. The
   sentinels read are the ones the call measured before the case and those given as `sentinelEvidence` (measured by
   earlier calls — the workbench makes one call per case).
 - At 4 and 8 rows a case measures what its own M = 1 group carries ([above](#how-the-gemv-sweep-times-a-row-count)),
   and the identical class there is the baseline alone (no row-block height: no rule reads one).
-- The quick look's default margin is ×1.10.
+- The quick look's default margin is ×1.10; at 4 and 8 rows it does not screen out the base of a row block that goes
+  on ([above](#how-the-gemv-sweep-times-a-row-count)).
 - Option errors, before the GPU is touched: `candidates` with the set; `sentinelEvidence` with another set, or
   naming a case that is no sentinel, one sentinel twice, a sentinel the call measures itself, or a shape other than
   the table's.
