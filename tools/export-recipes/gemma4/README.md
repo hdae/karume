@@ -872,7 +872,7 @@ table as the checkpoint's bf16 bits, PLE index schema 5:
   (`GEMMA4_SPEED_NOTE`, which records the protocol and the numbers of the three devices): a decode
   token of `bf16-fast` took less time than one of `bf16` on an RTX 3080 Ti, an RTX 5070 Ti and an
   Apple M2 for both models. Neither model's speculative decode (with the drafter) is measured for
-  the card; E2B's sentence says "without the drafter", and E4B's keeps its wording of 2026-11-19.
+  the card, so each model's sentence says "without the drafter".
 
 Both models' presets also name their int8 drafter, which borrows the bf16 target's
 `model.lm_head.weight`.

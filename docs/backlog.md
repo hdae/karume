@@ -427,8 +427,7 @@ maintainer's ruling of 2026-11-06).
     `e2e_gemma4_fusion_counts_test.ts` (`rmsNormAdd`; it fails under `KARUME_SERIES=1`);
   - an addendum to ADR [0096](decisions/0096-speculative-decoding.md), and the census rows;
   - `docs/limitations.md` and the comment of `tools/export-recipes/gemma4/distribution.py` still describe the E2B
-    drafter only;
-  - whether E4B's sentence on speed gains "without the drafter" (the maintainer's wording).
+    drafter only.
 - **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
   heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real
   vision tower and causal attention, and need the product graph's input for image vectors but not the marking of which

@@ -1678,11 +1678,13 @@ class TestGemma4ParallelPreset:
         assert gemma4_distribution.gemma4_has_drafter("e2b")
         assert gemma4_distribution.GEMMA4_SPEED_NOTE["e2b"].endswith(" without the drafter.")
 
-    def test_the_e4b_speed_sentence_keeps_the_maintainers_wording(self) -> None:
-        """E4B's sentence is the maintainer's wording and is not rewritten here."""
+    def test_the_e4b_speed_sentence_names_the_decode_it_measured(self) -> None:
+        """E4B ships a drafter too and its speculative decode is not measured, so its sentence is
+        the maintainer's wording that names the decode without the drafter (`GEMMA4_SPEED_NOTE`)."""
+        assert gemma4_distribution.gemma4_has_drafter("e4b")
         assert (
             gemma4_distribution.GEMMA4_SPEED_NOTE["e4b"]
-            == " Faster than bf16 on tested E4B devices."
+            == " Faster than bf16 on tested E4B devices without the drafter."
         )
 
     @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)

@@ -476,13 +476,13 @@ GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: E4B 32.23 / 29.68 → 18.28 / 21.35; RTX 5070 Ti (Chrome, D3D12) E2B 19.12 → 9.96 and E4B
 #: 32.71 → 16.57; Apple M2 (Chrome, Metal) E2B 65.36 → 60.77 and E4B 119.90 → 113.89 — the browser
 #: records with each adapter's own geometry table. Neither model's speculative decode (with the
-#: drafter) is measured. E2B's sentence names the decode that is, and with the drafter sentence
-#: before it the E2B description is exactly at the manifest's limit of 200 characters. E4B's
-#: sentence is the maintainer's wording of 2026-11-19, kept as written; with the drafter sentence
-#: before it the E4B description is 179 characters.
+#: drafter) is measured, and both models ship a drafter (E4B's since 2026-11-26), so each sentence
+#: names the decode that is measured: "without the drafter" (E4B's by the maintainer's ruling of
+#: 2026-11-27). With the drafter sentence before it, each description is exactly at the manifest's
+#: limit of 200 characters.
 GEMMA4_SPEED_NOTE: Mapping[str, str] = {
     "e2b": " Faster than bf16 on tested E2B devices without the drafter.",
-    "e4b": " Faster than bf16 on tested E4B devices.",
+    "e4b": " Faster than bf16 on tested E4B devices without the drafter.",
 }
 
 
