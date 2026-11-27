@@ -484,7 +484,7 @@ class TestTheModelCard:
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "### Used by" in card
-        assert f"[`hdae/{UMT5_CONSUMER_REPO_NAME}`]" in card
+        assert f"[hdae/{UMT5_CONSUMER_REPO_NAME}]" in card
         assert "`Ti2vPipeline.fromPretrained` (`@karume/models/wan`)" in card
         assert "its own tokenizer asset adds Wan's prompt cleaning" in card
         assert "karume-wan2.1" not in card

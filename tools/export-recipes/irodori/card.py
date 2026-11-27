@@ -354,7 +354,7 @@ def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
     return [
         f"  licensed **{IRODORI_TEXT_BACKBONE_LICENSE}** (as of retrieval). This repository does"
         " not store it: the manifest",
-        f"  references the containers `{holder}` ships as the `backbone` component,",
+        f"  references the containers {hf_link(holder)} ships as the `backbone` component,",
         "  and they are fetched from there. That license applies to the backbone this distribution",
         "  runs.",
     ]
@@ -377,7 +377,7 @@ def _irodori_codec_lines(model: Mapping[str, Any]) -> list[str]:
         ]
     return [
         "  (as of retrieval). Upstream ships it as a separate repository. This repository does not",
-        f"  store it: the manifest references the containers `{holder}` ships as the",
+        f"  store it: the manifest references the containers {hf_link(holder)} ships as the",
         "  `codec_decoder` / `codec_encoder` components, and they are fetched from there so that",
         f"  text-to-audio runs from this distribution. Its weights derive from{origin}",
     ]
@@ -406,7 +406,7 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         f" licensed **{IRODORI_CODEC_MODEL_LICENSE}**",
         *_irodori_codec_lines(model),
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
-        f" {IRODORI_CODEC_PARENT_MODEL};",
+        f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
         "  a verbatim copy of that license is in `LICENSE.md` for the codec components.",
         f"{changes_made_here()} conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
@@ -682,7 +682,7 @@ def _irodori_large_codec_line(model: Mapping[str, Any]) -> str:
         return "  (as of retrieval). It is redistributed here in the container format as the"
     return (
         f"  (as of retrieval). This repository does not store it: the manifest references the"
-        f" containers `{holder}` ships as"
+        f" containers {hf_link(holder)} ships as"
     )
 
 
@@ -740,7 +740,7 @@ def _irodori_large_base_weights(
         "  distribution. Its weights derive from"
         f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
-        f" {IRODORI_CODEC_PARENT_MODEL};",
+        f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
         "  verbatim copies of both licenses are in `LICENSE.md` for the codec components.",
         f"{changes_made_here()} conversion into the Karume",
         f"  container format and **quantization** of the weights — {series}",

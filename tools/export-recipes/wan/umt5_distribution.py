@@ -576,6 +576,11 @@ UMT5_TOKENS = (2, 512)
 UMT5_HIDDEN_WIDTH = 4096
 
 
+#: The repository of the original umT5-XXL encoder (the default model's provenance), as the card
+#: names it in prose.
+UMT5_UPSTREAM_REPO = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
+
+
 def _umt5_upstream(name: str) -> Umt5Source:
     """Model name → upstream provenance (no card is rendered without one — a card that cannot
     state its provenance is not produced)."""
@@ -609,7 +614,8 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "## What is this",
         "",
-        "The encoder of **umT5-XXL** (`google/umt5-xxl`) as a standalone text encoder for the",
+        f"The encoder of **umT5-XXL** ({hf_link(UMT5_UPSTREAM_REPO)}) as a standalone text encoder"
+        " for the",
         "WebGPU inference runtime **Karume**: the encoder converted into Karume's container format",
         "(a `.krm` part sequence whose first part carries the graph and model descriptors) with",
         "int8 weights, and the checkpoint's tokenizer converted into one JSON table.",
@@ -621,7 +627,8 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
         f"  `L` is the number of tokens of the prompt itself ({low} to {high}, the end token",
         "  `</s>` included) — there is no padding and no attention mask.",
         f"- One asset, `{UMT5_TOKENIZER_ROLE}` (format `{umt5_xxl_tokenizer.ASSET_FORMAT}`):",
-        "  the tokenizer of `google/umt5-xxl` as one JSON table — the vocabulary and its scores,",
+        f"  the tokenizer of {hf_link(UMT5_UPSTREAM_REPO)} as one JSON table — the vocabulary and"
+        " its scores,",
         "  the added tokens, the set of whitespace characters and the maximum length of",
         f"  {high} tokens. It carries no prompt cleaning.",
         "- The relative-position bucket indices depend on `L` only and are computed on the host:",
@@ -700,8 +707,7 @@ def _wan_checkpoint(name: str) -> str:
 def _consumer_link() -> str:
     """A link (Markdown) to the Wan repository that references this encoder across
     repositories."""
-    repo = f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}"
-    return f"[`{repo}`](https://huggingface.co/{repo})"
+    return hf_link(f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}")
 
 
 def _umt5_usage(repo: str) -> list[str]:
@@ -739,7 +745,8 @@ def _umt5_usage(repo: str) -> list[str]:
         "",
         "The text is tokenized as it is — no prompt cleaning and no Unicode normalization — and",
         "`</s>` is appended. The token ids then equal those of `AutoTokenizer` in `transformers`",
-        "5.14.1 and of the original `tokenizer.json` of `google/umt5-xxl` alike. Inputs on which",
+        f"5.14.1 and of the original `tokenizer.json` of {hf_link(UMT5_UPSTREAM_REPO)} alike."
+        " Inputs on which",
         "those two disagree, or that the graph cannot take, are rejected with an error instead of",
         "being encoded:",
         "",

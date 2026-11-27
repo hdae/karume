@@ -473,7 +473,7 @@ class TestQuantsNotes:
         assert any(
             line.startswith(
                 "Some components are fetched from"
-                " [`hdae/karume-source`](https://huggingface.co/hdae/karume-source)"
+                " [hdae/karume-source](https://huggingface.co/hdae/karume-source)"
                 " at commit `9999999999999999…`"
             )
             for line in lines
@@ -741,7 +741,7 @@ class TestTheSameNameFromAnotherOrigin:
 
         assert f"| {total} ({total} shared) |" in _row(lines, "f16")
         notes = [line for line in lines if line.startswith("Some components are fetched from")]
-        assert [line.split("`")[1] for line in notes] == repos
+        assert [line.split("[")[1].split("]")[0] for line in notes] == repos
 
     def test_an_own_file_and_a_borrowed_file_with_the_same_path_are_both_counted(self) -> None:
         """The own repository's `alpha/front.krm` (512 B) and the borrowed source's path of the same

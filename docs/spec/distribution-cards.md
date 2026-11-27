@@ -115,11 +115,13 @@ The level-2 sections come in this order:
 
 ### Naming and pinning an upstream
 
-- In the attribution section an HF upstream is a link with its repository ID as plain link text:
-  `[<owner>/<name>](https://huggingface.co/<owner>/<name>)` (`karume.modelcard.hf_link`). The Anima origins link a
-  model's source the same way, and a Civitai source by its address as link text (`[civitai.com/models/…](…)`). A
-  Karume repository named as the source of fetched components is a link with the ID in code font: the quant tables'
-  note, and the `karume-wan2.2` and `karume-umt5-xxl` cards' mentions of each other.
+- Wherever a card names an HF repository — an upstream, or a Karume repository it fetches components from or is
+  used by — it is a link with its repository ID as plain link text:
+  `[<owner>/<name>](https://huggingface.co/<owner>/<name>)` (`karume.modelcard.hf_link`), the quant tables'
+  cross-repository note included; the Anima origins link a Civitai source by its address as link text
+  (`[civitai.com/models/…](…)`). No card or notice writes a URL without a link (no bare or angle-bracket URL), except
+  the NVIDIA notice of the Anima texts, whose wording was ruled with its parenthesized addresses. The Gemma 4 cards
+  still name some repositories in code font.
 - A card pins every upstream it stores, and every upstream of a component it fetches from another Karume repository,
   at the full commit the bytes were taken from: `` [<owner>/<name>](…) at commit `<40 hex digits>` ``
   (`karume.modelcard.pinned`). The commits are the ones the recipes and their `THIRD_PARTY_NOTICES.md` ledgers

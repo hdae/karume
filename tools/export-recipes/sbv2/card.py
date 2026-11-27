@@ -227,8 +227,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         # though it is in the text).
         "  *JVNV: A Corpus of Japanese Emotional Speech with Verbal Content and"
         " Nonverbal Expressions*,",
-        f"  [{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}). Corpus page:",
-        f"  <{SBV2_JVNV_CORPUS_PAGE}>",
+        f"  [{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}); the"
+        f" [corpus page]({SBV2_JVNV_CORPUS_PAGE}).",
         "- **Training implementation**:"
         " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
         "  (licensed **agpl-3.0**). Karume is a separate implementation and does not contain the"

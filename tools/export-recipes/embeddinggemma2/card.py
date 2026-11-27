@@ -415,7 +415,8 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
     if vision is None and audio is None:
         opening = [
-            f"A text embedding distribution: the **text tower** of `{upstream}`, with its mean"
+            f"A text embedding distribution: the **text tower** of {hf_link(upstream)}, with its"
+            " mean"
             " pooling and",
         ]
         runs = "A string goes in and a unit vector comes out."
@@ -424,7 +425,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     elif audio is None:
         opening = [
             "A text and image embedding distribution: the **text and vision towers** of",
-            f"`{upstream}`, with the mean pooling and",
+            f"{hf_link(upstream)}, with the mean pooling and",
         ]
         runs = "A text, an image or both go in and a unit vector comes out."
         graphs = (
@@ -435,7 +436,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     elif vision is None:
         opening = [
             "A text and audio embedding distribution: the **text and audio towers** of",
-            f"`{upstream}`, with the mean pooling and",
+            f"{hf_link(upstream)}, with the mean pooling and",
         ]
         runs = "A text, an audio or both go in and a unit vector comes out."
         graphs = (
@@ -446,7 +447,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     else:
         opening = [
             "A text, image and audio embedding distribution: the **text, vision and audio towers**",
-            f"of `{upstream}`, with the mean pooling and",
+            f"of {hf_link(upstream)}, with the mean pooling and",
         ]
         runs = "Text, images and audio go in, in any mix, and a unit vector comes out."
         graphs = (

@@ -216,12 +216,15 @@ class TestIrodoriStorageAttribution:
         assert "this repository alone" not in card
         assert (
             "This repository does not store it: the manifest\n"
-            f"  references the containers `{self.HOLDER}` ships as the `backbone` component,\n"
+            "  references the containers"
+            f" [{self.HOLDER}](https://huggingface.co/{self.HOLDER}) ships as the `backbone`"
+            " component,\n"
             "  and they are fetched from there."
         ) in card
         assert (
             "This repository does not\n"
-            f"  store it: the manifest references the containers `{self.HOLDER}` ships as the\n"
+            f"  store it: the manifest references the containers"
+            f" [{self.HOLDER}](https://huggingface.co/{self.HOLDER}) ships as the\n"
             "  `codec_decoder` / `codec_encoder` components, and they are fetched from there"
         ) in card
 

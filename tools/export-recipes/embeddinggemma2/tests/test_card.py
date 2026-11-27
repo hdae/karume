@@ -126,7 +126,7 @@ def _render(manifest: dict[str, Any] | None = None) -> str:
 class TestWhatTheCardSays:
     def test_it_says_text_tower_only(self) -> None:
         card = _render()
-        assert "the **text tower** of `google/embeddinggemma-2`" in card
+        assert "the **text tower** of [google/embeddinggemma-2]" in card
         assert "cannot embed images, video or audio" in card
 
     def test_it_states_the_token_limit_from_the_manifest_against_upstreams_context(self) -> None:
@@ -399,7 +399,7 @@ class TestTheVisionTower:
     def test_a_manifest_with_the_tower_says_text_and_images(self) -> None:
         card = _render(_with_vision())
         assert "# EmbeddingGemma 2 Text and Image Embedding — Karume" in card
-        assert "the **text and vision towers** of\n`google/embeddinggemma-2`" in card
+        assert "the **text and vision towers** of\n[google/embeddinggemma-2]" in card
         assert "Built with `vision: true`, the pipeline also fetches the" in card
         assert "cannot embed images" not in card
         assert "neither video nor audio can be embedded" in card
@@ -512,7 +512,7 @@ class TestTheAudioTower:
     def test_a_manifest_with_the_tower_says_text_and_audio(self) -> None:
         card = _render(_with_audio())
         assert "# EmbeddingGemma 2 Text and Audio Embedding — Karume" in card
-        assert "the **text and audio towers** of\n`google/embeddinggemma-2`" in card
+        assert "the **text and audio towers** of\n[google/embeddinggemma-2]" in card
         assert "Built with `audio: true`, the pipeline also fetches the audio" in card
         assert "The vision tower is not carried: neither images nor video can" in card
         assert "cannot embed images, video or audio" not in card
@@ -564,7 +564,7 @@ class TestTheAudioTower:
     def test_a_manifest_with_both_towers_says_text_images_and_audio(self) -> None:
         card = _render(_with_audio(_with_vision(_with_i8())))
         assert "# EmbeddingGemma 2 Text, Image and Audio Embedding — Karume" in card
-        assert "the **text, vision and audio towers**\nof `google/embeddinggemma-2`" in card
+        assert "the **text, vision and audio towers**\nof [google/embeddinggemma-2]" in card
         assert (
             "becomes up to\n  70 soft tokens (a square one 64); an audio becomes one soft" in card
         )

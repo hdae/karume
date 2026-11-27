@@ -68,6 +68,7 @@ from karume.dist import (
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_JVNV_CORPUS_PAGE,
+    SBV2_JVNV_CORPUS_PAPER,
     SBV2_JVNV_CORPUS_PAPER_URL,
     SBV2_JVNV_LICENSE_URL,
     SBV2_JVNV_PROFILE,
@@ -1103,12 +1104,13 @@ SBV2_JVNV_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes modified forms of two works licensed under the Creative Commons
 Attribution-ShareAlike 4.0 International license (the full text is in `LICENSE.md` and at
-<{SBV2_JVNV_LICENSE_URL}>):
+[{SBV2_JVNV_LICENSE_URL.removeprefix("https://").rstrip("/")}]({SBV2_JVNV_LICENSE_URL})):
 
 - **Voices**: Style-Bert-VITS2 JP-Extra models of JVNV-corpus speakers from
   `{_JVNV_VOICES_REPO}` (published by {_owner(_JVNV_VOICES_REPO)}) — the model card
   (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
-  (<{SBV2_JVNV_CORPUS_PAPER_URL}>; corpus page: <{SBV2_JVNV_CORPUS_PAGE}>).
+  ([{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}); the
+  [corpus page]({SBV2_JVNV_CORPUS_PAGE})).
   The source repository states that the corpus's Creative Commons Attribution-ShareAlike 4.0
   International license carries over to the models.
 - **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by {_owner(SBV2_TEXT_ENCODER_MODEL)}).

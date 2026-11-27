@@ -578,7 +578,7 @@ def quants(
     # SPEC: docs/spec/distribution-cards.md#naming-and-pinning-an-upstream
     for repo, revision in _borrowed(refs):
         lines.append(
-            f"Some components are fetched from [`{repo}`](https://huggingface.co/{repo}) at commit"
+            f"Some components are fetched from {hf_link(repo)} at commit"
             f" `{revision[:_SHA_DIGITS]}…` — those bytes are identical to this model's own, so they"
             " are not stored here a second time."
         )

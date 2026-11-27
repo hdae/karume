@@ -36,7 +36,8 @@ from _shared.licenses import (
     MIT_LICENSE_PATH,
 )
 from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
-from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
+from anima.card import NVIDIA_NOTICE as ANIMA_NVIDIA_NOTICE
 from anima.distribution import ANIMA_2_9B_PIPELINE
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
 from anima.distribution import LICENSE_SOURCE_PATH as ANIMA_LICENSE_SOURCE_PATH
@@ -548,6 +549,50 @@ class TestTheFrontMatterOfEveryPublishedCard:
 _HOUSE_AND_BRITISH_WORDS = re.compile(
     r"\b(seats?|licences?|normalis\w*|colour\w*|metres?|labelled)\b", re.IGNORECASE
 )
+
+
+#: The accounts whose repositories the cards name (a code-font `<owner>/<name>` of one of them is an
+#: HF repository, which a card links instead).
+_HF_ACCOUNTS = frozenset({*UPSTREAM_AUTHORS, HF_OWNER})
+
+#: A URL a text writes without a link: bare, in angle brackets, or in parentheses that are not a
+#: link's target.
+_UNLINKED_URL = re.compile(r"<https?://|(?<![(\w/])https?://|(?<!\])\(https?://")
+
+
+class TestTheLinksOfEveryPublishedRepository:
+    """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — an HF repository is a
+    plain-text link on a card, and no text writes a URL without a link."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_card_links_every_hf_repository_it_names_with_plain_link_text(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        prose = _prose(card.split("\n---\n", 1)[1])
+        coded = [
+            name
+            for name in re.findall(r"`([A-Za-z0-9-]+/[A-Za-z0-9._-]+)`", prose)
+            # (`<family>/<major>` is a pipeline contract, not a repository)
+            if name.split("/")[0] in _HF_ACCOUNTS and not name.split("/")[1].isdigit()
+        ]
+
+        assert re.findall(r"\[`[^`]+`\]\(https://huggingface\.co/", prose) == []
+        # The Gemma 4 cards name their repositories in code font until their stage.
+        assert coded == [] or directory in GEMMA4_REPOSITORIES, coded
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_no_card_or_notice_writes_a_url_without_a_link(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        manifest, card = _published_card(pipeline, directory)
+        notice = _root_files(pipeline, list(manifest["models"]))[NOTICE_FILENAME]
+        # The NVIDIA notice of the Anima texts is the ruled wording of the agreement's §3.1 notice
+        # and its explanation, kept as it is (docs/backlog.md).
+        body = card.split("\n---\n", 1)[1].replace(ANIMA_NVIDIA_NOTICE, "")
+        texts = [_prose(body), notice.replace(ANIMA_NVIDIA_NOTICE, "")]
+
+        assert [_UNLINKED_URL.findall(text) for text in texts] == [[], []]
 
 
 class TestTheWordsOfEveryPublishedRepository:

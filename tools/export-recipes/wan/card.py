@@ -328,7 +328,7 @@ def _encoder_whereabouts(manifest: Mapping[str, Any]) -> str:
     return (
         "stored in this repository"
         if borrowed is None
-        else f"referenced from [`{borrowed[0]}`](https://huggingface.co/{borrowed[0]})"
+        else f"referenced from {hf_link(borrowed[0])}"
     )
 
 
@@ -492,7 +492,7 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
             f"  {pinned(WAN_TEXT_ENCODER_UPSTREAM, WAN_TEXT_ENCODER_REVISION)} (this checkpoint's"
             " `text_encoder` holds the same",
             "  encoder rounded to bfloat16), converted to int8, at commit"
-            f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
+            f" `{revision[:16]}…` of {hf_link(repo)}",
             "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
             "  the changes made to it.",
         ]
@@ -1088,7 +1088,7 @@ def _download_and_memory(
     — 121 frames — so the method is named per row).
     """
     encoder_bytes, borrowed = _text_encoder(manifest)
-    source = "" if borrowed is None else f" from `{borrowed[0]}`"
+    source = "" if borrowed is None else f" from {hf_link(borrowed[0])}"
     return [
         f"- **Download**: the quant table's Download column includes the text encoder"
         f" ({_gib(encoder_bytes)}{source});",

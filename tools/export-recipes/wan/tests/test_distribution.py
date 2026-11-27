@@ -1070,7 +1070,7 @@ class TestTheModelCardOnTheTextEncoder:
     def test_it_names_the_repository_and_the_commit_it_borrows_from(self, assembled) -> None:
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
-        link = f"[`{_UMT5_REPO}`](https://huggingface.co/{_UMT5_REPO})"
+        link = f"[{_UMT5_REPO}](https://huggingface.co/{_UMT5_REPO})"
         assert f"referenced from {link}" in card
         assert f"at commit `{_UMT5_REVISION[:16]}…` of {link}" in card
         assert "stored in this repository" not in card
@@ -1106,7 +1106,8 @@ class TestTheModelCardOnTheTextEncoder:
         size = sum(ref["size"] for ref in parts)
         prose = " ".join(_card(changed).split())
         assert (
-            f"includes the text encoder ({size / (1 << 30):.2f} GiB from `{_UMT5_REPO}`)" in prose
+            f"includes the text encoder ({size / (1 << 30):.2f} GiB from"
+            f" [{_UMT5_REPO}](https://huggingface.co/{_UMT5_REPO}))" in prose
         )
 
     def test_it_names_the_declared_limits_when_every_quant_declares_them(self, assembled) -> None:

@@ -2604,7 +2604,10 @@ class TestIrodoriV4Large:
         assert "# Irodori-TTS v4 Large — Karume" in card
         assert "the shared T5Gemma 2 text encoder `backbone`" in card
         assert "ModernBERT" not in card
-        assert "references the containers `hdae/karume-irodori-v4-small` ships as" in card
+        assert (
+            "references the containers [hdae/karume-irodori-v4-small]"
+            "(https://huggingface.co/hdae/karume-irodori-v4-small) ships as" in card
+        )
         assert "every component is stored as `f16` / `i8` series" in card
         assert "no `f32` series is distributed" in card
         assert "splitRareTokens: false" not in card
