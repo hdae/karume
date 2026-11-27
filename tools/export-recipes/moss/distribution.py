@@ -65,6 +65,7 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from karume.modelcard import notice_closing
 from moss.card import MOSS_SUPPORTED_PIPELINE, render_moss_model_card
 from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN
 
@@ -305,7 +306,7 @@ The following changes were made:
   tokens, and the character-class and normalization tables of its pre-tokenizer) that the host
   uses to reproduce its token ids.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 

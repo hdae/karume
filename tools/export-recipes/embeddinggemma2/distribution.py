@@ -104,6 +104,7 @@ from karume.dist import (
     complete_quant_weights,
     ir_graph,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     EMBEDDINGGEMMA2_LICENSE,
@@ -1331,7 +1332,7 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: text changes with it.
 #: SPEC: docs/spec/distribution-cards.md#noticemd
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = (
-    """# NOTICE
+    f"""# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
@@ -1369,7 +1370,7 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt
   prefixes of its `config_sentence_transformers.json` are carried in `karume.json`.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
     + (
         # The use policy: one line stating it and referring to the upstream card, which the card

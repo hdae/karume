@@ -77,6 +77,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    notice_closing,
     pinned,
     quants,
     render,
@@ -510,7 +511,7 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: moving Wan's pin does not change the checked fact). The "rejected inputs" of the tokenizer item
 #: come from the docstring of `wan.umt5_xxl_tokenizer` (measured 2026-10-15).
 #: SPEC: docs/spec/distribution-cards.md#noticemd
-UMT5_NOTICE_MARKDOWN = """# NOTICE
+UMT5_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
 `google/umt5-xxl` (Google, licensed under the Apache License, Version 2.0 — see `LICENSE.md`; that
@@ -544,8 +545,7 @@ made:
   trailing space, characters outside the vocabulary), as well as inputs of more than 512 tokens,
   which the upstream would truncate.
 
-No retraining and no fine-tuning were performed. The original checkpoint and its original
-tokenizer files are not distributed here.
+{notice_closing("The original checkpoint and its original tokenizer files are")}
 """
 
 

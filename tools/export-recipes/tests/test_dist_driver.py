@@ -73,6 +73,7 @@ from karume.migrate import card_format_statement
 from karume.modelcard import (
     APACHE_LICENSE_REFERENCE,
     HF_OWNER,
+    NOTICE_CLOSING,
     REVISION_PIN_COMMENT,
     RUNTIME_SENTENCE,
     UNOFFICIAL_CONVERSION_NOTICE,
@@ -1176,6 +1177,17 @@ class TestTheNoticeOfEveryPublishedRepository:
         assert text.count("The following changes were made:") == 1
         assert text.count("No retraining and no fine-tuning were performed.") == 1
         assert text.index("No retraining and no fine-tuning were performed.") > changes
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_closing_paragraph_is_the_one_wording_on_one_line(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        """`karume.modelcard.notice_closing`: the shared sentence, then what is not distributed."""
+        lines = _root_files(pipeline, models)[NOTICE_FILENAME].split("\n")
+        closing = [line for line in lines if line.startswith(NOTICE_CLOSING)]
+
+        assert len(closing) == 1
+        assert closing[0].endswith(" not distributed here.")
 
 
 #: The repositories whose `LICENSE.md` begins with the primary text unfenced: the Gemma 4 ones,

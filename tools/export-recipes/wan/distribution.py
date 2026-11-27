@@ -78,7 +78,7 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
-from karume.modelcard import HF_OWNER
+from karume.modelcard import HF_OWNER, notice_closing
 from wan import umt5_tokenizer
 from wan.card import WAN22_CARD, WanCard, render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
@@ -605,7 +605,7 @@ This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint
   translation of ftfy's mojibake-detection pattern) that the host uses to reproduce the cleaning or
   to reject a prompt.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 

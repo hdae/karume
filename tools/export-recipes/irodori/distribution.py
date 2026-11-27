@@ -69,7 +69,7 @@ from karume.dist import (
     ir_graph,
     sha256_file,
 )
-from karume.modelcard import HF_OWNER
+from karume.modelcard import HF_OWNER, notice_closing
 from karume.verify import ContainerError, verify_container
 
 from .card import (
@@ -1946,7 +1946,7 @@ The following changes were made:
   graphs (`dit` and `dit_context`) add an `i4` series rounded with GPTQ calibration. The `f32`
   series is not quantized.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
 
 
@@ -2189,7 +2189,7 @@ The following changes were made:
   Karume's tokenizer format.
 {_IRODORI_CODEC_CHANGES}
 {_irodori_large_storage_sentence()}
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
 
 

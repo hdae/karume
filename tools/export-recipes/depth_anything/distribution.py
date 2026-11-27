@@ -65,6 +65,7 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     DEPTH_ANYTHING_CONVT_DIFF,
@@ -441,7 +442,7 @@ This repository redistributes a modified form of the Depth Anything V2 checkpoin
   {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1.
 - **No quantization**: the stored weights are the source checkpoint's own f32 values.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 

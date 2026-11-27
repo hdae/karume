@@ -56,6 +56,7 @@ from karume.dist import (
     component_parts,
     sha256_file,
 )
+from karume.modelcard import notice_closing
 from karume.verify import ContainerError, verify_container
 
 #: Name and role of the per-axis raw tables the host builds the rope tables from (an **asset** of
@@ -260,8 +261,7 @@ def notice_markdown(models: Sequence[str], modifications: tuple[str, ...]) -> st
                 "",
                 *modifications,
                 "",
-                "No retraining and no fine-tuning were performed. The original checkpoints are not"
-                " distributed here.",
+                notice_closing("The original checkpoints are"),
                 "",
                 "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
                 "approved or validated by CircleStone Labs LLC.",

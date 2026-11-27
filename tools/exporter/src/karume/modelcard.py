@@ -169,6 +169,18 @@ def pinned(repo: str, revision: str) -> str:
 #: it in its changes bullet ({@link changes_made_here}).
 APACHE_MODIFICATION_CLAUSE = "Apache 2.0 §4(b)"
 
+#: The sentence every `NOTICE.md`'s closing paragraph opens with.
+NOTICE_CLOSING = "No retraining and no fine-tuning were performed."
+
+
+# SPEC: docs/spec/distribution-cards.md#noticemd
+def notice_closing(not_distributed: str = "The original checkpoint is") -> str:
+    """The closing paragraph of `NOTICE.md`: {@link NOTICE_CLOSING}, then what of the upstream
+    is not distributed here (`not_distributed` is the subject and its verb: "The original
+    checkpoint is", "The original checkpoints are")."""
+    return f"{NOTICE_CLOSING} {not_distributed} not distributed here."
+
+
 #: Where the Apache License 2.0 text lives (the text `LICENSE.md` copies — Apache 2.0 §4(a)).
 APACHE_LICENSE_TEXT_URL = "https://www.apache.org/licenses/LICENSE-2.0"
 

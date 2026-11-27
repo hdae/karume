@@ -19,6 +19,7 @@ import pytest
 
 from karume.modelcard import (
     MEASUREMENTS_LEAD,
+    NOTICE_CLOSING,
     UNOFFICIAL_CONVERSION_NOTICE,
     CardMetadata,
     Measurement,
@@ -31,6 +32,7 @@ from karume.modelcard import (
     model_measurements,
     model_sections,
     models,
+    notice_closing,
     pinned,
     quants,
     render,
@@ -501,6 +503,20 @@ class TestQuantsNotes:
 
         assert any(line.startswith("Weights ship as Karume container files") for line in lines)
         assert not any(line.startswith("A component stored as") for line in lines)
+
+
+class TestNoticeClosing:
+    """docs/spec/distribution-cards.md#noticemd — every notice closes with one wording."""
+
+    def test_it_says_no_training_was_done_and_what_is_not_distributed(self) -> None:
+        assert notice_closing() == (
+            "No retraining and no fine-tuning were performed. The original checkpoint is not"
+            " distributed here."
+        )
+        assert notice_closing("The original checkpoints are").startswith(NOTICE_CLOSING + " ")
+        assert notice_closing("The original checkpoints are").endswith(
+            " The original checkpoints are not distributed here."
+        )
 
 
 class TestMeasurementNotes:

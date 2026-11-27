@@ -55,6 +55,7 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     SIGLIP2_LICENSE,
@@ -426,7 +427,7 @@ following changes were made:
   whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}, the difference is {SIGLIP2_MAP_HEAD_DIFF}.
 - **No quantization**: the stored weights are the source checkpoints' own f32 values.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
 
 

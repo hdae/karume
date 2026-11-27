@@ -234,7 +234,7 @@ The level-2 sections come in this order:
   International", "the Gemma Terms of Use"), with parts taken from other releases as bullets or paragraphs; then
   "The following changes were made:" and a
   bullet list; then a closing paragraph beginning "No retraining and no fine-tuning were performed." that says the
-  original checkpoint is not distributed here.
+  original checkpoint is not distributed here, on one line (`karume.modelcard.notice_closing`).
 - Every license a notice names is named by its full title, never by a short name ("Apache 2.0", "CC BY-SA 4.0",
   "(MIT)").
 - Statements a license or an upstream requires in its own words stand before the change list or after the closing
@@ -283,11 +283,12 @@ One constant, imported where it is written:
 - In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the upstream-card bullet, the link and
   pin of an upstream (`hf_link`, `pinned`), the Apache text's address and the words after an Apache license
   (`APACHE_LICENSE_TEXT_URL`, `APACHE_LICENSE_REFERENCE`), the quotation of an upstream card (`UpstreamQuote`,
-  `quotation`), the revision-pin comment, the notes under the quant tables (the measurement notes among them:
+  `quotation`), the revision-pin comment, the closing paragraph of `NOTICE.md` (`NOTICE_CLOSING`,
+  `notice_closing`), the notes under the quant tables (the measurement notes among them:
   `Measurement`, `measurements`, `MEASUREMENTS_LEAD`) and the cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices. Each quotation
   is one `UpstreamQuote` of its family's card module.
 
-Everything else above (the notices' closing paragraph, the "What is this" sentences) is written per family.
+Everything else above (the "What is this" sentences among it) is written per family.

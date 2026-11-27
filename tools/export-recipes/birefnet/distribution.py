@@ -89,6 +89,7 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     BIREFNET_CHECKPOINTS,
@@ -792,7 +793,7 @@ The following changes were made:
   floating-point rounding and removes two full-resolution intermediates.
 {storage}
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{closing}
 """
 
 
@@ -808,6 +809,7 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
     return {
         "LICENSE.md": license_markdown(mit_license(BIREFNET_COPYRIGHTS[checkpoint])),
         "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(
+            closing=notice_closing(),
             repo=BIREFNET_UPSTREAM[checkpoint],
             swin=SWIN_TRANSFORMER_UPSTREAM,
             storage="\n".join(birefnet_storage_lines(checkpoint, birefnet_seat_dtypes(checkpoint))),

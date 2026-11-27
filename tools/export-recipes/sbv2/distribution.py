@@ -65,6 +65,7 @@ from karume.dist import (
     ir_graph,
     table_payload,
 )
+from karume.modelcard import notice_closing
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_JVNV_CORPUS_PAGE,
@@ -1129,7 +1130,7 @@ The following changes were made:
   encoder as `i8` / mixed, where the mixed form stores the group-quantizable weights as `i4` and
   everything else as `i8`.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 The modified forms in this repository are licensed under the Creative Commons
 Attribution-ShareAlike 4.0 International license as well, with no further restrictions.
 """
