@@ -45,7 +45,7 @@ from karume.dist import (
 )
 from moss import distribution as dist
 from moss import sources
-from moss.card import MOSS_TITLE, render_moss_model_card
+from moss.card import MOSS_BFL_NON_ENDORSEMENT, MOSS_TITLE, render_moss_model_card
 
 
 def _series_present() -> bool:
@@ -415,6 +415,14 @@ class TestTheCard:
             assert "FLUX" in sentence
             assert "OpenMOSS" not in sentence
             assert "Qwen" not in sentence
+
+    def test_the_card_and_the_notice_write_the_one_flux_marks_sentence(self) -> None:
+        """docs/spec/distribution-cards.md#shared-wording — one constant for both."""
+        card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
+
+        assert f"\n- {MOSS_BFL_NON_ENDORSEMENT}\n" in card
+        assert f"\n\n{MOSS_BFL_NON_ENDORSEMENT}\n\n" in dist.MOSS_NOTICE_MARKDOWN
+        assert "the Black Forest Labs and FLUX names and marks" in MOSS_BFL_NON_ENDORSEMENT
 
     def test_the_title_is_followed_by_the_house_sentence(self) -> None:
         """Beside the FLUX marks sentence, not in place of it: every upstream and its publisher."""

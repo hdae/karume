@@ -288,7 +288,8 @@ One constant, imported where it is written:
   `Measurement`, `measurements`, `MEASUREMENTS_LEAD`) and the cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
-- Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices. Each quotation
-  is one `UpstreamQuote` of its family's card module.
+- Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; MOSS-Image's
+  Black Forest Labs non-endorsement (`moss.card.MOSS_BFL_NON_ENDORSEMENT`). Each quotation is one `UpstreamQuote` of
+  its family's card module.
 
 Everything else above (the "What is this" sentences among it) is written per family.

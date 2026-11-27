@@ -66,7 +66,7 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import notice_closing
-from moss.card import MOSS_SUPPORTED_PIPELINE, render_moss_model_card
+from moss.card import MOSS_BFL_NON_ENDORSEMENT, MOSS_SUPPORTED_PIPELINE, render_moss_model_card
 from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN
 
 #: The pipeline contract (ADR 0041 §2). The TS reader accepts `MOSS_PIPELINE_NAME` /
@@ -266,8 +266,7 @@ Apache License, Version 2.0 as well:
   batch-normalization statistics from the VAE of `black-forest-labs/FLUX.2-klein-4B`. Only the
   decode path is included here; the VAE encoder is not.
 
-This is not an official release of Black Forest Labs, and it is not endorsed by them; the Black
-Forest Labs and FLUX names and marks are used only to describe where the VAE weights come from.
+{MOSS_BFL_NON_ENDORSEMENT}
 
 The following changes were made:
 

@@ -68,6 +68,16 @@ MOSS_VAE_PARTS: Mapping[str, str] = {
 }
 
 
+#: The non-endorsement statement Black Forest Labs' cards ask for ("Trademarks & IP": the BFL and
+#: FLUX marks in modified versions "must not ... imply sponsorship or endorsement"; maintainer
+#: decision 2026-11-01: kept only where an upstream asks for it, so it names Black Forest Labs
+#: alone). The card's attribution section and `NOTICE.md` both write it from here.
+MOSS_BFL_NON_ENDORSEMENT = (
+    "This is not an official release of Black Forest Labs, and it is not endorsed by them; the"
+    " Black Forest Labs and FLUX names and marks are used only to describe where the VAE weights"
+    " come from."
+)
+
 #: What Black Forest Labs' cards of both VAE origins state of their use, quoted verbatim (the cards
 #: at the pinned commits of `moss.sources.VAE_ORIGINS`, read 2026-11-27): both point to its usage
 #: policies without a link, and the FLUX.2 [klein] 4B card says its statements do not modify the
@@ -204,12 +214,7 @@ def _base_weights() -> list[str]:
         "  which borrows its weights), the VAE decoder into three graphs around its middle",
         "  attention, and the text encoder keeps its text tower only. No retraining and no",
         "  fine-tuning.",
-        # Black Forest Labs only: of the upstreams, only its cards ask for this ("Trademarks & IP":
-        # the BFL and FLUX marks in modified versions "must not ... imply sponsorship or
-        # endorsement"). Maintainer decision 2026-11-01.
-        "- This is not an official release of Black Forest Labs, and it is not endorsed by them;",
-        "  the Black Forest Labs and FLUX names are used only to describe where the VAE weights",
-        "  come from.",
+        f"- {MOSS_BFL_NON_ENDORSEMENT}",
         *upstream_cards([hf_link(repo) for repo in _metadata().base_model]),
     ]
     return lines
