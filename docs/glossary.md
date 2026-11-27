@@ -152,6 +152,7 @@
 | Legal texts (`NOTICE.md`, `LICENSE.md`) | The only files besides the manifest and the card that a pipeline puts at the repository root (`LEGAL_PATHS`): the notice of attribution and modifications, and the license texts verbatim | [distribution-cards](spec/distribution-cards.md#files-at-the-repository-root) |
 | Primary / further license text | The text `LICENSE.md` begins with, verbatim from its first byte, and a text that follows it after a `---` line with a heading and the components it covers | [distribution-cards](spec/distribution-cards.md#licensemd) |
 | Upstream quotation | An upstream card's statement quoted verbatim on a card: a lead linking the quoted `README.md` at the pinned commit and naming the headings it stands under, then one blockquote (`karume.modelcard.UpstreamQuote`, `quotation`) | [distribution-cards](spec/distribution-cards.md#what-the-upstream-says) |
+| Measurement note | A bullet under a model's quant table stating what one preset measured (its speed, the quality heard or seen), with what was measured when it was not this model, the device and the date (`karume.modelcard.Measurement`, `measurements`). A preset's description never states it | [distribution-cards](spec/distribution-cards.md#presets-and-the-quant-tables) |
 
 ## Generation and context
 

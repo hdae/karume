@@ -25,14 +25,17 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any
 
 import pytest
 
+from karume.modelcard import MEASUREMENTS_LEAD
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_DEMO_TEXT,
     SBV2_JVNV_PROFILE,
+    SBV2_MEASUREMENTS,
     SBV2_QUANT_ROUNDING,
     SBV2_SUPPORTED_PIPELINE,
     SBV2_TEXT_ENCODER_REVISION,
@@ -305,7 +308,7 @@ class TestSbv2QuantRounding:
     def _notes(card: str) -> str:
         _, _, rest = card.partition("## Model: ZA")
         _, _, notes = rest.partition("How the stored weights were rounded:")
-        return notes.partition("### Styles")[0]
+        return notes.partition("### Styles")[0].partition(MEASUREMENTS_LEAD)[0]
 
     def test_it_explains_only_the_quants_the_model_declares(self, sbv2_card: str) -> None:
         """Quants the distribution does not have are not explained (the same discipline as
@@ -359,6 +362,67 @@ class TestSbv2QuantRounding:
         manifest["models"]["ZA"]["defaultQuant"] = "i8"
         moved = render_sbv2_model_card(manifest, REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "- `i8` (default) —" in self._notes(moved)
+
+
+def _every_preset_manifest() -> dict[str, Any]:
+    """The fake manifest with its model `ZA` shipping every preset of the family."""
+    manifest = _sbv2_manifest()
+    model = manifest["models"]["ZA"]
+    for role, digit in (("text_encoder", "b"), ("front", "c"), ("voice", "d")):
+        model["weights"][role]["i4"] = _container(_ref(f"ZA/{role}/model.i4.krm", 12, digit))
+    model["quants"] = copy.deepcopy(dict(SBV2_QUANTS))
+    return manifest
+
+
+class TestSbv2Measurements:
+    """docs/spec/distribution-cards.md#presets-and-the-quant-tables — what a preset measured is a
+    note after the rounding notes naming the device, the date and, where it was not these voices,
+    what was measured."""
+
+    @staticmethod
+    def _measured(card: str, model: str = "ZA") -> list[str]:
+        section = card.partition(f"## Model: {model}")[2].partition("### Styles")[0]
+        if MEASUREMENTS_LEAD not in section:
+            return []
+        return section.partition(MEASUREMENTS_LEAD)[2].strip().split("\n")
+
+    def test_they_follow_the_rounding_notes_with_device_date_and_the_voice_measured(self) -> None:
+        card = render_sbv2_model_card(
+            _every_preset_manifest(), REPO, SBV2_JVNV_PROFILE, SBV2_QUANT_ABBREVIATIONS
+        )
+        other = "on another Style-Bert-VITS2 JP-Extra voice; "
+
+        assert card.index("How the stored weights were rounded:") < card.index(MEASUREMENTS_LEAD)
+        assert self._measured(card) == [
+            "- `f16+bert8` — with `front` and `voice` in f16 and the text encoder in f32, the audio"
+            " differed from f32's by an SNR of 40.5 dB and a log-spectral distance of 0.36 dB,"
+            f" against 8.6 dB and 3.20 dB in int8 ({other}a torch simulation of the stored weights"
+            " on the CPU, 2026-08-04).",
+            "- `i8-a8` — the text encoder stage of a 17-token sentence took 228 ms against 279 ms"
+            " without the int8 activations (NVIDIA GeForce RTX 3080 Ti, 2026-08-03).",
+            "- `i8+bert4` — a listening check against f32 heard it nearly identical"
+            f" ({other}NVIDIA GeForce RTX 3080 Ti, 2026-08-20).",
+            "- `i4` — warm synthesis took about 500 ms, the fastest of `i8`, `i8+bert4` and `i4`"
+            f" ({other}NVIDIA GeForce RTX 3080 Ti, 2026-08-20).",
+            "- `i4` — a listening check against f32 heard slightly lower tension"
+            f" ({other}NVIDIA GeForce RTX 3080 Ti, 2026-08-20).",
+        ]
+
+    def test_a_model_gets_the_notes_of_its_own_presets_only(self, sbv2_card: str) -> None:
+        assert [line.split(" — ")[0] for line in self._measured(sbv2_card)] == ["- `i8-a8`"]
+        assert self._measured(sbv2_card, "ZB") == []
+
+    def test_every_measurement_names_a_preset_of_the_family(self) -> None:
+        assert {measurement.preset for measurement in SBV2_MEASUREMENTS} <= set(SBV2_QUANTS)
+
+    def test_no_description_or_rounding_note_states_a_measurement(self) -> None:
+        measured = re.compile(
+            r"\b(faster|fastest|slower|listening|audibl\w*|closest|tension|measured)\b",
+            re.IGNORECASE,
+        )
+        for name, quant in SBV2_QUANTS.items():
+            assert measured.search(quant["description"]) is None, name
+            assert measured.search(" ".join(SBV2_QUANT_ROUNDING[name])) is None, name
 
 
 class TestSbv2Derivation:

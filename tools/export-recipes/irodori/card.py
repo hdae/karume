@@ -33,6 +33,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     UpstreamQuote,
     changes_made_here,
     default_model,
@@ -41,6 +42,7 @@ from karume.modelcard import (
     hf_link,
     introduction,
     knob,
+    model_measurements,
     model_sections,
     models,
     pinned,
@@ -74,6 +76,59 @@ class IrodoriUpstream:
     #: The model upstream distilled these weights from (a MeanFlow student names its RF teacher —
     #: ADR 0150), or `None`.
     teacher: str | None = None
+
+
+#: The GPU the measurements of 2026-08-12 and 2026-11-14 ran on (the development machine of
+#: those dates: ADR 0151 names it for 2026-11-14; for 2026-08-12 the records name no device, and
+#: the machine had this GPU then).
+_IRODORI_MEASURED_ON = "NVIDIA GeForce RTX 3080 Ti"
+
+#: What Irodori-TTS v4 Small measured (the quantization record of 2026-08-12, ADR 0050: the
+#: maintainer's listening of f32 / f16 pairs, and the wall time of `i8-a8`).
+_IRODORI_V4_MEASUREMENTS: tuple[Measurement, ...] = (
+    Measurement(
+        "f16",
+        "a listening check of f32 and f16 pairs with the same text and seed, plain synthesis and"
+        " voice cloning, found the audio almost the same",
+        _IRODORI_MEASURED_ON,
+        "2026-08-12",
+    ),
+    Measurement(
+        "i8-a8",
+        "one generation took 7.6 s of wall time against 8.5 s without the int8 activations, in two"
+        " runs under the same conditions",
+        _IRODORI_MEASURED_ON,
+        "2026-08-12",
+    ),
+)
+
+#: Model name → what its presets measured, written under its quant table (the maintainer's ruling
+#: of 2026-11-27: a measurement is a note naming its device and date, never a preset's
+#: description). v4.1-small carries v4 Small's, naming it: its other graphs are byte-identical to
+#: v4 Small's (`IRODORI_V41_SHARED_ROLES` in `distribution.py`). v4.1-small-mf: the maintainer's
+#: listening of 2026-11-14 (ADR 0150). v4-Large has none.
+IRODORI_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "v4-small": _IRODORI_V4_MEASUREMENTS,
+    "v4.1-small": tuple(
+        Measurement(
+            measurement.preset,
+            measurement.statement,
+            measurement.device,
+            measurement.date,
+            "Irodori-TTS v4 Small, which differs from this model only in the duration predictor",
+        )
+        for measurement in _IRODORI_V4_MEASUREMENTS
+    ),
+    "v4.1-small-mf": (
+        Measurement("i8", "a listening check found it fine", _IRODORI_MEASURED_ON, "2026-11-14"),
+        Measurement(
+            "i8-a8",
+            "a listening check found no audible degradation",
+            _IRODORI_MEASURED_ON,
+            "2026-11-14",
+        ),
+    ),
+}
 
 
 #: Distributed model name → upstream facts. v4.1-small is the successor with only the duration
@@ -679,7 +734,15 @@ def render_irodori_model_card(
             _irodori_usage(manifest, repo),
             *model_sections(
                 manifest,
-                (partial(quants, host_assets=host_assets), _irodori_shape, _irodori_defaults),
+                (
+                    partial(
+                        quants,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, IRODORI_MEASUREMENTS),
+                    ),
+                    _irodori_shape,
+                    _irodori_defaults,
+                ),
             ),
         )
     )
@@ -863,7 +926,11 @@ def render_irodori_large_model_card(
             *model_sections(
                 manifest,
                 (
-                    partial(quants, host_assets=host_assets),
+                    partial(
+                        quants,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, IRODORI_MEASUREMENTS),
+                    ),
                     _irodori_shape,
                     partial(_irodori_defaults, rare_token_split=False),
                 ),

@@ -31,6 +31,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     UpstreamQuote,
     changes_made_here,
     default_model,
@@ -39,6 +40,7 @@ from karume.modelcard import (
     hf_link,
     introduction,
     knob,
+    measurements,
     model_sections,
     models,
     pinned,
@@ -110,11 +112,66 @@ SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
     ),
     "i4": (
         "the same text encoder as `i8+bert4`, plus `front` / `voice` linear and conv1d",
-        "  weights in `i4` group-32 with plain RTN. Smallest download and fastest warm",
-        "  synthesis; the output is very close to `i8+bert4`, with slightly lower tension",
-        "  than the source checkpoint's unquantized f32 reference.",
+        "  weights in `i4` group-32 with plain RTN.",
     ),
 }
+
+#: What the measurements below were taken on, when it was not these voices: they predate this
+#: repository's voices (2026-08-03 / 04) or used another voice of the same architecture (the
+#: records of 2026-08-20 name it). The text encoder is the same in every voice, so its timing
+#: needs no subject.
+_SBV2_OTHER_VOICE = f"another {SBV2_ARCHITECTURE} voice"
+
+#: The development machine's GPU on those dates (ADR 0026 names it for 2026-08-03; the records
+#: of 2026-08-20 name no device, and the machine had this GPU then).
+_SBV2_MEASURED_ON = "NVIDIA GeForce RTX 3080 Ti"
+
+#: What the presets measured, written under every voice's quant table (the maintainer's ruling
+#: of 2026-11-27: a measurement is a note naming its device and date, never a preset's
+#: description). Sources: ADR 0029 (2026-08-04 — the torch simulation of the stored weights,
+#: the text encoder in f32 for every configuration), ADR 0026 (2026-08-03 — the text encoder
+#: stage of the demo sentence, 17 tokens), perf-ledger Q-5 and research 2026-08-20 §7 (warm
+#: synthesis after the conv1d int4 addendum) and the maintainer's listening of 2026-08-20 after
+#: that addendum.
+SBV2_MEASUREMENTS: tuple[Measurement, ...] = (
+    Measurement(
+        "f16+bert8",
+        "with `front` and `voice` in f16 and the text encoder in f32, the audio differed from"
+        " f32's by an SNR of 40.5 dB and a log-spectral distance of 0.36 dB, against 8.6 dB and"
+        " 3.20 dB in int8",
+        "a torch simulation of the stored weights on the CPU",
+        "2026-08-04",
+        _SBV2_OTHER_VOICE,
+    ),
+    Measurement(
+        "i8-a8",
+        "the text encoder stage of a 17-token sentence took 228 ms against 279 ms without the"
+        " int8 activations",
+        _SBV2_MEASURED_ON,
+        "2026-08-03",
+    ),
+    Measurement(
+        "i8+bert4",
+        "a listening check against f32 heard it nearly identical",
+        _SBV2_MEASURED_ON,
+        "2026-08-20",
+        _SBV2_OTHER_VOICE,
+    ),
+    Measurement(
+        "i4",
+        "warm synthesis took about 500 ms, the fastest of `i8`, `i8+bert4` and `i4`",
+        _SBV2_MEASURED_ON,
+        "2026-08-20",
+        _SBV2_OTHER_VOICE,
+    ),
+    Measurement(
+        "i4",
+        "a listening check against f32 heard slightly lower tension",
+        _SBV2_MEASURED_ON,
+        "2026-08-20",
+        _SBV2_OTHER_VOICE,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -328,7 +385,8 @@ def _sbv2_quants(
 
     A different responsibility from the display fields (`label` / `description`) — those are the one
     line from the manifest saying "what one quant is", while this is the scripts' knowledge of "how
-    that storage was produced" (ADR 0075 decision 5).
+    that storage was produced" (ADR 0075 decision 5). What the presets measured follows
+    ({@link SBV2_MEASUREMENTS}).
     """
     default = model["defaultQuant"]
     table = quants(model, abbreviations=abbreviations, host_assets=host_assets)
@@ -340,9 +398,8 @@ def _sbv2_quants(
         mark = " (default)" if name == default else ""
         head, *rest = rounding
         notes += [f"- `{name}`{mark} — {head}", *rest]
-    if not notes:
-        return table
-    return [*table, "", "How the stored weights were rounded:", "", *notes]
+    rounded = [] if not notes else ["", "How the stored weights were rounded:", "", *notes]
+    return [*table, *rounded, *measurements(model, SBV2_MEASUREMENTS)]
 
 
 def _name_id_rows(table: Mapping[str, int]) -> list[str]:

@@ -18,13 +18,17 @@ from typing import Any
 import pytest
 
 from karume.modelcard import (
+    MEASUREMENTS_LEAD,
     UNOFFICIAL_CONVERSION_NOTICE,
     CardMetadata,
+    Measurement,
     Upstream,
     file_ref_key,
     from_pretrained,
     frontmatter,
     introduction,
+    measurements,
+    model_measurements,
     model_sections,
     models,
     pinned,
@@ -497,6 +501,62 @@ class TestQuantsNotes:
 
         assert any(line.startswith("Weights ship as Karume container files") for line in lines)
         assert not any(line.startswith("A component stored as") for line in lines)
+
+
+class TestMeasurementNotes:
+    """docs/spec/distribution-cards.md#presets-and-the-quant-tables — what a preset measured is a
+    note under the quant table naming the device and the date, never part of its description."""
+
+    _MEASURED = (
+        Measurement("w8", "one pass took 9.9 s against 21.8 s for `f16`", "GPU A", "2026-10-04"),
+        Measurement(
+            "f16", "a listening check heard no difference", "GPU B", "2026-08-12", "model Y"
+        ),
+    )
+
+    def test_they_follow_the_table_notes_as_a_list_naming_device_and_date(self) -> None:
+        lines = quants(_manifest()["models"]["zeta"], measured=self._MEASURED)
+        start = lines.index(MEASUREMENTS_LEAD)
+
+        assert lines[start - 1] == "" and lines[start + 1] == ""
+        assert lines[start + 2 :] == [
+            "- `w8` — one pass took 9.9 s against 21.8 s for `f16` (GPU A, 2026-10-04).",
+            "- `f16` — a listening check heard no difference (on model Y; GPU B, 2026-08-12).",
+        ]
+        assert lines[start - 2].startswith("A path under `shared/`")  # the last table note
+
+    def test_a_model_without_measurements_gets_no_lead(self) -> None:
+        assert MEASUREMENTS_LEAD not in quants(_manifest()["models"]["zeta"])
+        assert measurements(_manifest()["models"]["zeta"], ()) == []
+
+    def test_a_measurement_of_a_preset_the_model_does_not_ship_is_left_out(self) -> None:
+        """`alpha` ships `f16` only: the `w8` note would describe a preset it cannot ship."""
+        assert measurements(_manifest()["models"]["alpha"], self._MEASURED) == [
+            "",
+            MEASUREMENTS_LEAD,
+            "",
+            "- `f16` — a listening check heard no difference (on model Y; GPU B, 2026-08-12).",
+        ]
+        assert measurements(_manifest()["models"]["alpha"], self._MEASURED[:1]) == []
+
+    def test_a_one_model_manifest_gets_its_models_measurements(self) -> None:
+        manifest = _manifest()
+        del manifest["models"]["alpha"]
+
+        assert model_measurements(manifest, {"zeta": self._MEASURED}) == self._MEASURED
+        assert model_measurements(manifest, {"alpha": self._MEASURED}) == ()
+
+    def test_measurements_of_one_model_of_several_fail(self) -> None:
+        """The same notes under every model's table would state `zeta`'s measurements of
+        `alpha`."""
+        with pytest.raises(ValueError, match="manifest of several models"):
+            model_measurements(_manifest(), {"zeta": self._MEASURED})
+        assert model_measurements(_manifest(), {"omega": self._MEASURED}) == ()
+
+    @pytest.mark.parametrize(("device", "date"), [("", "2026-10-04"), ("GPU A", "October 2026")])
+    def test_a_measurement_without_a_device_or_a_date_fails(self, device: str, date: str) -> None:
+        with pytest.raises(ValueError, match="no device or no YYYY-MM-DD date"):
+            measurements(_manifest()["models"]["zeta"], (Measurement("w8", "fast", device, date),))
 
 
 class TestQuantsSection:

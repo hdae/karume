@@ -309,7 +309,8 @@ SBV2_QUANT_ABBREVIATIONS: Mapping[str, str] = {"bert": "text_encoder"}
 #:
 #: `label` / `description` are display fields for selection UIs (ADR 0075 decision 1 — English,
 #: limits of 64 / 200 characters). Being the default is not written there (`defaultQuant` already
-#: points at it — ADR 0075 decision 3).
+#: points at it — ADR 0075 decision 3), and neither is what a preset measured: that is a note of
+#: the card naming its device and date (`SBV2_MEASUREMENTS` in `card.py`).
 #:
 #: NOTE: on the net_g side, i4 became **the main source of the size gain** with the conv1d addendum
 #: (wave J-5b, ADR 0069 addendum 7) — the eligible conv1d weights (≈56MiB) are halved (in the
@@ -322,7 +323,7 @@ SBV2_QUANTS: Mapping[str, Any] = {
         "session": {},
         "label": "Highest fidelity (f16 synthesis)",
         "description": "front and voice in f16 storage, with the int8 text encoder — the largest"
-        " download, and the closest match to the source checkpoint's audio.",
+        " download.",
     },
     "i8": {
         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
@@ -336,21 +337,21 @@ SBV2_QUANTS: Mapping[str, Any] = {
         "session": {"linearCompute": "a8"},
         "label": "int8 with int8 linear activations",
         "description": "The int8 weights with per-token int8 activations in the linear layers —"
-        " faster on GPUs with dp4a, same download as the plain int8 preset.",
+        " the same download as the plain int8 preset.",
     },
     "i8+bert4": {
         "weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"},
         "session": {},
         "label": "Balanced (int8 + int4 text encoder)",
         "description": "int8 synthesis with the text encoder in GPTQ-calibrated int4 (group-32):"
-        " a markedly smaller download that stays audibly level with f32.",
+        " a markedly smaller download.",
     },
     "i4": {
         "weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"},
         "session": {},
         "label": "Smallest (int4)",
-        "description": "Text encoder, front and voice all in int4 group-32 — the smallest download"
-        " and the fastest warm start, with slightly lower tension than f32.",
+        "description": "Text encoder, front and voice all in int4 group-32 — the smallest"
+        " download.",
     },
 }
 

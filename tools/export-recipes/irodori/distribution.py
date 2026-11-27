@@ -380,8 +380,7 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         "f16",
         {},
         label="Half size (f16)",
-        description="Every graph stored as f16 and computed in f32 — half the f32 download,"
-        " with no audible difference in the listening check.",
+        description="Every graph stored as f16 and computed in f32 — half the f32 download.",
     ),
     "i8": QuantSeat(
         "i8",
@@ -395,7 +394,7 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         {"linearCompute": "a8"},
         label="Balanced (int8, int8 linear)",
         description="The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8, and faster per Euler step.",
+        " — the same download as plain int8.",
     ),
     "i8+dit4": QuantSeat(
         "i8",
@@ -1368,29 +1367,18 @@ IRODORI_MODEL_SEAT_LABELS: Mapping[str, Mapping[str, str]] = {
     },
 }
 
-#: Model → (preset name → its own description), for a model whose presets were judged apart from
-#: the family's rulings ({@link irodori_quants}). The family's descriptions carry the v4 listening
-#: check and the v4 speed measurement; for v4.1-small-mf they say only what was established for
-#: that model — the maintainer's listening of 2026-11-14 covered `i8` and `i8-a8`, and nothing
-#: else was judged or measured for it (ADR 0150). `f32` and `i8+dit4` state facts of the storage
-#: only, so they keep the family's text.
+#: Model → (preset name → its own description), for a model of which the family's description
+#: would state something untrue ({@link irodori_quants}). Every description states facts of the
+#: storage and the knobs only; what a preset measured is a note of the card
+#: (`IRODORI_MEASUREMENTS` in `card.py`).
 IRODORI_MODEL_SEAT_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = {
-    IRODORI_V41_MF_MODEL: {
-        "f16": "Every graph stored as f16 and computed in f32 — half the f32 download.",
-        "i8": "Every graph stored as int8 and computed in f32 — about a quarter of the f32"
-        " download; it sounded fine in a listening check.",
-        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8, with no audible degradation in a listening check.",
-    },
-    # Nothing was listened to or timed for v4-Large yet, and it ships no `f32`: storage facts only
-    # (`i8+dit4` keeps the family's text, which states storage facts only).
+    # v4-Large ships no `f32`, so the family's sizes relative to it do not apply (`i8-a8` and
+    # `i8+dit4` keep the family's text).
     IRODORI_V4_LARGE_MODEL: {
         "f16": "Every graph stored as f16 and computed in f32 — the largest download of this"
         " repository (no f32 preset is shipped).",
         "i8": "Every graph stored as int8 and computed in f32, with the execution path left"
         " unchanged.",
-        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8.",
     },
 }
 

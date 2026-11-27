@@ -19,10 +19,13 @@ from typing import Any
 import pytest
 
 from irodori.card import (
+    IRODORI_MEASUREMENTS,
     IRODORI_SUPPORTED_PIPELINE,
     render_irodori_large_model_card,
     render_irodori_model_card,
 )
+from irodori.distribution import irodori_presets
+from karume.modelcard import MEASUREMENTS_LEAD
 
 #: The repo ID written into the usage snippet (dist passes it from the pipeline declaration).
 REPO = "hdae/fake-repo"
@@ -246,6 +249,79 @@ class TestIrodoriStorageAttribution:
         parts[0] |= {"repo": self.HOLDER, "revision": "0" * 40}
 
         with pytest.raises(ValueError, match="a component lives in one place"):
+            render_irodori_model_card(manifest, REPO)
+
+
+def _with_presets(manifest: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """`manifest` with its one model shipping `names`, each one the fake `f16` preset under that
+    name (the card reads a preset's name and storage, not what it computes)."""
+    (model,) = manifest["models"].values()
+    model["quants"] = {name: model["quants"]["f16"] for name in names}
+    return manifest
+
+
+_DEVICE_AND_DATE = "NVIDIA GeForce RTX 3080 Ti, 2026-08-12"
+
+
+class TestIrodoriMeasurements:
+    """docs/spec/distribution-cards.md#presets-and-the-quant-tables — what a preset measured is a
+    note under the model's quant table naming the device and the date."""
+
+    _V4_NOTES = (
+        "- `f16` — a listening check of f32 and f16 pairs with the same text and seed, plain"
+        " synthesis and voice cloning, found the audio almost the same ({on}"
+        + _DEVICE_AND_DATE
+        + ").",
+        "- `i8-a8` — one generation took 7.6 s of wall time against 8.5 s without the int8"
+        " activations, in two runs under the same conditions ({on}" + _DEVICE_AND_DATE + ").",
+    )
+
+    def _card(self, model: str) -> str:
+        manifest = _with_presets(_irodori_manifest(model), ("f16", "i8", "i8-a8"))
+        return render_irodori_model_card(manifest, REPO)
+
+    def test_v4_small_states_its_listening_check_and_its_wall_time(self) -> None:
+        card = self._card("v4-small").split("\n")
+        start = card.index(MEASUREMENTS_LEAD)
+
+        assert card[start + 2 : start + 4] == [line.format(on="") for line in self._V4_NOTES]
+
+    def test_v4_1_small_states_v4_smalls_and_names_the_model_measured(self) -> None:
+        on = (
+            "on Irodori-TTS v4 Small, which differs from this model only in the duration"
+            " predictor; "
+        )
+        card = self._card("v4.1-small").split("\n")
+        start = card.index(MEASUREMENTS_LEAD)
+
+        assert card[start + 2 : start + 4] == [line.format(on=on) for line in self._V4_NOTES]
+
+    def test_the_meanflow_student_states_its_own_listening(self) -> None:
+        card = render_irodori_model_card(
+            _with_presets(_meanflow_manifest(), ("f16", "i8", "i8-a8")), REPO
+        ).split("\n")
+        start = card.index(MEASUREMENTS_LEAD)
+
+        assert card[start + 2 : start + 4] == [
+            "- `i8` — a listening check found it fine (NVIDIA GeForce RTX 3080 Ti, 2026-11-14).",
+            "- `i8-a8` — a listening check found no audible degradation (NVIDIA GeForce RTX 3080"
+            " Ti, 2026-11-14).",
+        ]
+
+    def test_v4_large_states_none(self) -> None:
+        manifest = _with_presets(_large_manifest(), ("f16", "i8", "i8-a8"))
+
+        assert MEASUREMENTS_LEAD not in render_irodori_large_model_card(manifest, REPO)
+
+    def test_every_measurement_names_a_preset_its_model_ships(self) -> None:
+        for model, measured in IRODORI_MEASUREMENTS.items():
+            assert {measurement.preset for measurement in measured} <= set(irodori_presets(model))
+
+    def test_a_manifest_of_two_models_fails(self) -> None:
+        manifest = _irodori_manifest("v4-small")
+        manifest["models"]["v4.1-small"] = manifest["models"]["v4-small"]
+
+        with pytest.raises(ValueError, match="manifest of several models"):
             render_irodori_model_card(manifest, REPO)
 
 

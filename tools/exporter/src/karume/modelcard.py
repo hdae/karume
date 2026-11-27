@@ -552,12 +552,88 @@ def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[
     }
 
 
+@dataclass(frozen=True)
+class Measurement:
+    """What one preset measured: its speed, or the quality heard or seen, with the device and the
+    date (maintainer's ruling of 2026-11-27). A preset's description says what the preset is; a
+    measurement is a note under the quant table, because another device or a later build can
+    measure otherwise.
+
+    `statement` is the result as one clause, without a final period. `device` is the GPU (with the
+    runtime where it was recorded), or what ran the measurement instead (a simulation). `date` is
+    the day of the measurement, `YYYY-MM-DD`. `subject` names what was measured when it was not
+    this model (another voice of the same architecture), else `None`.
+    """
+
+    preset: str
+    statement: str
+    device: str
+    date: str
+    subject: str | None = None
+
+
+#: The line that opens the measurement notes under a quant table.
+MEASUREMENTS_LEAD = (
+    "Measured with these presets, each on the device and at the date named (another device or a"
+    " later build may measure otherwise):"
+)
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
+def measurements(model: Mapping[str, Any], measured: Sequence[Measurement]) -> list[str]:
+    """The measurement notes of one model: a blank line, {@link MEASUREMENTS_LEAD}, a blank line and
+    one bullet per measurement, in the order given; nothing when none applies.
+
+    A measurement of a preset the model does not ship is left out: a note on a preset the
+    repository does not carry would describe what it cannot ship. The families' tests check that
+    each table names presets of the family.
+
+    MUST: a measurement without a device or a date fails — a note that names neither is the very
+    claim this format replaces.
+    """
+    lines: list[str] = []
+    for measurement in measured:
+        if measurement.preset not in model["quants"]:
+            continue
+        if not measurement.device.strip() or _DATE.fullmatch(measurement.date) is None:
+            raise ValueError(
+                f"the measurement of `{measurement.preset}` names no device or no YYYY-MM-DD date"
+            )
+        on = "" if measurement.subject is None else f"on {measurement.subject}; "
+        lines.append(
+            f"- `{measurement.preset}` — {measurement.statement}"
+            f" ({on}{measurement.device}, {measurement.date})."
+        )
+    return [] if not lines else ["", MEASUREMENTS_LEAD, "", *lines]
+
+
+def model_measurements(
+    manifest: Mapping[str, Any], table: Mapping[str, Sequence[Measurement]]
+) -> Sequence[Measurement]:
+    """The measurements of the manifest's model from a recipe's `table` (model name → what its
+    presets measured), for `quants(measured=…)`; none when the table does not name the model.
+
+    MUST: a manifest of several models fails when the table names one of them — `quants` is given
+    one model's notes, and passing them to every model's table would state one model's
+    measurements of the others.
+    """
+    named = [name for name in manifest["models"] if name in table]
+    if named and len(manifest["models"]) != 1:
+        raise ValueError(
+            f"measurements of {named} in a manifest of several models {list(manifest['models'])}"
+        )
+    return table[named[0]] if named else ()
+
+
 # SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
 def quants(
     model: Mapping[str, Any],
     *,
     abbreviations: Mapping[str, str] | None = None,
     host_assets: Mapping[FileRefKey, int] = {},
+    measured: Sequence[Measurement] = (),
 ) -> list[str]:
     """The quant table (ADR 0074 preset names + ADR 0075 display fields + the download size per
     preset).
@@ -579,6 +655,9 @@ def quants(
     apply** (where the source of truth for sha256 is, the dtype vocabulary, `shared/`,
     cross-repository references). Putting them on a distribution they do not apply to would be a
     claim that is not a fact, so the conditions are read from the manifest.
+
+    `measured` is what the recipe measured of this model's presets ({@link measurements}), written
+    after those notes.
     """
     default = model["defaultQuant"]
     lines = [
@@ -630,7 +709,7 @@ def quants(
             f" `{revision[:_SHA_DIGITS]}…` — those bytes are identical to this model's own, so they"
             " are not stored here a second time."
         )
-    return lines
+    return [*lines, *measurements(model, measured)]
 
 
 #: **The steps to pin a revision**, added to the source side of `fromPretrained` (one set shared

@@ -46,6 +46,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -53,6 +54,7 @@ from karume.modelcard import (
     hf_link,
     introduction,
     knob,
+    model_measurements,
     model_sections,
     models,
     pinned,
@@ -193,6 +195,46 @@ WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
 #: {@link WAN22_RESOURCES}, so the table's "not measured yet" line names them.
 WAN22_INT8_VAE_QUANTS = ("i8", "i8-a8-attn8-online-conv8")
 
+#: The decode of the int8 VAE decoder's practical preset against the online preset (ADR 0133
+#: "Results": the NVIDIA GeForce RTX 3080 Ti under Node + Dawn on 2026-10-23, 8 clips at
+#: 1280×704×33 with 50 steps): `(decode, the online preset's decode, clip, the online preset's
+#: clip)`. The Resources prose and the measurement note both read it.
+WAN22_INT8_VAE_TIMING = ("87 s", "168 s", "533 s", "611 s")
+
+#: The device and runtime of Wan2.2's measurements of 2026-10-23.
+_WAN22_MEASURED_ON = "NVIDIA GeForce RTX 3080 Ti, Node with Dawn"
+
+
+def _wan22_measurements() -> dict[str, tuple[Measurement, ...]]:
+    """Model name → what its presets measured, written under its quant table (the maintainer's
+    ruling of 2026-11-27: a measurement is a note naming its device and date, never a preset's
+    description). The online preset's pass is its {@link WAN22_RESOURCES} row against the s16
+    preset's pass of the same morning (ADR 0132 "Results"); the conv8 preset's decode is
+    {@link WAN22_INT8_VAE_TIMING}."""
+    online = WAN22_ONLINE_QUANT_ERROR[0]
+    _, conv8 = WAN22_INT8_VAE_QUANTS
+    decode, online_decode, clip, online_clip = WAN22_INT8_VAE_TIMING
+    ((frames, online_pass, *_),) = WAN22_RESOURCES[online]
+    return {
+        "ti2v-5b": (
+            Measurement(
+                online,
+                f"one transformer pass at {frames} frames (27,280 tokens) took {online_pass}"
+                f" against 24.2 s for `{WAN22_PRACTICAL_QUANT_ERROR[0]}` the same morning",
+                _WAN22_MEASURED_ON,
+                "2026-10-23",
+            ),
+            Measurement(
+                conv8,
+                "over 8 clips at 1280 × 704 with 33 frames and 50 steps, the VAE decode took"
+                f" {decode} against {online_decode} for `{online}`, and the whole clip {clip}"
+                f" against {online_clip}",
+                _WAN22_MEASURED_ON,
+                "2026-10-23",
+            ),
+        ),
+    }
+
 
 @dataclass(frozen=True)
 class WanCard:
@@ -239,6 +281,8 @@ class WanCard:
     attribution_notes: Callable[[Mapping[str, Any]], list[str]]
     #: The "Resources" section (the measured table and its notes — ADR 0089 decision 3).
     resources: Callable[[Mapping[str, Any]], list[str]]
+    #: Model name → what its presets measured (the notes under its quant table).
+    measurements: Mapping[str, tuple[Measurement, ...]]
     #: The lines below are for a generation that takes I2V (ADR 0121 step 9b; empty by default).
     #: Tags added to the frontmatter after the pipeline tag (HF has one pipeline tag, so it stays
     #: text-to-video — I2V is stated by a tag).
@@ -931,6 +975,7 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
     online, _, online_error_33 = WAN22_ONLINE_QUANT_ERROR
     int8_vae_reference, int8_vae_practical = WAN22_INT8_VAE_QUANTS
+    decode, online_decode, clip, online_clip = WAN22_INT8_VAE_TIMING
     online_row = online in measured
     return [
         "## Resources",
@@ -1048,8 +1093,9 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 "  transformer's; `conv8` computes the decoder's 3-D convolutions on per-pixel",
                 "  int8 activations (integer dot products). On the NVIDIA GeForce RTX 3080 Ti",
                 "  under Node with Dawn (2026-10-23, 1280 × 704 with 33 frames, 50 steps, 8 clips)",
-                f"  `{int8_vae_practical}` decoded the clip in 87 s against 168 s for `{online}`",
-                "  (the whole clip 533 s against 611 s) with a GPU-wide peak of 6.2 GiB",
+                f"  `{int8_vae_practical}` decoded the clip in {decode} against {online_decode}"
+                f" for `{online}`",
+                f"  (the whole clip {clip} against {online_clip}) with a GPU-wide peak of 6.2 GiB",
                 "  (nvidia-smi).",
             ]
             if int8_vae_reference in seats and int8_vae_practical in seats
@@ -1167,6 +1213,7 @@ WAN22_CARD = WanCard(
     overview=_wan22_overview,
     attribution_notes=_wan22_attribution_notes,
     resources=_wan22_resources,
+    measurements=_wan22_measurements(),
     extra_tags=("image-to-video",),
     usage_extra=_WAN22_I2V_USAGE,
     inputs_extra=_WAN22_I2V_INPUTS,
@@ -1211,7 +1258,12 @@ def render_wan_model_card(
             *model_sections(
                 manifest,
                 (
-                    partial(quants, abbreviations=abbreviations, host_assets=host_assets),
+                    partial(
+                        quants,
+                        abbreviations=abbreviations,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, card.measurements),
+                    ),
                     _wan_defaults,
                 ),
             ),

@@ -466,8 +466,7 @@ WAN22_QUANTS: Mapping[str, Any] = {
         },
         "label": "int8 transformer, int8 activations, online attention",
         "description": "The int8 transformer with per-token int8 activations and attention"
-        " computed online: the scores are never stored, so the long clips run faster on the same"
-        " weights as the s16 preset.",
+        " computed online: the scores are never stored; the same weights as the s16 preset.",
     },
     # The int8 VAE decoder (ADR 0133 decision 6): the reference preset — the transformer and the
     # VAE decoder in int8 storage with an empty `session`, the control of the E2E difference floor
@@ -492,8 +491,7 @@ WAN22_QUANTS: Mapping[str, Any] = {
         },
         "label": "int8 transformer and VAE, int8 activations, online attention",
         "description": "The online-attention preset with the VAE decoder's weights in int8 and"
-        " its 3-D convolutions computed on per-pixel int8 activations (integer dot products) —"
-        " the fastest decode.",
+        " its 3-D convolutions computed on per-pixel int8 activations (integer dot products).",
     },
 }
 

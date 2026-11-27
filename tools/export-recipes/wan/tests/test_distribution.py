@@ -60,7 +60,7 @@ from karume.dist import (
 )
 from karume.emit import stored_model
 from karume.ir import IrInitializer, IrShared, IrStorage
-from karume.modelcard import FileRefKey
+from karume.modelcard import MEASUREMENTS_LEAD, FileRefKey
 from karume.pipeline import publish_model
 from wan import umt5_tokenizer
 from wan.card import (
@@ -78,6 +78,7 @@ from wan.distribution import (
     WAN22,
     WAN22_I8_SERIES,
     WAN22_PIPELINE,
+    WAN22_QUANTS,
     WAN22_REPO_NAME,
     WAN22_SERIES,
     WAN_CONTAINER_ROLES,
@@ -1665,8 +1666,7 @@ class TestTheWan22Distribution:
         )
         assert model["quants"][_ONLINE]["description"] == (
             "The int8 transformer with per-token int8 activations and attention computed online:"
-            " the scores are never stored, so the long clips run faster on the same weights as the"
-            " s16 preset."
+            " the scores are never stored; the same weights as the s16 preset."
         )
         int8_vae = {
             **seat,
@@ -2095,6 +2095,30 @@ class TestTheWan22ModelCard:
         assert "float16 transformer" not in prose
         assert "second, int8 copy" not in prose
         assert "the transformer shipped only in int8" in prose
+
+    def test_the_quant_table_is_followed_by_what_two_presets_measured(self, assembled) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a measurement is a note
+        naming its device and date, never part of a preset's description."""
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split("\n")
+        start = card.index(MEASUREMENTS_LEAD)
+        on = "(NVIDIA GeForce RTX 3080 Ti, Node with Dawn, 2026-10-23)."
+
+        assert card[start + 2 : start + 4] == [
+            f"- `{_ONLINE}` — one transformer pass at 121 frames (27,280 tokens) took 21.7 s"
+            f" against 24.2 s for `{_PRACTICAL}` the same morning {on}",
+            f"- `{_CONV8}` — over 8 clips at 1280 × 704 with 33 frames and 50 steps, the VAE"
+            f" decode took 87 s against 168 s for `{_ONLINE}`, and the whole clip 533 s against"
+            f" 611 s {on}",
+        ]
+        assert card[start + 5].startswith("### ")
+
+    def test_no_preset_description_states_a_measurement(self) -> None:
+        measured = re.compile(r"\b(faster|fastest|slower|quicker|measured)\b", re.IGNORECASE)
+        for name, quant in WAN22_QUANTS.items():
+            assert measured.search(quant["description"]) is None, name
+        for measured_preset in WAN22_CARD.measurements["ti2v-5b"]:
+            assert measured_preset.preset in WAN22_QUANTS
 
     def test_it_names_the_measured_resources_and_what_was_not_measured(self, assembled) -> None:
         out_dir, _ = assembled

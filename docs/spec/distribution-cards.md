@@ -194,8 +194,24 @@ The level-2 sections come in this order:
 - The model table and every quant table come from `karume.modelcard.models` and `quants`: one model table, one
   quant table per model. A preset's "What it is" cell is its `label` and `description` from the manifest; sizes are the
   download of that preset.
-- What a preset description says about speed or quality is the recipe's text in the manifest; it follows no rule
-  of this spec.
+- A preset's description says what the preset is: its storage, its knobs and what follows from them, such as the
+  download. It states nothing the preset measured.
+- What a preset measured (its speed, the quality heard or seen) is a note under its model's quant table:
+  `quants(measured=…)` writes `karume.modelcard.measurements` after the table's notes (on `karume-sbv2-jvnv`,
+  after the notes on how the stored weights were rounded). The notes open with `MEASUREMENTS_LEAD`; each bullet
+  (`Measurement`) names the preset and the result, then in parentheses what was measured when it was not this
+  model, the device (with the runtime where it was recorded) and the date. A note on a preset the model does not
+  ship is left out. `model_measurements` picks the notes of a one-model manifest's model from a recipe table, and
+  fails on a manifest of several models that the table names.
+
+  | Recipe table | Repositories | What it holds |
+  | --- | --- | --- |
+  | `irodori.card.IRODORI_MEASUREMENTS` | `karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` | v4 Small's listening check of `f16` and wall time of `i8-a8`, which v4.1-small carries naming v4 Small as what was measured; the MeanFlow student's listening of `i8` and `i8-a8`. None for v4-Large |
+  | `sbv2.card.SBV2_MEASUREMENTS` | `karume-sbv2-jvnv`, under every voice | the simulated audio difference of `f16+bert8`, the text encoder stage of `i8-a8`, the listening checks of `i8+bert4` and `i4` and the warm synthesis of `i4`, each but the text encoder's naming another voice as what was measured |
+  | `WanCard.measurements` (`wan.card`) | `karume-wan2.2` | the transformer pass of the online preset and the VAE decode of the conv8 preset |
+
+  The other cards write no measurement notes. The Gemma 4 repositories' descriptions keep their measured words
+  until their stage.
 
 ### Usage
 
@@ -262,7 +278,8 @@ One constant, imported where it is written:
 
 - In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the upstream-card bullet, the link and
   pin of an upstream (`hf_link`, `pinned`), the quotation of an upstream card (`UpstreamQuote`, `quotation`), the
-  revision-pin comment, the notes under the quant tables and the cross-repository note.
+  revision-pin comment, the notes under the quant tables (the measurement notes among them: `Measurement`,
+  `measurements`, `MEASUREMENTS_LEAD`) and the cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices. Each quotation

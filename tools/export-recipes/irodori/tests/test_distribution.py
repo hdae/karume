@@ -19,6 +19,7 @@ points it points to) are in `irodori/tests/test_card.py`.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,14 @@ _CHECKPOINT_TENSORS: Mapping[str, np.ndarray] = {
         )
     )
 }
+
+
+#: Words of a measured claim — what a preset description never states (it says what the preset
+#: is; a measurement is a note of the card).
+MEASURED_WORDS = re.compile(
+    r"\b(faster|fastest|slower|listening|audibl\w*|sounded|closest|tension|measured)\b",
+    re.IGNORECASE,
+)
 
 
 def _fake_checkpoint(
@@ -1244,6 +1253,16 @@ class TestIrodoriStorageSeries:
         """
         assert IRODORI_QUANT_ABBREVIATIONS == {}
 
+    @pytest.mark.parametrize(
+        "model",
+        [IRODORI_V4_MODEL, IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL, IRODORI_V4_LARGE_MODEL],
+    )
+    def test_no_preset_description_states_a_measurement(self, model: str) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a description says what
+        the preset is; what it measured is a note of the card naming its device and date."""
+        for name, quant in irodori_quants(model).items():
+            assert MEASURED_WORDS.search(quant["description"]) is None, (name, quant)
+
     def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
         for name, seat in IRODORI_QUANT_SEATS.items():
             assert seat.label and seat.description, name
@@ -2234,16 +2253,13 @@ class TestIrodoriMeanFlow:
         assert IRODORI_DEFAULT_QUANT == "i8-a8"
 
     def test_its_preset_descriptions_claim_only_what_was_judged_for_it(self) -> None:
-        """The family's f16 listening claim and the v4 speed claim of `i8-a8` are not carried over;
-        the storage, the knobs and the labels are the family's."""
+        """No description states a measurement (what was judged for the student is a note of its
+        card — `IRODORI_MEASUREMENTS`), so its presets are the family's to the letter."""
         family = irodori_quants(IRODORI_V4_MODEL)
         student = irodori_quants(IRODORI_V41_MF_MODEL)
-        changed = {name for name in family if family[name] != student[name]}
 
-        assert changed == set(IRODORI_MODEL_SEAT_DESCRIPTIONS[IRODORI_V41_MF_MODEL])
-        for name in changed:
-            assert {**student[name], "description": ""} == {**family[name], "description": ""}
-            assert_quant_presentation(name, student[name])
+        assert IRODORI_V41_MF_MODEL not in IRODORI_MODEL_SEAT_DESCRIPTIONS
+        assert student == family
         assert "faster" not in student["i8-a8"]["description"]
         assert "listening" not in student["f16"]["description"]
 
