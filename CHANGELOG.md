@@ -92,6 +92,10 @@ measurements in `docs/research/`.
   time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
   record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
   needs the field).
+- `@karume/runtime/tune`: the GEMV sweep's case table has the two shapes of 26B A4B's QAT MTP drafter that 12B's
+  drafter does not share — `pre_projection` (i4 g32, n 1024, k 5632) and `post_projection` (n 2816, k 1024) —, 118
+  cases in all (was 116). The drafter's other shapes are 12B's drafter's cases, now labelled for both. The `explore`
+  set's twelve sentinels stay the same cases.
 
 ## [0.24.0] - 2026-11-25
 

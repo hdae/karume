@@ -19,7 +19,7 @@ GPU.
   `explore` set ([workbench](workbench.md#the-explore-set),
   [workbench](workbench.md#the-geometry-sweeps-explore-set)) with its entry's defaults for that set — 5 rounds, the
   quick look's margin of the set (×1.10 for the GEMV sweep's, ×1.25 for the geometry sweep's), every case of its table
-  (116 and 78) — and no idle time between cases: the page gives both sweeps `idleSeconds` 0 (the workbench's defaults
+  (118 and 78) — and no idle time between cases: the page gives both sweeps `idleSeconds` 0 (the workbench's defaults
   for these sets are none for the GEMV sweep's and 10 s for the geometry sweep's). An idle time the trial sets is
   waited before every case but the first, the second sweep's first case too.
 - Each sweep's parameters are parsed from `candidateSet=explore` and the run's `idleSeconds` by the workbench
