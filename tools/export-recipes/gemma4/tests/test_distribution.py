@@ -31,6 +31,7 @@ from ir_fixtures import ir_container
 
 from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4 import card as gemma4_card
 from gemma4 import chat
 from gemma4 import distribution as gemma4_distribution
@@ -67,6 +68,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.modelcard import APACHE_LICENSE_REFERENCE
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 #: Role name → part count (the PLE assets take parts of their own, so only `model` has more).
@@ -940,6 +942,21 @@ class TestGemma4Card:
         # also appear in the text).
         assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
+
+    def test_the_card_names_the_license_by_its_identifier_with_the_shared_text_link(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#license-statements: "licensed **apache-2.0**" followed
+        by the shared reference to the text, and the license page only in the front matter."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        body = card.split("\n---\n", 1)[1]
+
+        assert f"licensed **apache-2.0** {APACHE_LICENSE_REFERENCE}." in body
+        assert "**Apache 2.0**" not in card
+        assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE) == 1
+        assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
+        assert GEMMA_LICENSE_PAGE not in body
 
     def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
         self, gemma4_assembled, tmp_path: Path

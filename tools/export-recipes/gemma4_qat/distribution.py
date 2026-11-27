@@ -11,7 +11,7 @@ from typing import Any
 
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
-from _shared.upstream import hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from gemma4.card import gemma4_usage
 from gemma4.distribution import (
     GEMMA4_ASSETS,
@@ -39,6 +39,7 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
@@ -356,15 +357,11 @@ QAT_PIPELINE_TAG = "text-generation"
 QAT_MODULE = "gemma4-qat-mobile"
 
 #: The SPDX identifier of every pinned upstream ({@link SOURCES} — the weights' and the tokenizer's
-#: repositories) and how the card spells it. A pin with another licence fails the render: the
-#: card's attribution sentence would no longer be true.
+#: repositories), which the card names its license by. A pin with another license fails the
+#: render: the card's attribution sentence would no longer be true. The `license_link` of the
+#: upstream cards at the pinned commits is the Gemma license page (the mobile repositories checked
+#: 2026-11-01, the regular `-it` ones 2026-11-04 — `_shared.upstream.GEMMA_LICENSE_PAGE`).
 QAT_LICENSE = "apache-2.0"
-QAT_LICENSE_NAME = "Apache 2.0"
-#: The `license_link` of the upstream cards at the pinned commits (an Apache 2.0 page on
-#: ai.google.dev — the mobile repositories checked 2026-11-01, the regular `-it` ones 2026-11-04),
-#: and the canonical text that `LICENSE.md` copies verbatim.
-QAT_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
-QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: The technical report the upstream cards link at the pinned commits.
 QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
 
@@ -413,9 +410,8 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
             f" at commit `{weights.revision}`; the tokenizer is that of its base model"
             f" [{tokenizer.repo}](https://huggingface.co/{tokenizer.repo}) at commit"
             f" `{tokenizer.revision}` (Google's glitch-token fixes of 2026-11-03, which the mobile"
-            " repository has not received); both are licensed"
-            f" **{QAT_LICENSE_NAME}** at those commits ([license]({QAT_LICENSE_LINK}) /"
-            f" [full text]({QAT_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
+            f" repository has not received); both are licensed **{QAT_LICENSE}**"
+            f" {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
         "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by Google DeepMind"
@@ -464,7 +460,7 @@ def render_card(
         license=QAT_LICENSE,
         # The same spelling as the upstream cards (and the regular Gemma 4 card), so a reader
         # reaches the one licence page the upstream names.
-        license_link=QAT_LICENSE_LINK,
+        license_link=GEMMA_LICENSE_PAGE,
         tags=(QAT_PIPELINE_TAG, "webgpu", "gemma"),
     )
     return render(

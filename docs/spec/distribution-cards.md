@@ -66,7 +66,8 @@ item "The model cards and notices across repositories".
   Beside an SPDX `license`, `license_link` is written only as the link the upstream card itself writes, and
   `license_name` never: the three Gemma 4 repositories and `karume-embeddinggemma-2` write
   `license_link: https://ai.google.dev/gemma/docs/gemma_4_license` beside `license: apache-2.0`, the page Google's
-  cards link (`_shared.upstream.GEMMA_LICENSE_PAGE`; the Gemma 4 recipes still spell it as their own constant).
+  cards link (`_shared.upstream.GEMMA_LICENSE_PAGE`, the one constant every one of these recipes writes). The card's
+  text names the license and links the license text; it does not link the page again.
 - `tags` contains `webgpu`. It begins with the `pipeline_tag` value. Where `webgpu` stands among the family's tags is
   not fixed. No card has a `karume` tag (`library_name` carries it).
 
@@ -137,12 +138,13 @@ The level-2 sections come in this order:
   "licensed **cc-by-sa-4.0**", "licensed **gemma**", and for a custom license (`license: other`) its `license_name`,
   "licensed **circlestone-labs-non-commercial-license**". It refers to a text in `LICENSE.md` as a verbatim copy,
   not by the text's title. Two kinds of words keep a license's own name: a clause the card cites ("per Apache 2.0
-  §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). The three Gemma 4 cards
-  are the exception: they write "licensed **Apache 2.0**", with the license page and the text linked.
+  §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). A further upstream under
+  the same license is "licensed **apache-2.0** under the same terms" (the Gemma 4 drafters).
 - Where the weights' license is the primary Apache text of `LICENSE.md`, "licensed **apache-2.0**" is followed by
   `karume.modelcard.APACHE_LICENSE_REFERENCE`: "(as of retrieval; [full text](https://www.apache.org/licenses/LICENSE-2.0)
-  — a verbatim copy is in `LICENSE.md`)" (`karume-depth-anything-v2`, `karume-embeddinggemma-2`, `karume-moss-image`,
-  `karume-siglip2`, `karume-umt5-xxl`, `karume-wan2.2`). No other card links the text.
+  — a verbatim copy is in `LICENSE.md`)" (`karume-depth-anything-v2`, `karume-embeddinggemma-2`, the three Gemma 4
+  repositories, `karume-moss-image`, `karume-siglip2`, `karume-umt5-xxl`, `karume-wan2.2`). No other card links the
+  text.
 - Every card carries one "**Changes made here**" bullet in the attribution section summarising the changes, headed
   by `karume.modelcard.changes_made_here`: "- **Changes made here** (listed in full in `NOTICE.md`, per <clause>):",
   the clause being the one of the license that asks for the notice of the changes — "Apache 2.0 §4(b)" on the Apache

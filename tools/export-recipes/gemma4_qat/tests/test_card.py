@@ -17,9 +17,10 @@ from typing import Any
 
 import pytest
 
+from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
-from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, render_card
+from gemma4_qat.distribution import NOTICE, render_card
 from karume.migrate import card_format_statement
 from karume.modelcard import RUNTIME_SENTENCE
 
@@ -209,7 +210,7 @@ class TestQatCardAttribution:
             tokenizer = pins.tokenizer.repo
             assert f"[{tokenizer}](https://huggingface.co/{tokenizer}) at commit" in bullet
             assert f"at commit `{pins.tokenizer.revision}`" in bullet
-            assert "licensed **Apache 2.0**" in bullet
+            assert "licensed **apache-2.0** (as of retrieval;" in bullet
             assert "a verbatim copy is in `LICENSE.md`" in bullet
 
     def test_it_attributes_only_the_models_it_carries(self) -> None:
@@ -226,7 +227,7 @@ class TestQatCardAttribution:
         front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
 
         assert "license: apache-2.0" in front_matter
-        assert f"license_link: {QAT_LICENSE_LINK}" in front_matter
+        assert f"license_link: {GEMMA_LICENSE_PAGE}" in front_matter
         assert "base_model_relation: quantized" in front_matter
 
     def test_the_front_matter_lists_each_base_model_before_its_mobile_checkpoint(self) -> None:

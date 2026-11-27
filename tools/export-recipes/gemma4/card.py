@@ -14,8 +14,11 @@ checkpoint under another attribution".
 License policy (the maintainer's ruling of 2026-09-01 — the top of `gemma4/README.md`): upstream
 is **Apache 2.0**, and the card carries the Apache 2.0 attribution and a link to the license text,
 and **points to the upstream model card for the details of use** (this project does not keep that
-information). The files with the redistribution terms (`LICENSE.md` / `NOTICE.md`) are placed at
-the distribution repository's root by `gemma4.distribution.gemma4_root_files`, not by the card.
+information). The card names the license by its HF identifier and links the text through the
+shared wording (`karume.modelcard.APACHE_LICENSE_REFERENCE`), and its front matter links the
+license page Google's cards link (`_shared.upstream.GEMMA_LICENSE_PAGE`). The files with the
+redistribution terms (`LICENSE.md` / `NOTICE.md`) are placed at the distribution repository's root
+by `gemma4.distribution.gemma4_root_files`, not by the card.
 
 MUST: **every number, download size, quant table and dtype label is derived from the manifest**
 (the same MUST of `karume.modelcard` applies unchanged). The only constants this module may hold
@@ -28,14 +31,16 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
 
-from _shared.upstream import hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
@@ -169,8 +174,6 @@ GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {
 #: License (checked first-hand on 2026-09-01 — the README frontmatter of the checkpoint snapshot
 #: says `license: apache-2.0`, and its `license_link` target carries the Apache 2.0 text).
 GEMMA4_LICENSE = "apache-2.0"
-GEMMA4_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
-GEMMA4_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 
 def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
@@ -203,7 +206,7 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         # NOTE: `license_link` is the field HF reads with `license: other`, but it is set to the
         # spelling **the upstream card itself writes next to the SPDX identifier** (so that readers
         # reach the same single license URL as upstream — the 2026-09-01 license policy).
-        license_link=GEMMA4_LICENSE_LINK,
+        license_link=GEMMA_LICENSE_PAGE,
         tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm"),
     )
 
@@ -438,17 +441,15 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = GEMMA4_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
-            f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: {hf_link(repo)}, licensed **{GEMMA4_LICENSE}**"
+            f" {APACHE_LICENSE_REFERENCE}."
         )
     # Each drafter is labelled by its model (the q4_0 QAT card's form): with more than one, a label
     # taken from the repository name would read `assistant` for every one of them.
     for name, drafter in _gemma4_drafters(manifest):
         lines.append(
-            f"- **`{name}` drafter**:"
-            f" [{drafter}](https://huggingface.co/{drafter}), the"
-            " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
+            f"- **`{name}` drafter**: {hf_link(drafter)}, the multi-token-prediction drafter head,"
+            f" licensed **{GEMMA4_LICENSE}** under the same terms."
             " It is redistributed here with its clustered sparse output head replaced by a dense"
             " projection over the full vocabulary, and it reads the key/value states and embedding"
             " table of its main model rather than carrying its own. Its own weights are quantized"
@@ -696,7 +697,7 @@ def _qat_q4_0_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         # quantization-aware-trained model — a quantized form of the base model.
         base_model_relation="quantized",
         license=GEMMA4_LICENSE,
-        license_link=GEMMA4_LICENSE_LINK,
+        license_link=GEMMA_LICENSE_PAGE,
         tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm", "qat"),
     )
 
@@ -756,24 +757,19 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "checkpoints are not distributed here.",
         "",
     ]
-    license_links = (
-        f"([license]({GEMMA4_LICENSE_LINK}) / [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim"
-        " copy is in `LICENSE.md`)"
-    )
     for name in manifest["models"]:
         weights, base = _qat_q4_0_weights(name), GEMMA4_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: the weights are [{weights}](https://huggingface.co/{weights}),"
-            " Google's QAT (Q4_0) checkpoint of the base model"
-            f" [{base}](https://huggingface.co/{base}), which is also the source of the tokenizer,"
-            " the chat template and the generation defaults; both are licensed **Apache 2.0**"
-            f" {license_links}."
+            f"- **`{name}`**: the weights are {hf_link(weights)}, Google's QAT (Q4_0) checkpoint of"
+            f" the base model {hf_link(base)}, which is also the source of the tokenizer, the chat"
+            f" template and the generation defaults; both are licensed **{GEMMA4_LICENSE}**"
+            f" {APACHE_LICENSE_REFERENCE}."
         )
     drafters = _qat_q4_0_drafters(manifest)
     for name, drafter in drafters:
         lines.append(
-            f"- **`{name}` drafter**: [{drafter}](https://huggingface.co/{drafter}), the QAT"
-            " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
+            f"- **`{name}` drafter**: {hf_link(drafter)}, the QAT multi-token-prediction drafter"
+            f" head, licensed **{GEMMA4_LICENSE}** under the same terms."
             " It reads the key/value states and the embedding table of the main model rather than"
             " carrying its own, and runs its output head over the full vocabulary (a clustered"
             " sparse head an assistant checkpoint carries is not used)."

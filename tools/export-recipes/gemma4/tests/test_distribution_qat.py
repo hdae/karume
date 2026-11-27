@@ -23,6 +23,7 @@ from container_series import write_component
 
 from _shared.container_read import read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4 import distribution as gemma4_distribution
 from gemma4.card import (
     GEMMA4_QAT_DRAFTER_UPSTREAM,
@@ -49,6 +50,7 @@ from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, Hub
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import MAX_QUANT_DESCRIPTION_CHARS, DistError, assemble_family
+from karume.modelcard import APACHE_LICENSE_REFERENCE
 from karume.ple import PLE_INDEX_ROLE, PLE_ROLES
 
 #: The per-layer embedding width of the stand-in: two groups of the line's grid per layer (the
@@ -933,6 +935,22 @@ class TestQatCard:
         assert "the per-layer embeddings of `e2b`" in card
         assert "`12b` has no per-layer embeddings" in card
         assert "// speculative: {}, // load the MTP drafter — available for: e2b / 12b" in card
+
+    def test_the_card_names_the_license_by_its_identifier_with_the_shared_text_link(
+        self, tmp_path: Path
+    ) -> None:
+        """docs/spec/distribution-cards.md#license-statements — one text link per model bullet,
+        through the shared wording; the license page only in the front matter."""
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        body = card.split("\n---\n", 1)[1]
+
+        assert body.count(f"licensed **apache-2.0** {APACHE_LICENSE_REFERENCE}.") == 2
+        assert body.count("licensed **apache-2.0** under the same terms.") == 2
+        assert "**Apache 2.0**" not in card
+        assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE)
+        assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
+        assert GEMMA_LICENSE_PAGE not in body
 
     def test_only_a_model_carrying_the_embedder_is_said_to_take_images(
         self, tmp_path: Path

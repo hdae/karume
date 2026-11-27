@@ -48,7 +48,6 @@ from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from embeddinggemma2.distribution import PIPELINE as EMBEDDINGGEMMA2_PIPELINE
-from gemma4.card import GEMMA4_LICENSE_LINK
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4.distribution import gemma4_notice_markdown
@@ -523,7 +522,7 @@ class TestTheFrontMatterOfEveryPublishedCard:
             assert "license_name" in fields and "license_link" in fields
         elif directory in GEMMA_LICENSE_LINK_REPOSITORIES:
             assert "license_name" not in fields
-            assert fields["license_link"] == GEMMA_LICENSE_PAGE == GEMMA4_LICENSE_LINK
+            assert fields["license_link"] == GEMMA_LICENSE_PAGE
         else:
             assert "license_name" not in fields and "license_link" not in fields
 
@@ -1020,8 +1019,7 @@ class TestTheLicenseNamesOfEveryPublishedRepository:
         other = [name for name in named if not _BOLD_LICENSE_ID.fullmatch(name)]
 
         assert named
-        # The Gemma 4 cards write "licensed **Apache 2.0**" until their stage.
-        assert bool(other) is (directory in GEMMA4_REPOSITORIES), other
+        assert other == []
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_an_apache_card_points_at_the_text_in_the_one_wording(
@@ -1029,8 +1027,6 @@ class TestTheLicenseNamesOfEveryPublishedRepository:
     ) -> None:
         """The weights whose license is `LICENSE.md`'s primary Apache text are followed by
         `APACHE_LICENSE_REFERENCE`, and no card spells the full-text link another way."""
-        if directory in GEMMA4_REPOSITORIES:
-            pytest.skip("the Gemma 4 cards keep their wording until their stage")
         _, card = _published_card(pipeline, directory)
         apache = PRIMARY_LICENSES[directory] == _APACHE
 
