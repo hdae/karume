@@ -30,6 +30,8 @@ import dist
 from _shared.licenses import (
     APACHE_LICENSE_2_0_PATH,
     CC_BY_SA_4_0_PATH,
+    FENCE_CLOSE,
+    FENCE_OPEN,
     MIT_COPYRIGHT_PLACEHOLDER,
     MIT_LICENSE_PATH,
 )
@@ -877,9 +879,18 @@ class TestTheNoticeOfEveryPublishedRepository:
         assert text.index("No retraining and no fine-tuning were performed.") > changes
 
 
+#: The repositories whose `LICENSE.md` begins with the primary text unfenced: the Gemma 4 ones,
+#: whose recipes change in a stage of their own (docs/spec/distribution-cards.md#licensemd).
+UNFENCED_LICENSES = GEMMA4_REPOSITORIES
+
+#: The heading of a further license text: `## <license> — <scope>`.
+_FURTHER_HEADING = re.compile(r"## \S.* — \S.*")
+
+
 class TestTheLicenseTextOfEveryPublishedRepository:
-    """docs/spec/distribution-cards.md#licensemd — the primary license text from the first byte,
-    verbatim and unfenced."""
+    """docs/spec/distribution-cards.md#licensemd — the primary license text fenced from the first
+    byte and verbatim inside the fence; every further text after a `---` line, its heading and
+    its paragraph, fenced the same way."""
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_license_md_begins_with_the_primary_text_byte_for_byte(
@@ -887,17 +898,40 @@ class TestTheLicenseTextOfEveryPublishedRepository:
     ) -> None:
         license_text = _root_files(pipeline, models)[LICENSE_FILENAME]
         primary, _ = PRIMARY_LICENSES[directory]
+        fence = "" if directory in UNFENCED_LICENSES else FENCE_OPEN
 
+        assert license_text.startswith(fence)
+        body = license_text[len(fence) :]
         if primary != "mit":
-            assert license_text.startswith(_VERBATIM_TEXTS[primary].read_text(encoding="utf-8"))
+            text = _VERBATIM_TEXTS[primary].read_text(encoding="utf-8")
+            closing = "" if not fence else ("" if text.endswith("\n") else "\n") + FENCE_CLOSE
+            assert body.startswith(text + closing)
             return
         head, tail = MIT_LICENSE_PATH.read_text(encoding="utf-8").split(MIT_COPYRIGHT_PLACEHOLDER)
-        assert license_text.startswith(head)
-        rest = license_text[len(head) :]
+        assert body.startswith(head)
+        rest = body[len(head) :]
         # The template after the placeholder follows the copyright lines verbatim.
         copyright_end = rest.find(tail)
         assert copyright_end > 0
         assert all(line.startswith("Copyright (c) ") for line in rest[:copyright_end].split("\n"))
+        assert rest[copyright_end + len(tail) :].startswith(FENCE_CLOSE if fence else "")
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_every_further_text_follows_a_rule_a_scoped_heading_and_a_paragraph_in_a_fence(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        if directory in UNFENCED_LICENSES:
+            pytest.skip("the Gemma 4 LICENSE.md is the Apache text alone, unfenced")
+        license_text = _root_files(pipeline, models)[LICENSE_FILENAME]
+        # A further text follows the closing fence of the one before it.
+        _, *further = re.split(r"(?<=```\n)\n---\n\n", license_text)
+
+        for section in further:
+            heading, paragraph, rest = section.split("\n\n", 2)
+            assert _FURTHER_HEADING.fullmatch(heading), heading
+            assert paragraph and not paragraph.startswith(("#", "`"))
+            assert rest.startswith(FENCE_OPEN) and rest.endswith(FENCE_CLOSE)
+            assert rest.count("```") == 2
 
 
 #: A reference of the synthetic cases below.

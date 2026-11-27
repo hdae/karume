@@ -26,6 +26,8 @@ from typing import Any
 
 from _shared.calib_provenance import calib_complaint
 from _shared.container_read import ContainerReadError, read_asset
+from _shared.licenses import FurtherLicense
+from _shared.licenses import license_markdown as fenced_license_markdown
 from _shared.paths import DIST_ROOT
 from anima.card import (
     ATTRIBUTION_NOTICE,
@@ -190,7 +192,8 @@ NVIDIA_LICENSE_SOURCE_PATH = Path(__file__).parent / "nvidia_open_model_license.
 #: Heading of the second licence in `LICENSE.md` — it names the agreement and the scope it applies
 #: to (the same layout as the two licences of the Irodori distribution).
 NVIDIA_LICENSE_HEADING = (
-    "## NVIDIA Open Model License Agreement — applies in addition to the CircleStone license above"
+    "NVIDIA Open Model License Agreement",
+    "applies in addition to the CircleStone license above",
 )
 
 #: The modification that appears in every repository's notice (conversion into the container
@@ -1505,27 +1508,28 @@ def license_markdown() -> str:
 
     `root_files` has a single `LICENSE.md` slot (`karume.dist.LEGAL_PATHS`), so the second text
     follows a separator (`---`) and a heading that states its scope, as in the Irodori
-    distribution. The CircleStone text comes first, byte for byte ({@link LICENSE_SOURCE_PATH});
-    it has no trailing newline, so the separator starts with a blank line (without it, Markdown
-    would read the last paragraph and `---` as a setext heading).
+    distribution ({@link _shared.licenses.license_markdown}). The CircleStone text comes first
+    ({@link LICENSE_SOURCE_PATH}).
 
     MUST: neither text is touched — reformatting either makes it no longer a copy of that
-    license. The NVIDIA text is numbered plain text, so it sits verbatim inside a fence (it
-    contains no ``` — the digest freeze in the tests catches any change to the file).
+    license. Each sits verbatim inside a fence (the digest freeze in the tests catches any change
+    to the files).
     """
-    return (
-        LICENSE_SOURCE_PATH.read_text(encoding="utf-8")
-        + "\n\n---\n\n"
-        + NVIDIA_LICENSE_HEADING
-        + "\n\n"
-        + "The CircleStone Anima model is a Derivative Model of NVIDIA"
-        + " Cosmos-Predict2-2B-Text2Image, so every\n"
-        + "model in this repository is covered by the agreement below in addition to the"
-        + " CircleStone license\nabove (see `NOTICE.md`). Both licenses apply; the agreement"
-        + " below does not widen the CircleStone\nlicense.\n\n"
-        + "```text\n"
-        + NVIDIA_LICENSE_SOURCE_PATH.read_text(encoding="utf-8")
-        + "```\n"
+    license, scope = NVIDIA_LICENSE_HEADING
+    return fenced_license_markdown(
+        LICENSE_SOURCE_PATH.read_text(encoding="utf-8"),
+        [
+            FurtherLicense(
+                license=license,
+                scope=scope,
+                paragraph="The CircleStone Anima model is a Derivative Model of NVIDIA"
+                " Cosmos-Predict2-2B-Text2Image, so every\n"
+                "model in this repository is covered by the agreement below in addition to the"
+                " CircleStone license\nabove (see `NOTICE.md`). Both licenses apply; the agreement"
+                " below does not widen the CircleStone\nlicense.",
+                text=NVIDIA_LICENSE_SOURCE_PATH.read_text(encoding="utf-8"),
+            )
+        ],
     )
 
 

@@ -177,7 +177,9 @@ class TestLayout:
 
     def test_the_repository_ships_the_apache_license_and_the_change_notice(self, assembled) -> None:
         out_dir, _ = assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "Apache License, Version 2.0" in prose
         assert "**int8 weights**" in prose

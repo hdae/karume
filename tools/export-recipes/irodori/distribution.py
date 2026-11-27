@@ -49,7 +49,7 @@ from safetensors import safe_open
 
 from _shared.calib_provenance import calib_complaint
 from _shared.container_read import read_provenance
-from _shared.licenses import apache_license_2_0, mit_license
+from _shared.licenses import FurtherLicense, apache_license_2_0, license_markdown, mit_license
 from _shared.paths import DIST_ROOT, INPUTS_ROOT
 from karume.container import ContainerFormatError
 from karume.dist import (
@@ -1941,27 +1941,29 @@ def irodori_license_markdown() -> str:
     by side in one file.
 
     `root_files` has a single `LICENSE.md` slot (`karume.dist.LEGAL_PATHS`), so the second license
-    text follows a separator (`---`) and a heading that names its scope. The file starts with the
-    MIT text + the copyright lines ({@link IRODORI_COPYRIGHTS}) as is — MIT covers every component,
-    the codec included (`IRODORI_CODEC_MODEL` and its parent both declare `license: mit`).
+    text follows a separator (`---`) and a heading that names its scope
+    ({@link _shared.licenses.license_markdown}). The file starts with the MIT text + the copyright
+    lines ({@link IRODORI_COPYRIGHTS}) — MIT covers every component, the codec included
+    (`IRODORI_CODEC_MODEL` and its parent both declare `license: mit`).
 
     MUST: neither license text is touched (reformatting it would stop it from being a copy of the
-    permission notice). The Apache text breaks into Markdown paragraphs and lists because of its
-    leading indentation, so it goes verbatim inside a fence (``` does not occur in the text — the
-    digest freeze in `tests/test_licenses.py` catches any change to it).
+    permission notice) — each goes verbatim inside a fence (the digest freeze in
+    `tests/test_licenses.py` catches any change to the texts).
     """
-    return (
-        mit_license(IRODORI_COPYRIGHTS)
-        + "\n---\n\n"
-        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
-        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\n"
-        + "licensed under the Apache License, Version 2.0 (see `NOTICE.md`). They are covered by"
-        + " the license\nbelow in addition to the MIT License above; every other component is"
-        + " covered by the MIT License\nalone.\n\n"
-        + "```text\n"
-        + apache_license_2_0()
-        + "```\n"
+    return license_markdown(
+        mit_license(IRODORI_COPYRIGHTS),
+        [
+            FurtherLicense(
+                license="Apache License 2.0",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+                f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\n"
+                "licensed under the Apache License, Version 2.0 (see `NOTICE.md`). They are covered"
+                " by the license\nbelow in addition to the MIT License above; every other component"
+                " is covered by the MIT License\nalone.",
+                text=apache_license_2_0(),
+            )
+        ],
     )
 
 
@@ -2038,34 +2040,43 @@ def irodori_large_license_markdown() -> str:
     components, in one file (`root_files` has a single `LICENSE.md` slot —
     `karume.dist.LEGAL_PATHS`).
 
-    The file starts with the Terms of Use as is; every later text follows a separator (`---`) and,
-    for the codec's two, a heading that names its scope. MUST: no text is touched — the two Gemma
-    files are Markdown already and go in as they are; the MIT and Apache texts go verbatim inside a
-    fence, as in {@link irodori_license_markdown} (``` occurs in none of the four texts).
+    The file starts with the Terms of Use; every later text follows a separator (`---`), a heading
+    that names its scope and a paragraph ({@link _shared.licenses.license_markdown}) — the
+    Prohibited Use Policy's scope is the Terms' own, as they incorporate it. MUST: no text is
+    touched — each goes verbatim inside a fence, the two Gemma files (Markdown) included.
     """
-    return (
-        gemma_terms_of_use()
-        + "\n---\n\n"
-        + gemma_prohibited_use_policy()
-        + "\n---\n\n"
-        + f"## MIT License — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} are the DACVAE codec"
-        + f" `{IRODORI_CODEC_MODEL}`,\nwhich is licensed under the MIT License (see `NOTICE.md`)."
-        + " They are covered by the license below and\nby the Apache License 2.0 that follows."
-        + " Every other component comes from the checkpoint listed in\n`README.md`, which upstream"
-        + " tags `license: gemma`, and is covered by the Gemma Terms of Use above.\n\n"
-        + "```text\n"
-        + mit_license(IRODORI_LARGE_COPYRIGHTS)
-        + "```\n"
-        + "\n---\n\n"
-        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
-        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\nlicensed under the Apache License,"
-        + " Version 2.0 (see `NOTICE.md`). They are covered by the license below\nin addition to"
-        + " the MIT License above.\n\n"
-        + "```text\n"
-        + apache_license_2_0()
-        + "```\n"
+    return license_markdown(
+        gemma_terms_of_use(),
+        [
+            FurtherLicense(
+                license="Gemma Prohibited Use Policy",
+                scope="part of the Gemma Terms of Use above",
+                paragraph="The Gemma Terms of Use above incorporate this policy, so it covers what"
+                " they cover: every\ncomponent but the codec components"
+                f" ({_IRODORI_CODEC_COMPONENTS}).",
+                text=gemma_prohibited_use_policy(),
+            ),
+            FurtherLicense(
+                license="MIT License",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} are the DACVAE codec"
+                f" `{IRODORI_CODEC_MODEL}`,\nwhich is licensed under the MIT License (see"
+                " `NOTICE.md`). They are covered by the license below and\nby the Apache License"
+                " 2.0 that follows. Every other component comes from the checkpoint listed in\n"
+                "`README.md`, which upstream tags `license: gemma`, and is covered by the Gemma"
+                " Terms of Use above.",
+                text=mit_license(IRODORI_LARGE_COPYRIGHTS),
+            ),
+            FurtherLicense(
+                license="Apache License 2.0",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+                f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\nlicensed under the Apache License,"
+                " Version 2.0 (see `NOTICE.md`). They are covered by the license below\nin"
+                " addition to the MIT License above.",
+                text=apache_license_2_0(),
+            ),
+        ],
     )
 
 

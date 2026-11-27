@@ -49,7 +49,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from safetensors import safe_open
 
-from _shared.licenses import cc_by_sa_4_0
+from _shared.licenses import cc_by_sa_4_0, license_markdown
 from _shared.paths import INPUTS_ROOT, MISC_ROOT
 from karume.dist import (
     Artifact,
@@ -1142,7 +1142,7 @@ def sbv2_jvnv_root_files() -> dict[str, str]:
     no longer a copy). The attribution and the notice of modifications are in `NOTICE.md`.
     """
     return {
-        "LICENSE.md": cc_by_sa_4_0(),
+        "LICENSE.md": license_markdown(cc_by_sa_4_0()),
         "NOTICE.md": SBV2_JVNV_NOTICE_MARKDOWN,
     }
 

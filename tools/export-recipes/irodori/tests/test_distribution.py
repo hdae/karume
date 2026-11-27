@@ -1551,7 +1551,7 @@ class TestIrodoriLegalText:
         insertion point is the template text itself."""
         license_text = PIPELINE.root_files["LICENSE.md"]
 
-        assert license_text.startswith(mit_license(IRODORI_COPYRIGHTS))
+        assert license_text.startswith("```text\n" + mit_license(IRODORI_COPYRIGHTS) + "```\n")
         assert license_text.count("Permission is hereby granted, free of charge") == 1
 
     def test_the_license_carries_the_apache_text_verbatim_for_the_codec(self) -> None:
@@ -2658,7 +2658,7 @@ class TestIrodoriLargeLegalText:
     def test_the_license_opens_with_the_terms_of_use_verbatim(self) -> None:
         license_text = LARGE_PIPELINE.root_files["LICENSE.md"]
 
-        assert license_text.startswith(gemma_terms_of_use())
+        assert license_text.startswith("```text\n" + gemma_terms_of_use() + "```\n")
         assert license_text.count(gemma_prohibited_use_policy()) == 1
         assert license_text.index(gemma_prohibited_use_policy()) >= len(gemma_terms_of_use())
 

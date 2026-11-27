@@ -700,7 +700,9 @@ class TestSiglip2LegalText:
         valid prose, so the other checks would let it through.
         """
         out_dir, _ = siglip2_assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_it_ships_the_modification_notice(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled

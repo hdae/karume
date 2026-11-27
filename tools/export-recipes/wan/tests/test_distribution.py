@@ -1732,7 +1732,9 @@ class TestTheWan22Distribution:
 
     def test_the_repository_ships_the_apache_license_and_the_wan22_notice(self, assembled) -> None:
         out_dir, _ = assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "modified form of the Wan2.2 TI2V 5B checkpoint" in prose
         assert "Apache License, Version 2.0" in prose

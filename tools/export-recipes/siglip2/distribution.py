@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.paths import INPUTS_ROOT
 from _shared.upstream import assert_upstream_provenance, snapshot_revision
 from karume.dist import (
@@ -436,5 +436,8 @@ PIPELINE = Pipeline(
     # The redistribution conditions of the upstream license (Apache 2.0 §4) apply once per
     # distribution repository, so the full text is also read once here regardless of how many
     # assemblies run (ADR 0092 decision 7).
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": SIGLIP2_NOTICE_MARKDOWN},
+    root_files={
+        "LICENSE.md": license_markdown(apache_license_2_0()),
+        "NOTICE.md": SIGLIP2_NOTICE_MARKDOWN,
+    },
 )

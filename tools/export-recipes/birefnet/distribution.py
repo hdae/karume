@@ -74,7 +74,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from _shared.licenses import mit_license
+from _shared.licenses import license_markdown, mit_license
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
@@ -806,7 +806,7 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
     stops being a copy of the permission notice).
     """
     return {
-        "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[checkpoint]),
+        "LICENSE.md": license_markdown(mit_license(BIREFNET_COPYRIGHTS[checkpoint])),
         "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(
             repo=BIREFNET_UPSTREAM[checkpoint],
             swin=SWIN_TRANSFORMER_UPSTREAM,

@@ -88,7 +88,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from embeddinggemma2 import sources as upstream_sources
 from embeddinggemma2.tokenizer import TOKENIZER_SERIES, TokenizerScriptError, assert_prompts
@@ -1389,7 +1389,7 @@ def embeddinggemma2_root_files() -> dict[str, str]:
     only — the Gemma 4 distribution's form.
     """
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": EMBEDDINGGEMMA2_NOTICE_MARKDOWN,
     }
 

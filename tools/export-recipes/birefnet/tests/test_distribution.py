@@ -886,7 +886,7 @@ class TestBirefnetLegalText:
         the prose stays valid, so the other gates let it through.
         """
         license_text, _ = self._legal(tmp_path, checkpoint)
-        assert license_text == mit_license(BIREFNET_COPYRIGHTS[checkpoint])
+        assert license_text == "```text\n" + mit_license(BIREFNET_COPYRIGHTS[checkpoint]) + "```\n"
 
     def test_the_hr_repository_carries_only_the_upstream_copyrights(self, tmp_path: Path) -> None:
         license_text, notice = self._legal(tmp_path, BIREFNET_HR_CHECKPOINT)

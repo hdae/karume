@@ -1032,7 +1032,9 @@ class TestProvenance:
 class TestLegalText:
     def test_it_ships_the_license_text_byte_identical(self, assembled) -> None:
         out_dir, _ = assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_the_notice_names_the_upstream_and_states_the_changes(self, assembled) -> None:
         out_dir, manifest = assembled

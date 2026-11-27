@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import ContainerReadError, read_layouts
-from _shared.licenses import apache_license_2_0, cc_by_sa_4_0
+from _shared.licenses import apache_license_2_0, cc_by_sa_4_0, license_markdown
 from _shared.upstream import assert_upstream_provenance, hf_upstreams
 from karume.dist import (
     LICENSE_FILENAME,
@@ -834,7 +834,7 @@ PIPELINE = Pipeline(
     # The redistribution conditions §4 of the upstream license (Apache 2.0) apply to the one
     # distribution repository (ADR 0092 decision 7).
     root_files={
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": UMT5_NOTICE_MARKDOWN,
     },
 )
@@ -968,7 +968,7 @@ def intake_root_files(intake: Umt5Intake) -> dict[str, str]:
             f"intake '{intake.name}': there is no text for the license {intake.license!r}"
             f" (available texts: {sorted(INTAKE_LICENSE_TEXTS)}) — LICENSE.md cannot be built"
         )
-    return {LICENSE_FILENAME: text(), **files}
+    return {LICENSE_FILENAME: license_markdown(text()), **files}
 
 
 def _intake_header(intake: Umt5Intake) -> list[str]:

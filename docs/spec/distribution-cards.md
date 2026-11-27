@@ -192,8 +192,11 @@ The level-2 sections come in this order:
 
 ## LICENSE.md
 
-- `LICENSE.md` begins at its first byte with the primary license text, verbatim and unfenced, read from
-  `_shared/licenses` or the family's own license files; a text is never reformatted:
+- `LICENSE.md` is built by `_shared.licenses.license_markdown`. It begins at its first byte with the primary license
+  text inside a ```` ```text ```` fence (`fenced`), the text inside byte for byte the file it is read from
+  (`_shared/licenses` or the family's own license files); a text is never reformatted, and one without a final line
+  break gets the line break that ends its last line before the closing fence (the CircleStone text). The three Gemma 4
+  repositories are the exception: their `LICENSE.md` is the Apache text alone, unfenced.
 
   | Primary text | Repositories |
   | --- | --- |
@@ -204,12 +207,11 @@ The level-2 sections come in this order:
   | Gemma Terms of Use (`irodori/licenses/gemma_terms_of_use.txt`) | `karume-irodori-v4-large` |
 
   The MIT copyright lines are the only inserted text (`mit_license`).
-- A further text follows a `---` line, a `## <license> — <scope>` heading and a paragraph saying which components it
-  covers, then the text verbatim inside a ```` ```text ```` fence: the NVIDIA Open Model License Agreement (Anima), the
-  Apache License 2.0 for the codec (the Irodori MIT line), the MIT License and the Apache License 2.0 for the codec
-  (`karume-irodori-v4-large`). `karume-irodori-v4-large`'s Gemma Prohibited Use Policy, a Markdown document, follows
-  the terms after a `---` line with its own `# Gemma Prohibited Use Policy` heading, unfenced and without a scope
-  paragraph.
+- A further text (`FurtherLicense`) follows a `---` line, a `## <license> — <scope>` heading and a paragraph saying
+  which components it covers, then the text fenced the same way: the NVIDIA Open Model License Agreement (Anima), the
+  Apache License 2.0 for the codec (the Irodori MIT line), and on `karume-irodori-v4-large` the Gemma Prohibited Use
+  Policy (part of the Gemma Terms of Use, which incorporate it), then the MIT License and the Apache License 2.0 for
+  the codec.
 
 ## Shared wording
 
@@ -217,7 +219,8 @@ One constant, imported where it is written:
 
 - In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the revision-pin comment, the notes under
   the quant tables and the cross-repository note.
-- In `_shared`: the license texts (`_shared/licenses`) and the publishers' spelling (`_shared.upstream.UPSTREAM_AUTHORS`).
+- In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
+  (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; EmbeddingGemma 2's
   use-policy sentence.
 

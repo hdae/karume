@@ -635,7 +635,9 @@ class TestDepthAnythingLegalText:
         plausible, so every other check would pass it.
         """
         out_dir, _ = depth_anything_assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_it_ships_the_modification_notice(self, depth_anything_assembled) -> None:
         out_dir, _ = depth_anything_assembled

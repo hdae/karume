@@ -2882,17 +2882,19 @@ class TestLegalTexts:
     #: What sits between the two licence texts in `LICENSE.md`: the separator and the heading
     #: that states the scope of the second text.
     NVIDIA_PART_OPENING = (
-        "\n\n---\n\n## NVIDIA Open Model License Agreement — applies in addition to the"
+        "\n---\n\n## NVIDIA Open Model License Agreement — applies in addition to the"
         " CircleStone license above\n\n"
     )
 
     def _assert_license_layout(self, shipped: bytes) -> None:
         """§3(a) of both licences — `LICENSE.md` is a copy of each text, not a summary.
 
-        The CircleStone text opens the file byte for byte, then the separator and the scope
-        heading, and the vendored NVIDIA text closes it byte for byte inside its fence.
+        The CircleStone text opens the file byte for byte inside its fence, then the separator and
+        the scope heading, and the vendored NVIDIA text closes it byte for byte inside its fence.
         """
-        circlestone = LICENSE_SOURCE_PATH.read_bytes()
+        # The CircleStone text has no final line break: the fence adds the one that ends its last
+        # line, so that the closing fence stands on its own line.
+        circlestone = b"```text\n" + LICENSE_SOURCE_PATH.read_bytes() + b"\n```\n"
         nvidia = NVIDIA_LICENSE_SOURCE_PATH.read_bytes()
         assert shipped.startswith(circlestone)
         rest = shipped[len(circlestone) :].decode("utf-8")

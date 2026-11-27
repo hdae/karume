@@ -60,7 +60,7 @@ from _shared.container_read import (
     read_asset,
     read_asset_declarations,
 )
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
@@ -1350,7 +1350,7 @@ def wan_references(_model: str) -> tuple[CrossRepoReference, ...]:
 
 
 #: The original text of the upstream license (Apache 2.0 — ADR 0092 decision 7).
-_APACHE_LICENSE = apache_license_2_0()
+_APACHE_LICENSE = license_markdown(apache_license_2_0())
 
 #: The `--pipeline wan-ti2v` entry (Wan2.2 TI2V 5B → `karume-wan2.2`; the driver merges it into the
 #: core's PIPELINES), bundling the generation table {@link WAN22}. Attribution (upstream

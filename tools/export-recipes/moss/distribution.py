@@ -48,7 +48,7 @@ from _shared.container_read import (
     open_container,
     read_asset_declarations,
 )
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
@@ -529,5 +529,8 @@ PIPELINE = Pipeline(
     repo_name=moss_repo_name,
     plan=moss_dist_plan,
     card_profiles={"moss-image": render_moss_model_card},
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": MOSS_NOTICE_MARKDOWN},
+    root_files={
+        "LICENSE.md": license_markdown(apache_license_2_0()),
+        "NOTICE.md": MOSS_NOTICE_MARKDOWN,
+    },
 )
