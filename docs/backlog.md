@@ -230,15 +230,14 @@ maintainer's ruling of 2026-11-06).
          allow it): their evidence is the device's sweep records;
        - the choice between sequential variants a few percent apart moves with the records given, and the narrowed
          sweeps measured four hand-picked variants (the planner still lists the others).
-     - A benchmark application for collaborators, apart from the workbench (the maintainer's direction of 2026-11-19;
-       the maintainer has an AMD device in reach). A collaborator opens it, runs one short measurement and sends the
-       result from the page itself — to a form (for example a Google Form) whose address the build reads from the
-       environment (`.env`), so that no record travels by hand and the repository carries no address. Not designed
-       yet. Open: what it measures and for how long (an exploratory run in place of the full sweeps — the analysis of
-       the records at hand is `outputs/diag/sweep-exploration-2026-11-19/`, untracked), what the sent result holds
-       and its size (a form field does not take a sweep record of megabytes), whether sending from a cross-origin
-       isolated page works with the form's endpoint, what it tells about the device, where it is hosted and the
-       build's commit named on the page.
+     - The benchmark page for collaborators (`apps/benchmark`, [the spec](spec/benchmark.md)) is built and has run
+       under Node + Dawn only. Open: a run in a browser on the development machine and on a collaborator's device
+       (two-level progress, the estimate, the download at the end, a cancelled run); where it is hosted (a static
+       host adds no COOP / COEP headers, and a build from a tree with uncommitted changes marks every record
+       `dirty`); a check before the run that the browser's GPU timestamps are not rounded (today a note after it);
+       sending the file from the page (by hand for now — the maintainer's direction of 2026-11-26); and whether a
+       record of the explore sets joined with a full record should count a skipped row as no observation, as it
+       does now.
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
