@@ -24,6 +24,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -107,9 +108,6 @@ UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (DEPTH_ANYTHING_TRAINING_QUOTE,)
 #: on the premise that **every model in the table has this one value** (the MUST above).
 DEPTH_ANYTHING_LICENSE = "apache-2.0"
 
-#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
-#: root — Apache 2.0 §4(a)).
-DEPTH_ANYTHING_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: Measured width of the difference introduced by replacing `ConvTranspose2d` with a 1×1 conv +
 #: pixel shuffle (③ of `depth_anything.patch`). It is **not bit-identical**, so the attribution
@@ -210,9 +208,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         repo = _depth_anything_repo(name)
         lines.append(
             f"- **`{name}`**: {pinned(repo, DEPTH_ANYTHING_REVISIONS[name])}, licensed"
-            f" **{DEPTH_ANYTHING_LICENSE}** (as of retrieval;"
-            f" [full text]({DEPTH_ANYTHING_LICENSE_TEXT_LINK}) — a verbatim copy is in"
-            " `LICENSE.md`)."
+            f" **{DEPTH_ANYTHING_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
         "- **Only the Small checkpoint is redistributed**: upstream licenses Base and Large"

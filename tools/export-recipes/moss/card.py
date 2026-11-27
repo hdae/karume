@@ -22,6 +22,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -53,8 +54,6 @@ MOSS_PIPELINE_TAG = "text-to-image"
 
 MOSS_TITLE = "MOSS-Image-SFT — Karume"
 
-#: Where the licence text lives (the same text as the repository's `LICENSE.md` — Apache 2.0 §4(a)).
-MOSS_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The upstream technical report (the arXiv link of the MOSS-Image-SFT model card at the pinned
 #: revision).
@@ -161,8 +160,7 @@ def _base_weights() -> list[str]:
         "Converted and partly quantized — the original checkpoint is not distributed here.",
         "",
         f"- **Weights**: {pinned(SOURCE.repo, SOURCE.revision)}, licensed **{SOURCE.license}**"
-        " (as of retrieval;"
-        f" [full text]({MOSS_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`).",
+        f" {APACHE_LICENSE_REFERENCE}.",
         f"- **Authors**: MOSS-Image is released by OpenMOSS ([technical report]"
         f"({MOSS_TECHNICAL_REPORT})).",
         "- **Text encoder** (`text_encoder`, `tokenizer`): the checkpoint's bundled Qwen3.5 text"

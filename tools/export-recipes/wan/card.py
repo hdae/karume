@@ -42,6 +42,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -73,9 +74,6 @@ WAN_PIPELINE_TAG = "text-to-video"
 #: The upstream technical report.
 WAN_PAPER = "arxiv.org/abs/2503.20314"
 
-#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
-#: root — Apache 2.0 §4(a)).
-WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The construction option that chooses the text path (the second argument of the TS side's
 #: `wan.Ti2vPipeline.fromPretrained` — ADR 0119 addendum B; a fact not in the manifest). The
@@ -474,8 +472,7 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
         source = _upstream(name, card)
         lines.append(
             f"- **`{name}`**: {pinned(source.repo, source.revision)}, licensed"
-            f" **{source.license}** (as of retrieval;"
-            f" [full text]({WAN_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f" **{source.license}** {APACHE_LICENSE_REFERENCE}."
         )
     if card.paper is not None:
         lines.append(

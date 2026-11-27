@@ -169,6 +169,16 @@ def pinned(repo: str, revision: str) -> str:
 #: it in its changes bullet ({@link changes_made_here}).
 APACHE_MODIFICATION_CLAUSE = "Apache 2.0 §4(b)"
 
+#: Where the Apache License 2.0 text lives (the text `LICENSE.md` copies — Apache 2.0 §4(a)).
+APACHE_LICENSE_TEXT_URL = "https://www.apache.org/licenses/LICENSE-2.0"
+
+#: What follows "licensed **apache-2.0**" on a card's line for weights whose license is the
+#: primary text of `LICENSE.md`: when the license was read, where the text lives, and the copy.
+APACHE_LICENSE_REFERENCE = (
+    f"(as of retrieval; [full text]({APACHE_LICENSE_TEXT_URL}) — a verbatim copy is in"
+    " `LICENSE.md`)"
+)
+
 
 # SPEC: docs/spec/distribution-cards.md#license-statements
 def changes_made_here(clause: str | None = None) -> str:

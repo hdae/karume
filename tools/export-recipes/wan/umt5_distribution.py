@@ -62,6 +62,7 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     HF_OWNER,
     RUNTIME_SENTENCE,
@@ -558,9 +559,6 @@ UMT5_SUPPORTED_PIPELINE = UMT5_PIPELINE
 #: The HF pipeline tag (an encoder that turns text into embeddings).
 UMT5_PIPELINE_TAG = "feature-extraction"
 
-#: Where the original text is (the same text as `LICENSE.md` at the distribution repository root —
-#: Apache 2.0 §4(a)).
-UMT5_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The name of the Wan distribution repository that references this encoder across repositories
 #: (named by the card's "Used by" — only Wan2.2 is published, Wan2.1 is not; the same spelling as
@@ -663,9 +661,8 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         # keys read.
         lines.append(
             f"- **`{name}`**: the encoder weights (`shared.weight` and `encoder.*`) of"
-            f" {pinned(source.repo, source.revision)}, licensed **{source.license}** (as of"
-            " retrieval;"
-            f" [full text]({UMT5_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f" {pinned(source.repo, source.revision)}, licensed **{source.license}**"
+            f" {APACHE_LICENSE_REFERENCE}."
             " The decoder and `lm_head` are not included."
         )
         files = " and ".join(

@@ -24,6 +24,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -77,9 +78,6 @@ SIGLIP2_REVISIONS: Mapping[str, str] = {
 
 SIGLIP2_LICENSE = "apache-2.0"
 
-#: Where the full text lives (the same text as `LICENSE.md` at the distribution repository's root —
-#: Apache 2.0 §4(a)).
-SIGLIP2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The measured range of the difference that replacing the MAP head (step ③ of `siglip2.patch`)
 #: introduces, as body text. It is **not bit-identical**, so the attribution section states it (a
@@ -160,8 +158,7 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         repo = SIGLIP2_UPSTREAM[name]
         lines.append(
             f"- **`{name}`**: {pinned(repo, SIGLIP2_REVISIONS[name])}, licensed"
-            f" **{SIGLIP2_LICENSE}** (as of retrieval;"
-            f" [full text]({SIGLIP2_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f" **{SIGLIP2_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
         f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} conversion"

@@ -141,6 +141,10 @@ The level-2 sections come in this order:
   not by the text's title. Two kinds of words keep a license's own name: a clause the card cites ("per Apache 2.0
   §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). The three Gemma 4 cards
   are the exception: they write "licensed **Apache 2.0**", with the license page and the text linked.
+- Where the weights' license is the primary Apache text of `LICENSE.md`, "licensed **apache-2.0**" is followed by
+  `karume.modelcard.APACHE_LICENSE_REFERENCE`: "(as of retrieval; [full text](https://www.apache.org/licenses/LICENSE-2.0)
+  — a verbatim copy is in `LICENSE.md`)" (`karume-depth-anything-v2`, `karume-embeddinggemma-2`, `karume-moss-image`,
+  `karume-siglip2`, `karume-umt5-xxl`, `karume-wan2.2`). No other card links the text.
 - Every card carries one "**Changes made here**" bullet in the attribution section summarising the changes, headed
   by `karume.modelcard.changes_made_here`: "- **Changes made here** (listed in full in `NOTICE.md`, per <clause>):",
   the clause being the one of the license that asks for the notice of the changes — "Apache 2.0 §4(b)" on the Apache
@@ -277,13 +281,13 @@ The level-2 sections come in this order:
 One constant, imported where it is written:
 
 - In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the upstream-card bullet, the link and
-  pin of an upstream (`hf_link`, `pinned`), the quotation of an upstream card (`UpstreamQuote`, `quotation`), the
-  revision-pin comment, the notes under the quant tables (the measurement notes among them: `Measurement`,
-  `measurements`, `MEASUREMENTS_LEAD`) and the cross-repository note.
+  pin of an upstream (`hf_link`, `pinned`), the Apache text's address and the words after an Apache license
+  (`APACHE_LICENSE_TEXT_URL`, `APACHE_LICENSE_REFERENCE`), the quotation of an upstream card (`UpstreamQuote`,
+  `quotation`), the revision-pin comment, the notes under the quant tables (the measurement notes among them:
+  `Measurement`, `measurements`, `MEASUREMENTS_LEAD`) and the cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices. Each quotation
   is one `UpstreamQuote` of its family's card module.
 
-Everything else above (the Apache text URL, the notices' closing paragraph, the "What is this" sentences) is written
-per family.
+Everything else above (the notices' closing paragraph, the "What is this" sentences) is written per family.

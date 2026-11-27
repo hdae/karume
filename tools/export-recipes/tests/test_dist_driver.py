@@ -71,6 +71,7 @@ from karume.dist import (
 from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.migrate import card_format_statement
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     HF_OWNER,
     REVISION_PIN_COMMENT,
     RUNTIME_SENTENCE,
@@ -1061,6 +1062,20 @@ class TestTheLicenseNamesOfEveryPublishedRepository:
         assert named
         # The Gemma 4 cards write "licensed **Apache 2.0**" until their stage.
         assert bool(other) is (directory in GEMMA4_REPOSITORIES), other
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_an_apache_card_points_at_the_text_in_the_one_wording(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        """The weights whose license is `LICENSE.md`'s primary Apache text are followed by
+        `APACHE_LICENSE_REFERENCE`, and no card spells the full-text link another way."""
+        if directory in GEMMA4_REPOSITORIES:
+            pytest.skip("the Gemma 4 cards keep their wording until their stage")
+        _, card = _published_card(pipeline, directory)
+        apache = PRIMARY_LICENSES[directory] == _APACHE
+
+        assert (f"licensed **apache-2.0** {APACHE_LICENSE_REFERENCE}." in card) is apache
+        assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE)
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_a_notice_calls_no_license_by_a_short_name(

@@ -31,6 +31,7 @@ from typing import Any
 from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from embeddinggemma2.sources import PIN
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
     APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -114,7 +115,6 @@ EMBEDDINGGEMMA2_UPSTREAM: Mapping[str, str] = {"text": "google/embeddinggemma-2"
 #: License (the README front matter of the pinned snapshot says `license: apache-2.0` —
 #: `embeddinggemma2.sources.PIN`; not gated).
 EMBEDDINGGEMMA2_LICENSE = "apache-2.0"
-EMBEDDINGGEMMA2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The sentence of the upstream card on the use policy, **verbatim, with upstream's own link**: the
 #: sentence is upstream's statement, so it is quoted and not paraphrased (the maintainer's ruling of
@@ -630,9 +630,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         repo = EMBEDDINGGEMMA2_UPSTREAM[name]
         lines.append(
             f"- **`{name}`**: {pinned(repo, _revision(repo))}, licensed"
-            f" **{EMBEDDINGGEMMA2_LICENSE}**"
-            f" ([full text]({EMBEDDINGGEMMA2_LICENSE_TEXT_LINK}); a verbatim copy is in"
-            " `LICENSE.md`)."
+            f" **{EMBEDDINGGEMMA2_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     weights_change = (
         [
