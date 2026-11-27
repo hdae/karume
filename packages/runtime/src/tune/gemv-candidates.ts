@@ -446,31 +446,33 @@ export const gemvExploreCarriedFromM1: typeof gemvCarriedFromM1 = (
 };
 
 /**
- * Which kernels of an `explore` group go on after the quick look, given those whose quick time its
- * margin lets go on (`goesOn`, in the order of `kernels`) and the case's M = 1 group of the same run:
- * at a `no-regression` row count, also every plain or staged row that M = 1 carries for its own time
- * (one of the {@link GEMV_EXPLORE_CARRIED_ROWS} fastest it leaves adoptable — not the default's
- * choice at `reorder` at M = 1, which the derivation reads as the reference, never as a candidate)
- * whenever a row-blocked form of its lanes goes on.
+ * Which kernels of a group go on after the quick look, in every candidate set, given those whose
+ * quick time its margin lets go on (`goesOn`, in the order of `kernels`) and the case's M = 1 group of
+ * the same run: at a `no-regression` row count, also every plain or staged row — not the default's
+ * choice at `reorder` at M = 1, which the derivation reads as the reference, never as a candidate —
+ * whenever a row-blocked form of its lanes goes on. Which rows take the quick look at all is the
+ * set's rule of what M = 1 carries ({@link gemvCarriedFromM1}, {@link gemvExploreCarriedFromM1}): a
+ * row it skipped is never measured, whatever this says of it.
  *
  * The derivation reads every row block of a candidate against the candidate's own kernel at that row
  * count (gemv-derive.ts's `rowBlockReadings`): without that kernel's time no row block has evidence,
  * and the candidate cannot be adopted. The reference there is often itself row-blocked, so where a
- * row block pays the unblocked kernel is far slower than the reference, and the explore set's margin
- * screens it out — on an RTX 3080 Ti (the two `full` records of 2026-11-26/27) the unblocked
- * staged-l16 at ×1.13 to ×1.22 the reference lost two adoptions in both explore runs. A row block
- * screened out itself leaves nothing to read its base against, so its base is not kept for it.
+ * row block pays the unblocked kernel is far slower than the reference, and the margin screens it
+ * out — on an RTX 3080 Ti (the two `full` records of 2026-11-26/27) the unblocked staged-l16 at
+ * ×1.13 to ×1.22 the reference lost two adoptions in both explore runs, and at least nine int4 g32
+ * shapes of the `full` records themselves could not adopt a row-blocked form those records time
+ * 21 to 33 % faster than the default. A row block screened out itself leaves nothing to read its base
+ * against, so its base is not kept for it.
  *
  * Without the run's M = 1 group, the margin alone decides. Pure.
  */
-export const gemvExploreQuickLookGoesOn = (
+export const gemvQuickLookGoesOn = (
   m: number,
   kernels: readonly (Pick<GemvCandidate, "name" | "class"> & { readonly choice?: CarriedChoice })[],
   goesOn: readonly boolean[],
   first: GemvM1Group | undefined,
 ): boolean[] => {
   if (first === undefined) return [...goesOn];
-  const bases = exploreFastestRows(first).filter((name) => name !== first.profile.reorder);
   const blocked = new Set(
     kernels.flatMap((kernel, index) => {
       const lanes = rowBlockLanes(kernel.choice);
@@ -479,7 +481,10 @@ export const gemvExploreQuickLookGoesOn = (
   );
   return kernels.map((kernel, index) => {
     if (goesOn[index] === true) return true;
-    if (gemvGroupRole(m, kernel.class) !== "no-regression" || !bases.includes(kernel.name)) {
+    if (
+      gemvGroupRole(m, kernel.class) !== "no-regression" ||
+      kernel.name === first.profile.reorder
+    ) {
       return false;
     }
     const lanes = PARALLEL_ROW_LANES.get(kernel.name);

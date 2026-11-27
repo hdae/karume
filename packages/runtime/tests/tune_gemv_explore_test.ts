@@ -2,7 +2,8 @@
 // — `gemvSentinels`, `gemvExploreOrder`), what another case measures at M = 1
 // (`gemvExploreSelection`, `gemvGridNeighbours`), what M = 4 and 8 take from a case's M = 1 group
 // (src/tune/gemv-candidates.ts — `gemvExploreCarriedFromM1`) and keep past the quick look
-// (`gemvExploreQuickLookGoesOn`), how a sweep of the set is planned
+// (`gemvQuickLookGoesOn`, the rule of every set, here with the full set's candidates too), how a
+// sweep of the set is planned
 // (src/tune/gemv-sweep.ts — `planGemvSweep`, `gemvSweepQuickLookMargin`, `gemvSweepExploreEvidence`)
 // and the quick look's bar of a class among the kernels the derivation could adopt (src/tune/harness.ts —
 // `quickLookGoesOn`; src/tune/gemv-sweep.ts — `gemvQuickLookAdoptable`).
@@ -17,7 +18,7 @@
 // a winner without the baseline's time; the fourth fastest row carried; the subgroup form
 // carried; the row-blocked form of a lane outside the three fastest carried; the quick look at M = 4
 // left to the margin alone, keeping a row whose row blocks were screened, or keeping the default's
-// row; the sentinels left in the table's order; the option error dropped; the explore margin taken
+// row (with the explore and the full set's candidates); the sentinels left in the table's order; the option error dropped; the explore margin taken
 // as ×1.25; a kernel whose check failed, or a subgroup kernel, setting its class's bar.
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -41,11 +42,11 @@ import {
   gemvCandidates,
   gemvCarriedFromM1,
   gemvExploreCarriedFromM1,
-  gemvExploreQuickLookGoesOn,
   type GemvGates,
   type GemvM1Group,
   gemvProfileChoice,
   gemvBaseline,
+  gemvQuickLookGoesOn,
 } from "../src/tune/gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, gemvCaseOf } from "../src/tune/gemv-cases.ts";
 import { gemvQuickLookAdoptable, planGemvSweep } from "../src/tune/gemv-sweep.ts";
@@ -675,7 +676,7 @@ describe("what the explore set carries from a case's M = 1 group to M = 4 and 8 
   });
 });
 
-describe("what the explore set's quick look keeps at M = 4 and 8 besides its margin (gemvExploreQuickLookGoesOn)", () => {
+describe("what the explore set's quick look keeps at M = 4 and 8 besides its margin (gemvQuickLookGoesOn)", () => {
   const row = (candidate: string, perDispatch: number) => ({
     candidate,
     perDispatch,
@@ -714,7 +715,7 @@ describe("what the explore set's quick look keeps at M = 4 and 8 besides its mar
   ];
   const goesOnAt = (m: number, first: GemvM1Group | undefined) =>
     Object.fromEntries(
-      gemvExploreQuickLookGoesOn(
+      gemvQuickLookGoesOn(
         m,
         byMargin.map(([name]) => candidateAt(m, name)),
         byMargin.map(([, goes]) => goes),
@@ -755,11 +756,87 @@ describe("what the explore set's quick look keeps at M = 4 and 8 besides its mar
     assertEquals(goesOnAt(8, group), { ...margin, "parallel-l8": true, "staged-l8": true });
     assertEquals(goesOnAt(4, undefined), margin);
     const one = ["parallel-l4", "parallel-l8", "staged-l8"].map((name) => candidateAt(1, name));
-    assertEquals(gemvExploreQuickLookGoesOn(1, one, [true, false, false], group), [
-      true,
-      false,
-      false,
-    ]);
+    assertEquals(gemvQuickLookGoesOn(1, one, [true, false, false], group), [true, false, false]);
+  });
+});
+
+describe("what the full set's quick look keeps at M = 4 and 8 besides its margin (gemvQuickLookGoesOn)", () => {
+  const row = (candidate: string, perDispatch: number) => ({
+    candidate,
+    perDispatch,
+    withinBand: true,
+    nonFiniteOutputs: 0,
+  });
+  // Steady; against the default's parallel-l4 every other row is adoptable. The full set carries
+  // all of them to M = 4 and 8, parallel-l16 and staged-l32 too, which are not among the three
+  // fastest the explore set would carry
+  const group: GemvM1Group = {
+    baselineSpread: 1.01,
+    profile: { reorder: "parallel-l4" },
+    rows: [
+      row("parallel-l4", 10_000),
+      row("parallel-l8", 5_000),
+      row("staged-l8", 6_000),
+      row("staged-l16", 7_000),
+      row("parallel-l16", 8_000),
+      row("staged-l32", 8_500),
+    ],
+  };
+  const references = { exact: "c32u4r2", reorder: "staged-l4r4" };
+  const candidateAt = (m: number, name: string): GemvCandidate => {
+    const found = gemvCandidates(PLE, m, "full", GATES).find((one) => one.name === name);
+    if (found === undefined) throw new Error(`no candidate ${name} at M=${m}`);
+    return found;
+  };
+  // What the margin lets go on: the reference and staged-l16r4; every unblocked row is far slower
+  // than the reference, and staged-l32r2 is screened too
+  const byMargin = (m: number): readonly [string, boolean][] => [
+    [gemvProfileChoice(PLE, m, "reorder").name, true],
+    ["parallel-l4", false],
+    ["parallel-l16", false],
+    ["staged-l16", false],
+    ["staged-l16r4", true],
+    ["staged-l32", false],
+    ["staged-l32r2", false],
+  ];
+  const goesOnAt = (m: number) =>
+    Object.fromEntries(
+      gemvQuickLookGoesOn(
+        m,
+        byMargin(m).map(([name]) => candidateAt(m, name)),
+        byMargin(m).map(([, goes]) => goes),
+        group,
+      ).map((goes, index) => [byMargin(m)[index]?.[0], goes]),
+    );
+
+  it("keeps at M = 4 and 8 the unblocked base of a row block that goes on, a row the explore set would not carry included (fault: the full set's quick look left to the margin alone)", () => {
+    for (const name of ["parallel-l16", "staged-l16"]) {
+      assert(gemvCarriedFromM1(4, candidateAt(4, name), references, group), name);
+    }
+    for (const m of [4, 8]) {
+      const kept = goesOnAt(m);
+      assertEquals(
+        [kept["parallel-l16"], kept["staged-l16"], kept["staged-l16r4"]],
+        [true, true, true],
+        `M=${m}`,
+      );
+    }
+  });
+
+  it("screens a base whose row blocks are all screened, and the default's choice at reorder at M = 1 (faults: kept for a carried row block; kept for the reference's row block)", () => {
+    for (const m of [4, 8]) {
+      const kept = goesOnAt(m);
+      assertEquals(
+        [kept["staged-l32"], kept["staged-l32r2"], kept["parallel-l4"]],
+        [false, false, false],
+        `M=${m}`,
+      );
+    }
+  });
+
+  it("keeps nothing beyond the margin at M = 1", () => {
+    const one = ["parallel-l4", "parallel-l16", "staged-l16"].map((name) => candidateAt(1, name));
+    assertEquals(gemvQuickLookGoesOn(1, one, [true, false, false], group), [true, false, false]);
   });
 });
 

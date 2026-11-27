@@ -200,12 +200,14 @@ is what shows whether the block pays on the device.
 The `explore` set carries less ([below](#the-explore-set)): of the reorder candidates the rule above measures, only
 the three fastest plain or staged rows of the case's M = 1 group (`gemvExploreCarriedFromM1`) and the row-blocked
 forms of their lanes; the subgroup form is not carried. The references, the default's choice at `reorder` at M = 1
-and the row-blocked forms of its lanes are measured as above. The others are skipped rows. Its quick look at 4 and 8
-rows (step 3) does not screen out one of those three rows — unless it is the default's choice at `reorder` at M = 1 —
-when a row-blocked form of its lanes goes on (`gemvExploreQuickLookGoesOn`): the derivation reads every row block of
-a candidate against the candidate's own kernel at that row count, so without that kernel's time no row block has
-evidence and the candidate is not adopted. A row-blocked form that is screened out itself keeps nothing; without the
-run's M = 1 group of the case the margin alone decides.
+and the row-blocked forms of its lanes are measured as above. The others are skipped rows.
+
+In every set, the quick look at 4 and 8 rows (step 3) does not screen out a measured plain or staged row — unless it
+is the default's choice at `reorder` at M = 1 — when a row-blocked form of its lanes goes on (`gemvQuickLookGoesOn`):
+the derivation reads every row block of a candidate against the candidate's own kernel at that row count, so without
+that kernel's time no row block has evidence and the candidate is not adopted. A row-blocked form that is screened
+out itself keeps nothing; without the run's M = 1 group of the case the margin alone decides. Each set keeps its own
+margin.
 
 1. Every kernel's pipeline is made first, so that no compile leaves the device idle between the steps below. The
    kernels are the baseline, the default profile's choice at `reorder` and the candidates of the set (those the
@@ -230,8 +232,8 @@ run's M = 1 group of the case the margin alone decides.
    the kernels whose check held elsewhere, again without the subgroup form. A class in which no kernel that could be
    adopted has a quick time has no bar: all its kernels go on. A subgroup kernel is screened against the bar like
    any other. A kernel whose check failed goes on or
-   is screened by its own time like any other, and its row records the check of step 4. The `explore` set also lets
-   the base of a row block go on at 4 and 8 rows ([above](#how-the-gemv-sweep-times-a-row-count)). The others are
+   is screened by its own time like any other, and its row records the check of step 4. At 4 and 8 rows the base of a
+   row block that goes on goes on too ([above](#how-the-gemv-sweep-times-a-row-count)). The others are
    screened rows. The rule and its evidence are measurement.ts's `QUICK_LOOK_MARGIN` (×1.25) and, for the `explore`
    set, `EXPLORE_QUICK_LOOK_MARGIN` (×1.10: replayed on the GEMV sweep records of 2026-11-18/19, it left the
    derivation's decisions unchanged on the RTX 5070 Ti, 0 of 116, and changed 2 of 214 on the Apple M2, each within
@@ -290,8 +292,8 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
   earlier calls — the workbench makes one call per case).
 - At 4 and 8 rows a case measures what its own M = 1 group carries ([above](#how-the-gemv-sweep-times-a-row-count)),
   and the identical class there is the baseline alone (no row-block height: no rule reads one).
-- The quick look's default margin is ×1.10; at 4 and 8 rows it does not screen out the base of a row block that goes
-  on ([above](#how-the-gemv-sweep-times-a-row-count)).
+- The quick look's default margin is ×1.10; at 4 and 8 rows it keeps the base of a row block that goes on, as every
+  set's does ([above](#how-the-gemv-sweep-times-a-row-count)).
 - Option errors, before the GPU is touched: `candidates` with the set; `sentinelEvidence` with another set, or
   naming a case that is no sentinel, one sentinel twice, a sentinel the call measures itself, or a shape other than
   the table's.

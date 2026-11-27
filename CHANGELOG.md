@@ -71,6 +71,12 @@ measurements in `docs/research/`.
 - `@karume/runtime/tune`: in every set of the GEMV sweep, the quick look's bar of a class comes only from kernels
   the derivation can adopt — their check, read right after the quick look, held, and no subgroup form (no table row
   holds one). A kernel whose check fails no longer screens out the true best.
+- `@karume/runtime/tune`: in every set of the GEMV sweep, not only `explore`, the quick look at 4 and 8 rows does not
+  screen out a measured plain or staged row (other than the default's choice at `reorder` at M = 1) while a
+  row-blocked form of its lanes goes on: the derivation reads a row block against that unblocked kernel. On an RTX
+  3080 Ti's two `full` records the ×1.25 margin had screened such bases out, so at least nine int4 g32 shapes could
+  not adopt a row-blocked form the same records time 21 to 33 % faster than the default. Each set keeps its own
+  margin; the record format does not change.
 
 ## [0.24.0] - 2026-11-25
 

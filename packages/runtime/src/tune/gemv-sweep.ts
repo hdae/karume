@@ -13,7 +13,9 @@
  * the run has the case's M = 1 group (when it measured it): a reorder candidate whose row there
  * leaves it unadoptable is skipped (gemv-candidates.ts's `gemvCarriedFromM1`; the `explore` set's
  * narrower `gemvExploreCarriedFromM1`) — its program and fingerprint are built, it takes none of
- * the steps below, and its row says `skipped`.
+ * the steps below, and its row says `skipped`. There, in every set, the quick look does not screen
+ * out a plain or staged row whose row-blocked form goes on (`gemvQuickLookGoesOn`): the derivation
+ * reads a row block against that unblocked kernel.
  * 1. the pipelines of every kernel are made first, so no compile leaves the device idle later;
  * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady;
  * 3. the quick look (harness.ts's protocol rule 4 — skipped at a margin of 0): the baseline is run
@@ -44,9 +46,7 @@
  * with every candidate; every other case measures at M = 1 the references and the candidates its
  * nearest sentinels of its storage predict (`gemvExploreSelection` over the sentinels the caller measured earlier,
  * `sentinelEvidence`, and those this call measured so far), and at M = 4 and 8 what its own M = 1
- * group carries. There its quick look does not screen out a carried plain or staged row whose
- * row-blocked form goes on (`gemvExploreQuickLookGoesOn`): the derivation reads a row block against
- * that unblocked kernel.
+ * group carries.
  *
  * Correctness, per row:
  * - identical class: every output word equals the baseline's (`compareBufferWords`); a difference
@@ -74,11 +74,11 @@ import {
   GEMV_CANDIDATE_SETS,
   gemvCarriedFromM1,
   gemvExploreCarriedFromM1,
-  gemvExploreQuickLookGoesOn,
   gemvGroupRole,
   gemvKernelsAt,
   gemvMeasurementPlans,
   gemvProgram,
+  gemvQuickLookGoesOn,
   gemvRowCountsIn,
   type GemvSelection,
   isGemvCandidateSet,
@@ -381,10 +381,10 @@ export type GemvCaseSettings = {
   readonly carriedFromM1?: typeof gemvCarriedFromM1;
   /**
    * Which kernels go on after the quick look, given those its margin lets go on and the case's M = 1
-   * group (default: those alone; the `explore` set's `gemvExploreQuickLookGoesOn`, which keeps the
-   * base of a row block that goes on).
+   * group (default `gemvQuickLookGoesOn`, which keeps the base of a row block that goes on — every
+   * set's rule).
    */
-  readonly quickLookGoesOn?: typeof gemvExploreQuickLookGoesOn;
+  readonly quickLookGoesOn?: typeof gemvQuickLookGoesOn;
 };
 
 export type GemvCaseHooks = {
@@ -595,6 +595,7 @@ export const sweepGemvCase = async (
   const reference = sessionGeometryProfile(gpu);
   const weightScale = !isFloatStorage(gemvCase.storage);
   const carriedFromM1 = settings.carriedFromM1 ?? gemvCarriedFromM1;
+  const keptPastQuickLook = settings.quickLookGoesOn ?? gemvQuickLookGoesOn;
   const rows: GemvSweepRow[] = [];
   const summaries: GemvSweepCaseSummary[] = [];
   const emit = (row: GemvSweepRow): void => {
@@ -828,13 +829,12 @@ export const sweepGemvCase = async (
         const going = kernels.map(
           (kernel, index) => kernel.state.kind === "prepared" && byMargin[index] === true,
         );
-        const goesOn =
-          settings.quickLookGoesOn?.(
-            m,
-            kernels.map(({ candidate }) => candidate),
-            going,
-            m1Group,
-          ) ?? going;
+        const goesOn = keptPastQuickLook(
+          m,
+          kernels.map(({ candidate }) => candidate),
+          going,
+          m1Group,
+        );
         kernels.forEach((kernel, index) => {
           const { state } = kernel;
           if (state.kind !== "prepared" || goesOn[index] === true) return;
@@ -1356,7 +1356,6 @@ export const runGemvSweep = async (options: GemvSweepOptions = {}): Promise<Gemv
             tolerance,
             quickLookMargin: plan.quickLookMargin,
             carriedFromM1,
-            ...(explore ? { quickLookGoesOn: gemvExploreQuickLookGoesOn } : {}),
           },
           {
             ...(options.signal === undefined ? {} : { signal: options.signal }),

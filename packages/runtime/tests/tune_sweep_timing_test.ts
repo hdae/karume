@@ -15,9 +15,9 @@
 // The GEMV sweep's skipping at M = 4 and 8: a reorder candidate its M = 1 group leaves unadoptable is
 // not measured there (faults: a candidate ×1.05 the default's choice at M = 1, one screened at M = 1);
 // a run narrowed to M = 4 skips nothing. With the explore set's rule, M = 4 prepares only the three
-// fastest rows of M = 1 and the row-blocked form of their lanes (fault: the full set's rule), and
-// times a carried row whose row-blocked form goes on however far beyond the margin it is (fault: the
-// margin alone).
+// fastest rows of M = 1 and the row-blocked form of their lanes (fault: the full set's rule). With
+// either set's rules, M = 4 and 8 time a carried row whose row-blocked form goes on however far
+// beyond the margin it is, and screen one whose row blocks are screened (fault: the margin alone).
 //
 // The GEMV sweep's progress steps: each phase of a row count counts from 0 to its total (fault: a
 // kernel screened, so the calibration counts one kernel fewer than the quick look).
@@ -58,7 +58,6 @@ import {
   gemvBaseline,
   gemvCandidates,
   gemvExploreCarriedFromM1,
-  gemvExploreQuickLookGoesOn,
   type GemvMeasurementPlan,
   gemvProfileChoice,
   gemvProgram,
@@ -893,7 +892,8 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
           tolerance: WIDE,
           quickLookMargin: EXPLORE_QUICK_LOOK_MARGIN,
           carriedFromM1: gemvExploreCarriedFromM1,
-          ...(rule ? { quickLookGoesOn: gemvExploreQuickLookGoesOn } : {}),
+          // The control: the margin alone
+          ...(rule ? {} : { quickLookGoesOn: (_m, _kernels, goesOn) => [...goesOn] }),
         }),
       );
     const kept = await sweepExplore(true);
@@ -913,6 +913,68 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
     const margin = await sweepExplore(false);
     assertEquals(rowAt(margin.rows, 4, "staged-l16").screened, true);
     assertEquals(rowAt(margin.rows, 4, "staged-l16r4").rounds?.length, 2);
+  });
+
+  it("times at M = 4 and 8, with the full set's rules and margin (the defaults), the unblocked form of a row whose row-blocked form goes on, and screens one whose row block is screened (fault: the margin alone)", async () => {
+    // At M = 1 staged-l16 and staged-l32 are adoptable over the default's parallel-l4 (×1.43 and
+    // ×1.33) and within the margin of each other. At M = 4 and 8 (a parallel kernel's key does not
+    // hold M: the same times) they are ×1.4 and ×1.5 the reference, beyond the margin; staged-l16r4
+    // is faster than the reference, staged-l32r2 ×1.6 it
+    const one = namedPlan(PLE_CASE, 1, ["parallel-l4", "staged-l16", "staged-l32"]);
+    const later = [4, 8].map((m) =>
+      namedPlan(PLE_CASE, m, [
+        gemvProfileChoice(PLE_CASE, m, "reorder").name,
+        "parallel-l4",
+        "staged-l16",
+        "staged-l16r4",
+        "staged-l32",
+        "staged-l32r2",
+      ]),
+    );
+    const keyIn = (plan: GemvMeasurementPlan, name: string): string => {
+      const candidate = plan.candidates.find((entry) => entry.name === name);
+      if (candidate === undefined) throw new Error(name);
+      return keyAt(PLE_CASE, plan.m, candidate);
+    };
+    const times = new Map([
+      [keyIn(one, "parallel-l4"), 10_000],
+      [keyIn(one, "staged-l16"), 7_000],
+      [keyIn(one, "staged-l32"), 7_500],
+      ...later.flatMap((plan): [string, number][] => [
+        [keyIn(plan, plan.profile.reorder), 5_000],
+        [keyIn(plan, "staged-l16r4"), 4_000],
+        [keyIn(plan, "staged-l32r2"), 8_000],
+      ]),
+    ]);
+    const sweepFull = (rule: boolean) =>
+      withContext({ gpuNs: byKey(times) }, (context) =>
+        sweepGemvCase(context, PLE_CASE, [one, ...later], {
+          rounds: 2,
+          tolerance: WIDE,
+          quickLookMargin: QUICK_LOOK_MARGIN,
+          // The control: the margin alone
+          ...(rule ? {} : { quickLookGoesOn: (_m, _kernels, goesOn) => [...goesOn] }),
+        }),
+      );
+    const kept = await sweepFull(true);
+    for (const plan of later) {
+      for (const name of [plan.profile.reorder, "staged-l16", "staged-l16r4"]) {
+        const row = rowAt(kept.rows, plan.m, name);
+        assertEquals(
+          [row.screened, row.skipped, row.rounds?.length],
+          [undefined, undefined, 2],
+          `M=${plan.m} ${name}`,
+        );
+      }
+      for (const name of ["parallel-l4", "staged-l32", "staged-l32r2"]) {
+        assertEquals(rowAt(kept.rows, plan.m, name).screened, true, `M=${plan.m} ${name}`);
+      }
+    }
+    const margin = await sweepFull(false);
+    for (const plan of later) {
+      assertEquals(rowAt(margin.rows, plan.m, "staged-l16").screened, true, `M=${plan.m}`);
+      assertEquals(rowAt(margin.rows, plan.m, "staged-l16r4").rounds?.length, 2, `M=${plan.m}`);
+    }
   });
 
   it("skips nothing at M = 4 when its M = 1 baseline was not timed: that group reads nothing (fault: the baseline's pipeline cannot be made at M = 1)", async () => {
