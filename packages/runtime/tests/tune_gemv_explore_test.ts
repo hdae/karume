@@ -12,7 +12,9 @@
 // one; a row whose check failed, that was screened, skipped or errored, or whose time is no finite
 // number, and that still predicts; a sentinel of another storage that predicts; the parallel
 // prediction taken from the fastest row alone, its other rows read against the baseline, or every
-// row a winner without the reference's time; the fourth fastest row carried; the subgroup form
+// row a winner without the reference's time; the sequential prediction taken from the fastest
+// variant alone, its other variants read against the default's choice at reorder, or every variant
+// a winner without the baseline's time; the fourth fastest row carried; the subgroup form
 // carried; the row-blocked form of a lane outside the three fastest carried; the quick look at M = 4
 // left to the margin alone, keeping a row whose row blocks were screened, or keeping the default's
 // row; the sentinels left in the table's order; the option error dropped; the explore margin taken
@@ -303,6 +305,138 @@ describe("the candidates a case that is no sentinel measures at M = 1", () => {
       ...gemvGridNeighbours("c64u8"),
       "staged-l32",
       ...gemvGridNeighbours("staged-l32"),
+    ]);
+  });
+
+  it("carry with the fastest sequential variant every other one the derivation could adopt at the sentinel, and their neighbours (fault: the fastest alone)", () => {
+    // The default's choice at exact of the sentinel is the baseline c32u4: against its 10, c64u8
+    // ×1.25 and c16u16 ×1.18 are both winners
+    assertEquals(gemvBaseline(near, 1).name, "c32u4");
+    const selection = gemvExploreSelection(target, [
+      {
+        gemvCase: near,
+        rows: [
+          rows[0],
+          sequential("c64u8", 8),
+          sequential("c16u16", 8.5),
+          parallel("staged-l16", 6),
+        ],
+      },
+    ]);
+    assertEquals(selection, [
+      "c64u8",
+      ...gemvGridNeighbours("c64u8"),
+      "c16u16",
+      ...gemvGridNeighbours("c16u16"),
+      "staged-l16",
+      ...gemvGridNeighbours("staged-l16"),
+    ]);
+  });
+
+  it("keep a variant the derivation could adopt when one fast time leads it at the sentinel: an RTX 3080 Ti's explore run of 2026-11-27 (fault: the fastest alone)", () => {
+    // The i4 sentinel's M = 1 times of that run, in µs: c16u8's 20.58 is one fast time (22.5 to
+    // 22.7 in five other records); c32u16 and c16u16 are ×1.12 over the baseline, c32u8 ×1.05
+    const sentinel = caseOf("i4g32-n2112-k2816");
+    assertEquals(gemvBaseline(sentinel, 1).name, "c32u4");
+    const selection = gemvExploreSelection(caseOf("i4g32-n8192-k3840"), [
+      {
+        gemvCase: sentinel,
+        rows: [
+          { candidate: "c32u4", class: "identical", isBaseline: true, perDispatch: 23.69 },
+          sequential("c16u8", 20.58),
+          sequential("c32u16", 21.17),
+          sequential("c16u16", 21.21),
+          sequential("c32u8", 22.58),
+          parallel("staged-l32", 15),
+        ],
+      },
+    ]);
+    assert(selection !== undefined);
+    assertEquals(
+      selection.filter((name) => !name.includes("-l")),
+      [
+        "c16u8",
+        // c16u8's neighbours: c32u8 is one, not a winner of its own
+        "c32u8",
+        "c16u4",
+        "c16u16",
+        "c32u16",
+        // The one neighbour of c32u16 that no other winner has
+        "c64u16",
+      ],
+    );
+  });
+
+  it("read the other sequential variants against the sentinel's default choice at exact, not at reorder (fault: against the choice at reorder)", () => {
+    // E2B's per_layer_model_projection: the default's choice at reorder at M = 1 is parallel-l4,
+    // at exact the baseline c32u4
+    const sentinel = caseOf("i4g32-n8960-k1536");
+    assertEquals(
+      [gemvBaseline(sentinel, 1).name, gemvProfileChoice(sentinel, 1, "reorder").name],
+      ["c32u4", "parallel-l4"],
+    );
+    const i4: GemvCase = { ...shape("target-i4", 4096), storage: "i4", group: 32 };
+    const selection = gemvExploreSelection(i4, [
+      {
+        gemvCase: sentinel,
+        rows: [
+          { candidate: "c32u4", class: "identical", isBaseline: true, perDispatch: 20 },
+          parallel("parallel-l4", 10),
+          sequential("c64u8", 15),
+          // ×1.18 over the baseline, slower than parallel-l4: a winner
+          sequential("c16u16", 17),
+          parallel("staged-l32", 5),
+        ],
+      },
+    ]);
+    assert(selection !== undefined);
+    assert(selection.includes("c16u16") && selection.includes("c16u8"), selection.join());
+  });
+
+  it("carry the fastest sequential variant alone when the baseline has no time at the sentinel (fault: every variant a winner)", () => {
+    for (const reference of [
+      [],
+      [{ ...rows[0], error: "Error: lost" }] satisfies GemvExploreRow[],
+    ]) {
+      const selection = gemvExploreSelection(target, [
+        {
+          gemvCase: near,
+          rows: [
+            ...reference,
+            sequential("c64u8", 8),
+            sequential("c16u16", 8.1),
+            parallel("staged-l16", 6),
+          ],
+        },
+      ]);
+      assertEquals(selection, [
+        "c64u8",
+        ...gemvGridNeighbours("c64u8"),
+        "staged-l16",
+        ...gemvGridNeighbours("staged-l16"),
+      ]);
+    }
+  });
+
+  it("leave out a sequential variant less than ×1.10 faster than the baseline, or whose words differ, however near the fastest (fault: every variant a winner)", () => {
+    // Against c32u4's 10: c16u2 is ×1.09, c128u1 differs from the baseline's words
+    const selection = gemvExploreSelection(target, [
+      {
+        gemvCase: near,
+        rows: [
+          rows[0],
+          sequential("c64u8", 8),
+          sequential("c128u1", 8.2, { identicalToBaseline: false }),
+          sequential("c16u2", 9.2),
+          parallel("staged-l16", 6),
+        ],
+      },
+    ]);
+    assertEquals(selection, [
+      "c64u8",
+      ...gemvGridNeighbours("c64u8"),
+      "staged-l16",
+      ...gemvGridNeighbours("staged-l16"),
     ]);
   });
 

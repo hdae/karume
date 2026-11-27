@@ -21,8 +21,9 @@ measurements in `docs/research/`.
   short run of `full`'s row counts. Twelve sentinel cases of the whole case table (`gemvSentinels`,
   `GEMV_SENTINEL_COUNT`: the case nearest to all, then again and again the one farthest from those chosen —
   `gemvCaseDistance`) are measured first with every candidate; every other case measures at M = 1 the references, the
-  winners of its nearest sentinel of the same storage — the fastest sequential variant, the fastest plain or staged
-  row and every other one at least ×1.10 faster than the default's choice at `reorder` there — and their grid
+  winners of its nearest sentinel of the same storage — of the sequential variants and of the plain or staged rows,
+  the fastest and every other one at least ×1.10 faster than the class's reference there (the default's choice at
+  `exact`, the baseline, and at `reorder`) — and their grid
   neighbours (`gemvExploreSelection`, `gemvGridNeighbours`; every candidate when no sentinel of its storage has a
   winner), and at 4 and 8 rows the three fastest adoptable rows of its own M = 1 group. Its quick-look margin is ×1.10
   (`EXPLORE_QUICK_LOOK_MARGIN`; `gemvSweepQuickLookMargin` gives a set's margin), except that at 4 and 8 rows it does
@@ -31,8 +32,9 @@ measurements in `docs/research/`.
   calls measured in as `GemvSweepOptions.sentinelEvidence` (`gemvSweepExploreEvidence` reads them from a record;
   types `GemvExploreEvidence`, `GemvExploreRow`). Replayed on recorded sweeps it halves the time in the groups and
   leaves the derivation's decisions unchanged on an RTX 5070 Ti and nearly unchanged on an Apple M2; replayed on an
-  RTX 3080 Ti's two `full` records it leaves 9 of 214 decisions different, 7 of them adoptions faster than what the
-  full records keep. Its record is a `karume-gemv-sweep/4` record with rows only of the kernels it measured, which
+  RTX 3080 Ti's two `full` records, with the sentinels' rows taken from those records or from two `explore` runs of
+  the device, it leaves 9 of 214 decisions different, 7 of them adoptions faster than what the full records keep. Its
+  record is a `karume-gemv-sweep/4` record with rows only of the kernels it measured, which
   `deriveLinearGemvChoices` reads by its usual rules; `planGemvMeasurements` counts only its timed rows.
 - `@karume/runtime/tune`: the geometry sweep's `explore` candidate set (`runGeometrySweep({ candidateSet: "explore"
   })`): `full`'s candidates on its case table, measured class by class (`geometryExploreOrder`; the class of a case is

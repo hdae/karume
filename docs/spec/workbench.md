@@ -277,10 +277,12 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
 - Every other case measures at M = 1, besides the references, the fastest sequential variant and the fastest plain
   or staged parallel row — each among the rows whose check held, timed (a finite time), not screened, skipped or
   failed — of the nearest sentinel of the case's storage that has one (the first of equally near ones; the i4 group
-  length may differ), with every other plain or staged row of that sentinel, among the same rows, that is at least
-  ×1.10 faster than the default's choice at `reorder` there (none when that choice has no time there), and their
-  neighbours on the candidate grid: one step of the columns per workgroup or of the words read ahead; one step of the
-  lanes, and the other of plain and staged at the same lanes (`gemvExploreSelection`). A sentinel of another storage
+  length may differ), each with every other kernel of its kind at that sentinel, among the same rows, that the
+  derivation could adopt there: at least ×1.10 faster than its class's reference there — the default's choice at
+  `exact` (the baseline) for a sequential variant, at `reorder` for a plain or staged row; none when that reference
+  has no time there —, and their neighbours on the candidate grid: one step of the columns per workgroup or of the
+  words read ahead; one step of the lanes, and the other of plain and staged at the same lanes
+  (`gemvExploreSelection`). A sentinel of another storage
   does not predict: the storage decides the decode. A name
   the case has no candidate of on the device selects nothing. When no sentinel of the case's storage has a winner of
   one of the two classes, the case measures every candidate. The
