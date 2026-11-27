@@ -111,9 +111,12 @@ class CardMetadata:
     #: Written only **when one of the 4 values is factually right** (otherwise left to the Hub's
     #: inference).
     base_model_relation: str | None = None
-    #: The 2 fields HF reads only with `license: other`. A distribution that has an SPDX
-    #: identifier **does not have them** (listing them empty reads as "an unnamed custom licence").
+    #: The name of a custom license: written only with `license: other`, the one case HF reads it
+    #: (listing it beside an SPDX identifier reads as "an unnamed custom license").
     license_name: str | None = None
+    #: The license's page: written with `license: other`, and beside an SPDX identifier only as the
+    #: link the upstream card itself writes (the Gemma license page of Google's Gemma 4 and
+    #: EmbeddingGemma 2 cards) — a card does not add a page its upstream does not name.
     license_link: str | None = None
 
 

@@ -28,7 +28,7 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
-from _shared.upstream import hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from embeddinggemma2.sources import PIN
 from karume.modelcard import (
     RUNTIME_SENTENCE,
@@ -242,6 +242,9 @@ def _metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         # soon as any stored weight differs from the checkpoint's, default or not
         # (`_gemma4_relation`).
         license=EMBEDDINGGEMMA2_LICENSE,
+        # The license page the upstream card links beside its Apache 2.0 (its header names it, as
+        # Gemma 4's cards do — `_shared.upstream.GEMMA_LICENSE_PAGE`).
+        license_link=GEMMA_LICENSE_PAGE,
         tags=(EMBEDDINGGEMMA2_PIPELINE_TAG, "sentence-similarity", "webgpu", "embedding", "gemma"),
     )
 

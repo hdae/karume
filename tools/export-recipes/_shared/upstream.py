@@ -202,6 +202,11 @@ def assert_upstream_provenance(container: Path, *, license: str, revision: str |
         )
 
 
+#: The license page Google's Gemma cards link beside `license: apache-2.0` (Gemma 4's cards in their
+#: front matter, EmbeddingGemma 2's in its header at the pinned revision — read 2026-11-27): the
+#: `license_link` a card writes for such an upstream (`karume.modelcard.CardMetadata`).
+GEMMA_LICENSE_PAGE = "https://ai.google.dev/gemma/docs/gemma_4_license"
+
 #: HF account (the owner part of a `base_model` repository ID) → who the cards name as its
 #: publisher in the house non-endorsement sentence ({@link karume.modelcard.introduction}). Spelled
 #: as this repository already names them where it does — in a licence's notice, a copyright line

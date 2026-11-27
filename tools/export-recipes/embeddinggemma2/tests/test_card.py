@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from _shared.paths import REPO_ROOT
+from _shared.upstream import GEMMA_LICENSE_PAGE, snapshot_revision
 from embeddinggemma2.card import (
     EMBEDDINGGEMMA2_I8_SCREENING,
     EMBEDDINGGEMMA2_I8_SCREENING_SOURCE,
@@ -29,6 +30,7 @@ from embeddinggemma2.card import (
     EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS,
     render_embeddinggemma2_model_card,
 )
+from embeddinggemma2.sources import PIN, SNAPSHOT_DIR
 from karume.migrate import card_format_statement
 
 #: The repository the usage snippet names (the dist passes it from the pipeline's declaration).
@@ -263,6 +265,16 @@ class TestWhatTheCardSays:
         card = _render()
         assert "bfloat16 or float32, never float16" in card
         assert "computes in f32 over the stored bf16 weights" in card
+
+    def test_it_links_the_license_page_its_upstream_card_links(self) -> None:
+        """`license_link` beside the SPDX license is the page the upstream card itself links (its
+        header at the pinned revision — checked against the local snapshot when it is present)."""
+        assert f"license_link: {GEMMA_LICENSE_PAGE}" in _render().split("\n---\n", 1)[0]
+        readme = SNAPSHOT_DIR / "README.md"
+        if not readme.is_file():
+            pytest.skip(f"the upstream card is not on this machine ({readme})")
+        assert snapshot_revision(SNAPSHOT_DIR, "README.md") == PIN.revision
+        assert f'href="{GEMMA_LICENSE_PAGE}"' in readme.read_text(encoding="utf-8")
 
     def test_it_names_the_apache_license(self) -> None:
         card = _render()

@@ -34,7 +34,7 @@ from _shared.licenses import (
     MIT_LICENSE_PATH,
 )
 from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
-from _shared.upstream import hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from anima.distribution import ANIMA_2_9B_PIPELINE
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
 from anima.distribution import LICENSE_SOURCE_PATH as ANIMA_LICENSE_SOURCE_PATH
@@ -488,9 +488,9 @@ FRONT_MATTER_KEYS = (
 #: built for them yet, the spec names them as the exception.
 GEMMA4_REPOSITORIES = frozenset({"karume-gemma4", "karume-gemma4-qat", "karume-gemma4-qat-mobile"})
 
-#: The repositories whose `license_link` stands beside an SPDX `license` (the Gemma 4 license page,
-#: as Google's own cards write it — docs/spec/distribution-cards.md#front-matter).
-GEMMA4_LICENSE_LINK_REPOSITORIES = GEMMA4_REPOSITORIES
+#: The repositories whose `license_link` stands beside an SPDX `license`: the Gemma license page,
+#: as their upstream cards link it (docs/spec/distribution-cards.md#front-matter).
+GEMMA_LICENSE_LINK_REPOSITORIES = GEMMA4_REPOSITORIES | {"karume-embeddinggemma-2"}
 
 #: The one card whose tags do not begin with its pipeline tag (the spec states it).
 TAGS_NOT_LED_BY_THE_PIPELINE_TAG = frozenset({"karume-gemma4-qat-mobile"})
@@ -513,7 +513,7 @@ class TestTheFrontMatterOfEveryPublishedCard:
         assert fields.get("base_model_relation", "quantized") == "quantized"
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
-    def test_license_name_and_license_link_come_with_other_or_as_the_gemma4_link(
+    def test_license_name_and_license_link_come_with_other_or_as_the_gemma_link(
         self, pipeline: str, models: list[str], directory: str
     ) -> None:
         _, card = _published_card(pipeline, directory)
@@ -521,9 +521,9 @@ class TestTheFrontMatterOfEveryPublishedCard:
 
         if fields["license"] == "other":
             assert "license_name" in fields and "license_link" in fields
-        elif directory in GEMMA4_LICENSE_LINK_REPOSITORIES:
+        elif directory in GEMMA_LICENSE_LINK_REPOSITORIES:
             assert "license_name" not in fields
-            assert fields["license_link"] == GEMMA4_LICENSE_LINK
+            assert fields["license_link"] == GEMMA_LICENSE_PAGE == GEMMA4_LICENSE_LINK
         else:
             assert "license_name" not in fields and "license_link" not in fields
 

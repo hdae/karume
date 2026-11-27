@@ -55,9 +55,10 @@ item "The model cards and notices across repositories".
   `other` (the three Anima repositories).
 - `license_name` and `license_link` are written with `license: other`: the Anima repositories name
   `circlestone-labs-non-commercial-license` and link the license file at a pinned commit of `circlestone-labs/Anima`.
-  The one other case: the three Gemma 4 repositories (`karume-gemma4`, `karume-gemma4-qat`,
-  `karume-gemma4-qat-mobile`) write `license_link: https://ai.google.dev/gemma/docs/gemma_4_license` beside
-  `license: apache-2.0`, as Google's own cards do; none writes `license_name`.
+  Beside an SPDX `license`, `license_link` is written only as the link the upstream card itself writes, and
+  `license_name` never: the three Gemma 4 repositories and `karume-embeddinggemma-2` write
+  `license_link: https://ai.google.dev/gemma/docs/gemma_4_license` beside `license: apache-2.0`, the page Google's
+  cards link (`_shared.upstream.GEMMA_LICENSE_PAGE`; the Gemma 4 recipes still spell it as their own constant).
 - `tags` contains `webgpu`. It begins with the `pipeline_tag` value, except on `karume-gemma4-qat-mobile`
   (`webgpu`, `gemma`, `text-generation`). Where `webgpu` stands among the family's tags is not fixed. No card has a
   `karume` tag (`library_name` carries it).
