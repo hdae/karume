@@ -20,38 +20,57 @@ import re
 import subprocess
 import sys
 import urllib.error
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
 import dist
+from _shared.licenses import (
+    APACHE_LICENSE_2_0_PATH,
+    CC_BY_SA_4_0_PATH,
+    MIT_COPYRIGHT_PLACEHOLDER,
+    MIT_LICENSE_PATH,
+)
 from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
+from _shared.upstream import hf_upstreams
 from anima.distribution import ANIMA_2_9B_PIPELINE
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
+from anima.distribution import LICENSE_SOURCE_PATH as ANIMA_LICENSE_SOURCE_PATH
 from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
 from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from embeddinggemma2.distribution import PIPELINE as EMBEDDINGGEMMA2_PIPELINE
+from gemma4.card import GEMMA4_LICENSE_LINK
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4.distribution import gemma4_notice_markdown
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
+from irodori.distribution import GEMMA_TERMS_OF_USE_PATH
 from irodori.distribution import LARGE_PIPELINE as IRODORI_LARGE_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import (
+    LICENSE_FILENAME,
     MANIFEST_FILENAME,
+    NOTICE_FILENAME,
     CrossRepoReference,
     DistError,
     ExternalComponents,
     assert_name_map,
     declared_references,
+    resolve_card_renderer,
     resolve_repo,
 )
 from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.migrate import card_format_statement
-from karume.modelcard import HF_OWNER, UNOFFICIAL_CONVERSION_NOTICE
+from karume.modelcard import (
+    HF_OWNER,
+    REVISION_PIN_COMMENT,
+    UNOFFICIAL_CONVERSION_NOTICE,
+    introduction,
+)
 from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
@@ -397,6 +416,367 @@ class TestTheFormatStatementOnEveryCard:
             for render_card in dist.PIPELINES[name].card_profiles.values():
                 card = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}")
                 assert card.count(statement) == expected, manifest_path
+
+
+#: The published repositories, one parameter set each (`(pipeline, models, directory)`).
+PUBLISHED = [
+    pytest.param(pipeline, models, directory, id=directory)
+    for pipeline, models, _, directory in RELEASE_REPOSITORIES
+]
+
+
+def _published_card(pipeline: str, directory: str) -> tuple[dict[str, Any], str]:
+    """The manifest of the local mirror `models/<directory>/` and the card its pipeline draws from
+    it (SKIP without the mirror, as on CI)."""
+    manifest_path = DIST_ROOT / directory / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        pytest.skip(f"no distribution mirror {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    render_card = resolve_card_renderer(dist.PIPELINES[pipeline], None)
+    return manifest, render_card(manifest, f"{HF_OWNER}/{directory}")
+
+
+def _front_matter(card: str) -> dict[str, str | list[str]]:
+    """The card's front matter, key → value (a list for a YAML sequence), in the card's order."""
+    lines = card.split("\n")
+    assert lines[0] == "---"
+    fields: dict[str, str | list[str]] = {}
+    key = ""
+    for line in lines[1 : lines.index("---", 1)]:
+        if line.startswith("  - "):
+            value = fields[key]
+            assert isinstance(value, list), line
+            value.append(line.removeprefix("  - "))
+            continue
+        key, _, value_text = line.partition(": ")
+        key = key.removesuffix(":")
+        fields[key] = value_text if value_text else []
+    return fields
+
+
+def _listed(value: str | list[str]) -> list[str]:
+    return value if isinstance(value, list) else [value]
+
+
+def _headings(card: str) -> list[tuple[int, str]]:
+    """The card's Markdown headings outside code fences, as (line index, heading line)."""
+    headings = []
+    fenced = False
+    for index, line in enumerate(card.split("\n")):
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and re.match(r"#{1,6} ", line):
+            headings.append((index, line))
+    return headings
+
+
+#: The front matter's keys, in the order `karume.modelcard.frontmatter` writes them.
+FRONT_MATTER_KEYS = (
+    "library_name",
+    "pipeline_tag",
+    "base_model",
+    "base_model_relation",
+    "license",
+    "license_name",
+    "license_link",
+    "tags",
+)
+
+#: The repositories whose `license_link` stands beside an SPDX `license` (the Gemma 4 license page,
+#: as Google's own cards write it — docs/spec/distribution-cards.md#front-matter).
+GEMMA4_LICENSE_LINK_REPOSITORIES = frozenset(
+    {"karume-gemma4", "karume-gemma4-qat", "karume-gemma4-qat-mobile"}
+)
+
+#: The one card whose tags do not begin with its pipeline tag (the spec states it).
+TAGS_NOT_LED_BY_THE_PIPELINE_TAG = frozenset({"karume-gemma4-qat-mobile"})
+
+
+class TestTheFrontMatterOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#front-matter, on the card each published repository's
+    pipeline draws from its local mirror."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_keys_come_in_the_one_order(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        fields = _front_matter(card)
+
+        assert list(fields) == [key for key in FRONT_MATTER_KEYS if key in fields]
+        assert {"library_name", "pipeline_tag", "base_model", "license", "tags"} <= set(fields)
+        assert fields["library_name"] == "karume"
+        assert fields.get("base_model_relation", "quantized") == "quantized"
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_license_name_and_license_link_come_with_other_or_as_the_gemma4_link(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        fields = _front_matter(card)
+
+        if fields["license"] == "other":
+            assert "license_name" in fields and "license_link" in fields
+        elif directory in GEMMA4_LICENSE_LINK_REPOSITORIES:
+            assert "license_name" not in fields
+            assert fields["license_link"] == GEMMA4_LICENSE_LINK
+        else:
+            assert "license_name" not in fields and "license_link" not in fields
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_tags_hold_webgpu_and_begin_with_the_pipeline_tag(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        fields = _front_matter(card)
+        tags = _listed(fields["tags"])
+
+        assert "webgpu" in tags
+        assert "karume" not in tags
+        led = tags[0] == fields["pipeline_tag"]
+        assert led is (directory not in TAGS_NOT_LED_BY_THE_PIPELINE_TAG), tags
+
+
+#: The cards whose non-endorsement sentence names the models by title instead of the `base_model`
+#: IDs (docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence).
+SENTENCES_BY_TITLE = frozenset({"karume-anima", "karume-anima-extra"})
+
+
+class TestTheTitleAndTheNonEndorsementSentence:
+    """docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_one_level_1_heading_ends_with_karume(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        titles = [line for _, line in _headings(card) if line.startswith("# ")]
+
+        assert len(titles) == 1 and titles[0].endswith(" — Karume"), titles
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_sentence_names_the_base_models_and_their_publishers(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        base_models = _listed(_front_matter(card)["base_model"])
+        expected = introduction("", hf_upstreams(base_models))[3]
+
+        assert (expected in card.split("\n")) is (directory not in SENTENCES_BY_TITLE)
+
+
+#: The level-2 sections before the family's own
+#: (docs/spec/distribution-cards.md#sections-and-their-order).
+STANDARD_PREAMBLE = ("What is this", "Base weights and attribution", "Models", "Usage")
+PREAMBLES = {
+    "karume-anima": ("What is this", "Models and their origins", "License", "Models", "Usage"),
+    "karume-anima-extra": (
+        "What is this",
+        "Models and their origins",
+        "License",
+        "Models",
+        "Usage",
+    ),
+    "karume-anima-2.9b": ("What is this", "Models and their origins", "License", "Models", "Usage"),
+    "karume-gemma4-qat-mobile": ("Base weights and attribution", "Models"),
+}
+
+#: The card whose per-model sections are headed by the model name alone.
+MODEL_SECTIONS_BY_NAME = frozenset({"karume-gemma4-qat-mobile"})
+
+
+class TestTheSectionsOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#sections-and-their-order and
+    #presets-and-the-quant-tables."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_sections_come_in_order_and_end_with_one_per_model(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        manifest, card = _published_card(pipeline, directory)
+        sections = [line[3:] for _, line in _headings(card) if line.startswith("## ")]
+        preamble = PREAMBLES.get(directory, STANDARD_PREAMBLE)
+        per_model = [
+            name if directory in MODEL_SECTIONS_BY_NAME else f"Model: {name}"
+            for name in manifest["models"]
+        ]
+        family = sections[len(preamble) : len(sections) - len(per_model)]
+
+        assert tuple(sections[: len(preamble)]) == preamble
+        assert sections[len(sections) - len(per_model) :] == per_model
+        assert not set(family) & {*STANDARD_PREAMBLE, *preamble, *per_model}, family
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_every_model_section_opens_with_its_quant_table(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        manifest, card = _published_card(pipeline, directory)
+        headings = [line for _, line in _headings(card)]
+        name_heading = (
+            (lambda name: f"## {name}")
+            if directory in MODEL_SECTIONS_BY_NAME
+            else (lambda name: f"## Model: {name}")
+        )
+
+        for name in manifest["models"]:
+            assert headings[headings.index(name_heading(name)) + 1] == "### Quants", name
+        assert card.count("| Model | Pipeline | Quants | Default quant |") == 1
+        assert card.count("| Quant | What it is | Download | Weights | Compute |") == len(
+            manifest["models"]
+        )
+
+
+#: The card without a usage section (docs/spec/distribution-cards.md#usage).
+CARDS_WITHOUT_USAGE = frozenset({"karume-gemma4-qat-mobile"})
+
+
+class TestTheUsageOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#usage."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_usage_opens_with_a_pinnable_from_pretrained_of_this_repository(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        lines = card.split("\n")
+        pin = "\n".join((f'  repo: "{HF_OWNER}/{directory}",', *REVISION_PIN_COMMENT))
+
+        if directory in CARDS_WITHOUT_USAGE:
+            assert "## Usage" not in lines and REVISION_PIN_COMMENT[-1] not in lines
+            return
+        body = lines[lines.index("## Usage") + 1 :]
+        block = body[body.index("```ts") : body.index("```", body.index("```ts") + 1)]
+        assert next(line for line in body if line) == "```ts"
+        assert any(
+            re.match(r'import .* from "jsr:@karume/models/[a-z0-9-]+";$', line) for line in block
+        )
+        assert ".fromPretrained({" in "\n".join(block)
+        assert card.count(pin) == 1
+        assert pin in "\n".join(block)
+
+
+#: The card that names neither legal text (docs/spec/distribution-cards.md#license-statements).
+CARDS_WITHOUT_LEGAL_POINTERS = frozenset({"karume-sbv2-jvnv"})
+
+
+class TestTheLegalPointersOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#license-statements."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_card_names_license_md_and_notice_md(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        named = {name for name in ("`LICENSE.md`", "`NOTICE.md`") if name in card}
+
+        assert named == (
+            set() if directory in CARDS_WITHOUT_LEGAL_POINTERS else {"`LICENSE.md`", "`NOTICE.md`"}
+        )
+
+
+def _root_files(pipeline: str, models: list[str]) -> Mapping[str, str]:
+    """The legal texts the driver hands the core for a build of `models` (`dist.ROOT_FILES` for a
+    pipeline whose texts follow the models, else the pipeline's fixed set)."""
+    root_files = dist.ROOT_FILES.get(pipeline)
+    return root_files(models) if root_files is not None else dist.PIPELINES[pipeline].root_files
+
+
+#: The three Anima repositories, whose notice follows the CircleStone license's layout.
+ANIMA_REPOSITORIES = frozenset({"karume-anima", "karume-anima-extra", "karume-anima-2.9b"})
+
+_APACHE = ("apache", "the Apache License, Version 2.0")
+_MIT = ("mit", "the MIT License")
+
+#: Repository → the primary license text `LICENSE.md` begins with, and the title its `NOTICE.md`
+#: names it by (docs/spec/distribution-cards.md#licensemd and #noticemd).
+PRIMARY_LICENSES = {
+    "karume-anima": ("circlestone", None),
+    "karume-anima-extra": ("circlestone", None),
+    "karume-anima-2.9b": ("circlestone", None),
+    "karume-birefnet-hr": _MIT,
+    "karume-lucida": _MIT,
+    "karume-depth-anything-v2": _APACHE,
+    "karume-gemma4": _APACHE,
+    "karume-gemma4-qat": _APACHE,
+    "karume-gemma4-qat-mobile": _APACHE,
+    "karume-irodori-v4-small": _MIT,
+    "karume-irodori-v4.1-small": _MIT,
+    "karume-irodori-v4.1-small-mf": _MIT,
+    "karume-irodori-v4-large": ("gemma-terms", "the Gemma Terms of Use"),
+    "karume-sbv2-jvnv": (
+        "cc-by-sa",
+        "Creative Commons Attribution-ShareAlike 4.0 International",
+    ),
+    "karume-siglip2": _APACHE,
+    "karume-umt5-xxl": _APACHE,
+    "karume-wan2.2": _APACHE,
+    "karume-moss-image": _APACHE,
+    "karume-embeddinggemma-2": _APACHE,
+}
+
+#: The verbatim texts other than MIT's (whose copyright lines are inserted).
+_VERBATIM_TEXTS = {
+    "apache": APACHE_LICENSE_2_0_PATH,
+    "cc-by-sa": CC_BY_SA_4_0_PATH,
+    "circlestone": ANIMA_LICENSE_SOURCE_PATH,
+    "gemma-terms": GEMMA_TERMS_OF_USE_PATH,
+}
+
+
+def _normalized(text: str) -> str:
+    """Runs of whitespace as one space (a sentence may be wrapped anywhere)."""
+    return " ".join(text.split())
+
+
+class TestTheNoticeOfEveryPublishedRepository:
+    """docs/spec/distribution-cards.md#noticemd, on the notice the driver writes for each published
+    repository (no mirror needed)."""
+
+    def test_every_published_repository_has_its_primary_license_stated(self) -> None:
+        assert set(PRIMARY_LICENSES) == {directory for *_, directory in RELEASE_REPOSITORIES}
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_notice_names_the_license_then_the_changes_then_the_closing(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        notice = _root_files(pipeline, models)[NOTICE_FILENAME]
+        text = _normalized(notice)
+
+        if directory in ANIMA_REPOSITORIES:
+            assert notice.startswith("# Notice\n\n## Attribution Notice\n")
+            assert "modified as follows:" in text
+            assert "No retraining and no fine-tuning were performed." not in text
+            return
+        _, title = PRIMARY_LICENSES[directory]
+        changes = text.index("The following changes were made:")
+        assert notice.startswith("# NOTICE\n\n")
+        assert title is not None and title in text[:changes]
+        assert text.count("The following changes were made:") == 1
+        assert text.count("No retraining and no fine-tuning were performed.") == 1
+        assert text.index("No retraining and no fine-tuning were performed.") > changes
+
+
+class TestTheLicenseTextOfEveryPublishedRepository:
+    """docs/spec/distribution-cards.md#licensemd — the primary license text from the first byte,
+    verbatim and unfenced."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_license_md_begins_with_the_primary_text_byte_for_byte(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        license_text = _root_files(pipeline, models)[LICENSE_FILENAME]
+        primary, _ = PRIMARY_LICENSES[directory]
+
+        if primary != "mit":
+            assert license_text.startswith(_VERBATIM_TEXTS[primary].read_text(encoding="utf-8"))
+            return
+        head, tail = MIT_LICENSE_PATH.read_text(encoding="utf-8").split(MIT_COPYRIGHT_PLACEHOLDER)
+        assert license_text.startswith(head)
+        rest = license_text[len(head) :]
+        # The template after the placeholder follows the copyright lines verbatim.
+        copyright_end = rest.find(tail)
+        assert copyright_end > 0
+        assert all(line.startswith("Copyright (c) ") for line in rest[:copyright_end].split("\n"))
 
 
 #: A reference of the synthetic cases below.

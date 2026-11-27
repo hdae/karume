@@ -76,6 +76,30 @@ class TestFrontmatterOptionalFields:
         assert "license_name: owner-terms" in lines
         assert "license_link: https://example.invalid/terms" in lines
 
+    def test_it_writes_the_keys_in_one_order(self) -> None:
+        """The order every card's front matter has (docs/spec/distribution-cards.md#front-matter),
+        whichever optional fields are set."""
+        lines = frontmatter(
+            self._metadata(
+                base_model_relation="quantized",
+                license_name="owner-terms",
+                license_link="https://example.invalid/terms",
+            )
+        )
+        keys = [line.split(":")[0] for line in lines if line != "---" and not line.startswith(" ")]
+
+        assert lines[0] == lines[-1] == "---"
+        assert keys == [
+            "library_name",
+            "pipeline_tag",
+            "base_model",
+            "base_model_relation",
+            "license",
+            "license_name",
+            "license_link",
+            "tags",
+        ]
+
 
 class TestIntroduction:
     """The title and the house non-endorsement sentence under it (maintainer's decision of
