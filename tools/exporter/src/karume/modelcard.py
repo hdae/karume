@@ -164,6 +164,22 @@ def pinned(repo: str, revision: str) -> str:
     return f"{hf_link(repo)} at commit `{revision}`"
 
 
+#: The clause of the Apache License 2.0 that asks for the notice of the changes (§4(b) — "cause any
+#: modified files to carry prominent notices stating that You changed the files"), as a card cites
+#: it in its changes bullet ({@link changes_made_here}).
+APACHE_MODIFICATION_CLAUSE = "Apache 2.0 §4(b)"
+
+
+# SPEC: docs/spec/distribution-cards.md#license-statements
+def changes_made_here(clause: str | None = None) -> str:
+    """The head of every card's changes bullet, which sums the changes up and points at the
+    notice that lists them in full: `- **Changes made here** (listed in full in `NOTICE.md`, per
+    <clause>):` — `clause` is the clause of the license that asks for the notice of the changes,
+    where it has one ({@link APACHE_MODIFICATION_CLAUSE})."""
+    cited = "" if clause is None else f", per {clause}"
+    return f"- **Changes made here** (listed in full in `NOTICE.md`{cited}):"
+
+
 # SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
 def upstream_cards(links: Sequence[str]) -> list[str]:
     """The bullet that ends every card's attribution section (maintainer's ruling of 2026-11-27):

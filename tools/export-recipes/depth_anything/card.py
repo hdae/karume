@@ -24,9 +24,11 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -197,7 +199,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  check the upstream sources against your own use case.",
         f"- **Architecture**: DINOv2 backbone + DPT head"
         f" ([{DEPTH_ANYTHING_PAPER}](https://{DEPTH_ANYTHING_PAPER})).",
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        changes_made_here(APACHE_MODIFICATION_CLAUSE),
         "  conversion into the Karume container format. No retraining, no fine-tuning and",
         "  **no quantization** — the weights are the source checkpoint's own f32 values. The",
         "  graph is the upstream `forward` with two layout-only rewrites (the last fusion",

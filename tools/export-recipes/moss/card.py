@@ -22,9 +22,11 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -150,7 +152,7 @@ def _base_weights() -> list[str]:
         " Apache License, Version 2.0.",
     ]
     lines += [
-        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)): the",
+        f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the",
         "  transformer's and the text encoder's weight matrices are stored as int8 (one scale per",
         "  output channel); the VAE keeps the source f32 values. The transformer is split into a",
         "  text-refiner graph and the joint-sequence graph (plus the same graph without block 22,",

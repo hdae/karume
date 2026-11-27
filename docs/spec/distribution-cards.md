@@ -130,18 +130,19 @@ The level-2 sections come in this order:
 
 ### License statements
 
-- The card names `LICENSE.md` and `NOTICE.md`, except `karume-sbv2-jvnv`'s, which names neither.
+- Every card names `LICENSE.md` and `NOTICE.md`.
 - A card names every license it states by its HF identifier in bold: "licensed **apache-2.0**", "licensed **mit**",
   "licensed **cc-by-sa-4.0**", "licensed **gemma**", and for a custom license (`license: other`) its `license_name`,
   "licensed **circlestone-labs-non-commercial-license**". It refers to a text in `LICENSE.md` as a verbatim copy,
   not by the text's title. Two kinds of words keep a license's own name: a clause the card cites ("per Apache 2.0
   §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). The three Gemma 4 cards
   are the exception: they write "licensed **Apache 2.0**", with the license page and the text linked.
-- Every card carries a "**Changes made here**" bullet in the attribution section summarising the changes. Its pointer
-  differs: "(also listed in `NOTICE.md`…)" on eleven cards, "(listed in full in `NOTICE.md`…)" on the three Anima
-  cards, `karume-gemma4-qat-mobile`, `karume-moss-image`, `karume-umt5-xxl` and `karume-wan2.2`, none on
-  `karume-sbv2-jvnv`. Every Apache 2.0 card adds "per Apache 2.0 §4(b)". The Anima cards' license paragraph says
-  that `NOTICE.md` holds the attribution notices and the list of modifications.
+- Every card carries one "**Changes made here**" bullet in the attribution section summarising the changes, headed
+  by `karume.modelcard.changes_made_here`: "- **Changes made here** (listed in full in `NOTICE.md`, per <clause>):",
+  the clause being the one of the license that asks for the notice of the changes — "Apache 2.0 §4(b)" on the Apache
+  cards, "CC BY-SA 4.0 §3(a)(1)(B)" on `karume-sbv2-jvnv` — and none where the card cites none (the MIT, Gemma and
+  CircleStone cards). `karume-gemma4` and `karume-gemma4-qat` still write "(also listed in `NOTICE.md`…)". The Anima
+  cards' license paragraph says that `NOTICE.md` holds the attribution notices and the list of modifications.
 - A sentence an upstream license requires in its own words is kept as it is, beside the non-endorsement sentence,
   which does not stand in for it: the CircleStone attribution and rights-grant notices and the NVIDIA notice (Anima),
   the Black Forest Labs non-endorsement (MOSS-Image).

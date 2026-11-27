@@ -749,8 +749,15 @@ class TestTheUsageOfEveryPublishedCard:
         assert pin in "\n".join(block)
 
 
-#: The card that names neither legal text (docs/spec/distribution-cards.md#license-statements).
-CARDS_WITHOUT_LEGAL_POINTERS = frozenset({"karume-sbv2-jvnv"})
+#: The cards whose changes bullet points at the notice in other words ("also listed in"): two of
+#: the Gemma 4 ones, whose recipes change in a stage of their own
+#: (docs/spec/distribution-cards.md#license-statements).
+CARDS_WITH_ANOTHER_CHANGES_POINTER = frozenset({"karume-gemma4", "karume-gemma4-qat"})
+
+#: The head of every card's changes bullet (`karume.modelcard.changes_made_here`).
+_CHANGES_HEAD = re.compile(
+    re.escape("- **Changes made here** (listed in full in `NOTICE.md`") + r"(, per [^:]+)?\):"
+)
 
 
 class TestTheLegalPointersOfEveryPublishedCard:
@@ -761,11 +768,19 @@ class TestTheLegalPointersOfEveryPublishedCard:
         self, pipeline: str, models: list[str], directory: str
     ) -> None:
         _, card = _published_card(pipeline, directory)
-        named = {name for name in ("`LICENSE.md`", "`NOTICE.md`") if name in card}
 
-        assert named == (
-            set() if directory in CARDS_WITHOUT_LEGAL_POINTERS else {"`LICENSE.md`", "`NOTICE.md`"}
-        )
+        assert "`LICENSE.md`" in card and "`NOTICE.md`" in card
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_one_changes_bullet_points_at_the_notice_listing_them_in_full(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        bullets = [line for line in card.split("\n") if line.startswith("- **Changes made here**")]
+
+        assert len(bullets) == 1
+        shared = _CHANGES_HEAD.match(bullets[0]) is not None
+        assert shared is (directory not in CARDS_WITH_ANOTHER_CHANGES_POINTER), bullets
 
 
 def _root_files(pipeline: str, models: list[str]) -> Mapping[str, str]:

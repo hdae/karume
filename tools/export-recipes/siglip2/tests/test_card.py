@@ -114,7 +114,7 @@ class TestSiglip2LegalPointers:
     def test_it_points_at_the_bundled_license_and_notice(self) -> None:
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert "a verbatim copy is in `LICENSE.md`" in card
-        assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
+        assert "listed in full in `NOTICE.md`, per Apache 2.0 §4(b)" in card
 
     def test_it_reports_the_measured_map_head_difference(self) -> None:
         """The difference the attribution section states is the single measured spelling (the

@@ -42,9 +42,11 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -456,7 +458,7 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
     """
     text = SOURCES[WAN22_TEXT_MODEL]
     lines = [
-        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        changes_made_here(APACHE_MODIFICATION_CLAUSE),
         "  conversion into the Karume container format; the transformer shipped only in int8,",
         "  its linear weights quantized per output channel (biases and normalization weights kept",
         "  in float32 at the source values); every parameter of the VAE decoder rounded to the",

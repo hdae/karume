@@ -33,6 +33,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -407,7 +408,7 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
         f" {IRODORI_CODEC_PARENT_MODEL};",
         "  a verbatim copy of that license is in `LICENSE.md` for the codec components.",
-        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        f"{changes_made_here()} conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
         "  as `f32` / `f16` / `i8` series, and the DiT (`dit` / `dit_context`) adds an `i4` series",
         "  rounded with GPTQ calibration (the quant table below says which storage each quant",
@@ -741,7 +742,7 @@ def _irodori_large_base_weights(
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
         f" {IRODORI_CODEC_PARENT_MODEL};",
         "  verbatim copies of both licenses are in `LICENSE.md` for the codec components.",
-        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        f"{changes_made_here()} conversion into the Karume",
         f"  container format and **quantization** of the weights — {series}",
         f"  (the quant table below says which storage each quant {selects}).",
         "  The text encoder's sliding-window attention mask is precomputed as one constant, and",

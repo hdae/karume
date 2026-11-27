@@ -24,6 +24,7 @@ from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     Upstream,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -524,7 +525,7 @@ def _source(upstream: UpstreamModel) -> str:
 #: them in full — `anima.distribution`); the same for the three repositories, whose notices add only
 #: what their models are.
 ANIMA_CHANGES = (
-    "- **Changes made here** (listed in full in `NOTICE.md`): conversion into the Karume container",
+    f"{changes_made_here()} conversion into the Karume container",
     "  format, and an int8-quantized series of the transformer beside the bf16 one; the bf16",
     "  series of every component keeps the upstream BF16 values unchanged. No retraining and no",
     "  fine-tuning.",

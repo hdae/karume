@@ -619,7 +619,7 @@ class TestDepthAnythingModelCard:
     ) -> None:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "a verbatim copy is in `LICENSE.md`" in card
-        assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
+        assert "listed in full in `NOTICE.md`, per Apache 2.0 §4(b)" in card
 
 
 class TestDepthAnythingLegalText:

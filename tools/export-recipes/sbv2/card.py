@@ -31,6 +31,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -167,6 +168,10 @@ SBV2_JVNV_METADATA = CardMetadata(
     tags=("text-to-speech", "webgpu", "japanese"),
 )
 
+#: The clause of CC BY-SA 4.0 that asks for the notice of the changes (§3(a)(1)(B) — "indicate if
+#: You modified the Licensed Material"), as the changes bullet cites it.
+SBV2_MODIFICATION_CLAUSE = "CC BY-SA 4.0 §3(a)(1)(B)"
+
 #: The CC BY-SA 4.0 legal text (the one link with which the card itself meets BY's "indicate the
 #: license URL").
 SBV2_JVNV_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
@@ -191,7 +196,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     source_revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
     attribution=(
         f"- **Terms**: licensed **{SBV2_JVNV_METADATA.license}** ([legal code]"
-        f"({SBV2_JVNV_LICENSE_URL})), inherited from the JVNV corpus the",
+        f"({SBV2_JVNV_LICENSE_URL}) — a verbatim copy is in `LICENSE.md`), inherited from the JVNV"
+        " corpus the",
         "  voices were trained on — the source repository states the corpus license carries over",
         "  to the models. Redistribution here keeps it: credit the authors, name the source and",
         "  the license URL, state that the weights were **converted to another format and"
@@ -201,7 +207,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         " no further",
         "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
         "  and modification are both allowed.",
-        "- **Changes made here**: conversion into the Karume container format, **truncation of the",
+        f"{changes_made_here(SBV2_MODIFICATION_CLAUSE)} conversion into the Karume container"
+        " format, **truncation of the",
         f"  text encoder to its first {SBV2_TEXT_ENCODER_LAYERS} encoder layers** (it now ends at"
         " the hidden state",
         "  Style-Bert-VITS2 reads; the layers after it were dropped) and **quantization** of the",

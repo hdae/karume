@@ -31,9 +31,11 @@ from typing import Any
 from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from embeddinggemma2.sources import PIN
 from karume.modelcard import (
+    APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -648,7 +650,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         )
     )
     lines += [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+        f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the text",
         "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
         "  as one graph in the Karume container format; the sliding-window attention mask is a",
         "  band declared on the attention, applied from the token positions; the weights keep the",
