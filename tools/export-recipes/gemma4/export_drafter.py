@@ -331,7 +331,7 @@ class DrafterWrapper(nn.Module):
 
 def target_embedding_class(config: Any) -> type[nn.Module]:
     """Upstream's scaled embedding class of the target text model `config` (its `model_type`):
-    `Gemma4TextScaledWordEmbedding` for E2B / E4B (`gemma4_text`),
+    `Gemma4TextScaledWordEmbedding` for E2B / E4B and 26B (`gemma4_text`),
     `Gemma4UnifiedTextScaledWordEmbedding` for 12B (`gemma4_unified_text`). An unknown model type
     fails loudly."""
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
@@ -356,15 +356,19 @@ def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
     """Read the target's main embedding table in f32 and return it as the same **scaled** embedding
     as upstream.
 
+    The checkpoint is the single `model.safetensors` (E2B / E4B / 12B) or the shards of its index
+    (26B — `gemma4.export_unified.CHECKPOINT_INDEX`); the table is read from the file that holds it.
+
     MUST: use upstream's scaled embedding class of the target itself ({@link
     target_embedding_class} — do not replace it with `nn.Embedding` + a hand-written scalar
     multiply) — that both the value of `embed_scale = sqrt(hidden_size)` and where it is applied are
     upstream's is the basis for the lender using the same table with the same meaning.
     """
     key = one_shot.PLE_CHECKPOINT_KEY.replace("embed_tokens_per_layer", "embed_tokens")
-    with safe_open(str(model_dir / one_shot.CHECKPOINT_FILE), framework="pt") as handle:
-        if key not in set(handle.keys()):
-            raise AssertionError(f"the target checkpoint has no '{key}': {model_dir}")
+    located, _ = unified._shard_keys(model_dir)
+    if key not in located:
+        raise AssertionError(f"the target checkpoint has no '{key}': {model_dir}")
+    with safe_open(str(located[key]), framework="pt") as handle:
         weight = handle.get_tensor(key).to(torch.float32)
     vocab, hidden = int(config.vocab_size), int(config.hidden_size)
     if list(weight.shape) != [vocab, hidden]:
@@ -380,7 +384,7 @@ def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
 
 def assistant_class(config: Any) -> type[nn.Module]:
     """Upstream's MTP assistant class of drafter config `config` (its `model_type`):
-    `Gemma4AssistantForCausalLM` for E2B / E4B (`gemma4_assistant`),
+    `Gemma4AssistantForCausalLM` for E2B / E4B and 26B's QAT assistant (`gemma4_assistant`),
     `Gemma4UnifiedAssistantForCausalLM` for 12B (`gemma4_unified_assistant` — the same code under
     another name, over a `gemma4_unified_text` decoder). An unknown model type fails loudly."""
     from transformers import Gemma4AssistantForCausalLM, Gemma4UnifiedAssistantForCausalLM
@@ -1171,7 +1175,7 @@ def goldens_against(
     suppress: Sequence[int] = (),
 ) -> dict[str, Any]:
     """Take and write every case's golden against `wrapper` — the target reference, a product
-    wrapper (`gemma4.export_product.ProductChunkWrapper`, or 12B's
+    wrapper (`gemma4.export_product.ProductChunkWrapper`, or 12B's and 26B's
     `gemma4.export_unified.UnifiedProductWrapper`) already in the storage the lender series
     holds — and return the summary ({@link write_goldens} loads the regular product's; the QAT
     line hands its own, `gemma4.export_drafter_qat`). `suppress` is {@link draft_case}'s.

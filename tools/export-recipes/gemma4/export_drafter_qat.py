@@ -45,6 +45,7 @@ series (`gemma4.export_product_qat`, `outputs/series/gemma4-<model>-qat-product/
    owner layers (E4B 22 / 23) come from the target's layer layout, the slot shapes from the
    lender's declaration.
 6. **12B's drafter is the same graph from another upstream class** (section below).
+7. **26B's drafter is E2B / E4B's class against a target with experts** (section below).
 
 ## 12B: `Gemma4UnifiedAssistantForCausalLM`
 
@@ -77,6 +78,45 @@ parametric, and the shared pieces read it from upstream:
   (`gemma4.export_unified.suppress_tokens` — the host's `pipelineConfig.suppressTokens`; none for
   E2B / E4B), and `reference.json` records them.
 
+## 26B A4B: a target with experts
+
+26B's assistant (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`) is E2B / E4B's class,
+`Gemma4AssistantForCausalLM` (`gemma4_assistant`), at 12B's drafter shapes: hidden 1024, 4 layers
+(sliding × 3 + full), 8 KV heads of width 256 on the sliding layers and 2 of width 512 on the full
+one (`attention_k_eq_v`, `num_global_key_value_heads`), window 1024, `use_ordered_embeddings` false
+and no centroid tensor. Its tensors are 12B's drafter's but for the two projections at 26B's width
+(`pre_projection` `[1024, 2 × 2816]`, `post_projection` `[2816, 1024]`). The target is
+`gemma4.export_moe`'s (`gemma4_text` with the expert block — {@link is_moe_target}), and what
+changes for it is where things are read from:
+
+- the target's checkpoint is two shards and their index: the borrowed table is read from the shard
+  that holds it (`gemma4.export_drafter.load_target_embed`), and the record fingerprints the index,
+  both shards and `config.json` ({@link target_weights_files} — the product series' own record);
+- the KV owners are the last sliding layer (28) and the last full one (29) — no KV sharing
+  (`gemma4.export_decode.kv_owner_layers`); the slots are the lender's declaration (sliding
+  `[1, 8, 1032, 256]`, full `[1, 2, C, 512]`), the borrowed table its `model.lm_head.weight`
+  `[262144, 2816]` i4 g32, and the lender the product series (`outputs/series/gemma4-26b-product/`
+  — {@link lender_suffix});
+- the reference is the product series' own (`gemma4.export_moe.load_reference` — the shape-only
+  trace, the one grid import and the reference that dequantises each linear at use and each
+  picked expert from its packed bytes; {@link load_target_reference}), a decoder without PLE input
+  (`gemma4.export_drafter._new_lender`); 26B's generation defaults suppress no id.
+
+The drafter runs only with every expert resident: the runtime's expert cache refuses speculative
+decoding.
+
+## A cut target (`--layers`, test only)
+
+This machine's GPU cannot hold 26B, and the drafter above borrows layers 28 / 29, which the cut
+model (`gemma4.export_moe --layers N`, `outputs/series/gemma4-26b-cut<N>/`) does not have. With
+`--layers N` the same export writes a drafter whose target is that cut: the target config keeps the
+first N layers ({@link target_text_config}), so the KV owners are the cut's last sliding and full
+layers (N = 12: 10 / 11), the lender is the cut series, and the goldens run against the cut's
+reference (`gemma4.export_moe.load_reference` with `layers`). The record names the depth (`cut`)
+and the series is `gemma4-26b-cut<N>-qat-drafter` ({@link cut_suffix}). It exists to check the
+wiring and the numbers of the drafter on this machine's GPU and is never shipped: the cut's hidden
+state is not the full model's, so its acceptance says nothing about 26B's.
+
 ## Why i4 here and i8 for the regular drafter
 
 The regular E2B assistant's linears are not on any grid; rounding them to i4 g32 cut E[a] by
@@ -108,6 +148,7 @@ cases continue coherently.
     outputs/series/gemma4-<model>-qat-drafter/model.krm                          the container
     outputs/series/gemma4-<model>-qat-drafter/drafter-golden.<case>.safetensors  expected drafts
     outputs/series/gemma4-<model>-qat-drafter/reference.json                     provenance
+    outputs/series/gemma4-26b-cut<N>-qat-drafter/                                a cut (test only)
 
 The q4_0 QAT line's distribution (`gemma4.distribution.QAT_Q4_0_PIPELINE`) ships the series as
 the `drafter` role of its model, int4 alone (the regular line's drafter stays int8).
@@ -133,10 +174,11 @@ from _shared.container_read import open_container, read_layouts
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
+from gemma4 import export_moe as moe
 from gemma4 import export_product_qat as qat
 from gemma4 import export_unified as unified
 from gemma4 import provenance, sources
-from gemma4.card import GEMMA4_LICENSE
+from gemma4.card import GEMMA4_LICENSE, GEMMA4_MOE_MODELS
 from gemma4.distribution import (
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_QAT_DRAFTER_SUFFIX,
@@ -335,15 +377,55 @@ def read_lender(product_dir: Path, config: Any, target_config: Any, pins: ModelP
 # ---------------------------------------------------------------------------
 
 
-def load_target_reference(model_dir: Path) -> Any:
+def is_moe_target(config: Any) -> bool:
+    """Whether the target text config `config` is 26B's form: `gemma4_text` with the expert block
+    on (`gemma4.export_moe` — E2B / E4B are `gemma4_text` without it)."""
+    return config.model_type == unified.MOE_TEXT_MODEL_TYPE and bool(
+        getattr(config, "enable_moe_block", False)
+    )
+
+
+def target_text_config(model_dir: Path, layers: int | None = None) -> Any:
+    """The target's text config; with `layers`, the config of 26B's model cut after its first
+    `layers` layers (`gemma4.export_unified.truncate_layers` — `gemma4.export_moe`'s cut), so the
+    lender's KV owner layers are the cut's (`gemma4.export_decode.kv_owner_layers`). A cut of any
+    other target fails loudly (only 26B's export writes cut models)."""
+    config = one_shot.load_text_config(model_dir)
+    if layers is None:
+        return config
+    if not is_moe_target(config):
+        raise QatDrafterError(
+            f"{model_dir}: a cut target ({layers} layers) needs 26B's form (the expert block),"
+            f" not {config.model_type!r} without it"
+        )
+    unified.truncate_layers(config, layers)
+    return config
+
+
+def load_target_reference(
+    model_dir: Path, *, tokenizer_dir: Path | None = None, layers: int | None = None
+) -> Any:
     """The QAT target as its product series stores it — the values the lender's container
     decodes to, by the series' own code, chosen by the target's text model type:
 
     - E2B / E4B: `gemma4.export_product_qat`'s loader and its grid import of every 2-D text weight
       (the packed form is dropped; only the wrapper's values are kept);
-    - 12B (`gemma4_unified_text`): {@link load_unified_reference}.
+    - 12B (`gemma4_unified_text`): {@link load_unified_reference};
+    - 26B (`gemma4_text` with the expert block — {@link is_moe_target}):
+      `gemma4.export_moe.load_reference`, the product (or, with `layers`, the cut) series' own
+      reference — its trace reads the golden cases' lengths, so `tokenizer_dir` is required.
+
+    `layers` (26B alone — {@link target_text_config}) is the cut model's depth.
     """
-    if one_shot.load_text_config(model_dir).model_type == unified.UNIFIED_TEXT_MODEL_TYPE:
+    config = target_text_config(model_dir, layers)
+    if is_moe_target(config):
+        if tokenizer_dir is None:
+            raise QatDrafterError(
+                f"{model_dir}: 26B's reference traces the product graph over the golden cases —"
+                " pass the tokenizer directory"
+            )
+        return moe.load_reference(model_dir, tokenizer_dir, layers=layers)
+    if config.model_type == unified.UNIFIED_TEXT_MODEL_TYPE:
         return load_unified_reference(model_dir)
     wrapper = qat.load_wrapper(model_dir)
     qat.import_wrapper(wrapper)
@@ -395,6 +477,16 @@ def assert_pinned_files(files: Mapping[str, Any], pin: HubPin) -> None:
         raise QatDrafterError(f"the drafter read is not {pin.label} (actual, pin): {wrong}")
 
 
+def target_weights_files(model_dir: Path) -> tuple[str, ...]:
+    """The files the record fingerprints from the target's weights source: `model.safetensors`
+    and `config.json` (`gemma4.provenance.WEIGHTS_FILES` — E2B / E4B / 12B), or for a sharded
+    checkpoint (26B) the index, its shards and `config.json` (`gemma4.export_moe.weights_files` —
+    the product series' own record)."""
+    if (model_dir / unified.CHECKPOINT_INDEX).is_file():
+        return moe.weights_files(moe.open_checkpoint(model_dir))
+    return provenance.WEIGHTS_FILES
+
+
 def drafter_record(
     out_dir: Path,
     model_dir: Path,
@@ -405,19 +497,23 @@ def drafter_record(
     goldens: Mapping[str, Any],
     *,
     suppress: Sequence[int] = (),
+    layers: int | None = None,
 ) -> dict[str, Any]:
     """`reference.json`: the regular drafter's record (`gemma4.export_drafter.drafter_reference`)
     with the target named by its two pinned sources (`gemma4.provenance.checkpoint_fingerprint`)
     and the drafter by its pin; both are checked against their pins before it is returned.
     `suppressTokens` names the ids the goldens' target continuation was taken with masked
     (`suppress` — the host must mask the same ids to reproduce `tokens`; the product records'
-    field)."""
+    field). A drafter of a cut target (`layers` — module docstring, "A cut target") also records
+    `cut`: its goldens are the cut model's, not the full target's."""
+    weights_files = target_weights_files(model_dir)
     checkpoint = provenance.checkpoint_fingerprint(
-        model_dir, pins.label, tokenizer_dir=tokenizer_dir, pins=pins
+        model_dir, pins.label, tokenizer_dir=tokenizer_dir, pins=pins, weights_files=weights_files
     )
-    provenance.assert_pinned_fingerprint(checkpoint, pins)
+    provenance.assert_pinned_fingerprint(checkpoint, pins, weights_files=weights_files)
     files = {name: provenance.file_digest(drafter_dir / name) for name in DRAFTER_FILES}
     assert_pinned_files(files, drafter_pin)
+    cut = {} if layers is None else {"cut": {"layers": layers}}
     return {
         "schema": provenance.SCHEMA,
         "series": out_dir.name,
@@ -430,6 +526,7 @@ def drafter_record(
         },
         "goldens": dict(goldens),
         "suppressTokens": list(suppress),
+        **cut,
     }
 
 
@@ -452,13 +549,15 @@ def export_series(
     goldens: bool = True,
     device: str = DEFAULT_DEVICE,
     floor: float = MEMORY_FLOOR_GIB,
+    layers: int | None = None,
 ) -> dict[str, Any]:
     """Write the borrower container, the goldens and the provenance record through one staged
     seat, and return the summary.
 
     `model_dir` / `tokenizer_dir` are the QAT target's two sources (`pins`), `drafter_dir` the QAT
     drafter's snapshot (`drafter_pin`), `product_dir` the lender (the QAT target's product series
-    — {@link lender_suffix}).
+    — {@link lender_suffix} — or, with `layers`, 26B's cut series of that depth: module
+    docstring, "A cut target").
 
     MUST: every gate (the pins, the lender, the form, the borrowed table, the goldens, the record's
     digests) passes before the seat is published. MUST: the grid import precedes the trace and the
@@ -466,6 +565,7 @@ def export_series(
     """
     sources.assert_model_pins(model_dir, tokenizer_dir, pins)
     sources.assert_snapshot_pin(drafter_dir, drafter_pin)
+    target_config = target_text_config(model_dir, layers)
     with MemoryWatch(floor) as monitor:
         with monitor.stage("load"):
             print(
@@ -476,7 +576,6 @@ def export_series(
             wrapper = drafter.load_drafter(steps, model_dir, source=drafter_dir)
         config = wrapper.drafter.config
         text = config.get_text_config()
-        target_config = one_shot.load_text_config(model_dir)
         suppress = unified.suppress_tokens(tokenizer_dir, target_config)
         with monitor.stage("grid") as record:
             print(
@@ -537,7 +636,9 @@ def export_series(
                         file=sys.stderr,
                         flush=True,
                     )
-                    target = load_target_reference(model_dir)
+                    target = load_target_reference(
+                        model_dir, tokenizer_dir=tokenizer_dir, layers=layers
+                    )
                     assert_borrowed_table(wrapper, target)
                 with monitor.stage("goldens"):
                     print(
@@ -563,6 +664,7 @@ def export_series(
                         drafter_pin,
                         golden_summary,
                         suppress=suppress,
+                        layers=layers,
                     ),
                 )
 
@@ -570,6 +672,7 @@ def export_series(
     return {
         "dir": str(out_dir),
         "lender": str(product_dir),
+        "target_layers": int(target_config.num_hidden_layers),
         "steps": steps,
         "nodes": len(verified.nodes),
         "initializers": len(verified.initializers),
@@ -611,11 +714,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE)
     parser.add_argument("--no-goldens", dest="goldens", action="store_false")
     parser.add_argument("--memory-floor", dest="floor", type=float, default=MEMORY_FLOOR_GIB)
+    parser.add_argument(
+        "--layers",
+        type=int,
+        nargs="?",
+        const=moe.DEFAULT_CUT,
+        default=None,
+        help="26B: a test-only drafter of the model cut after N layers, lent by that cut series"
+        f" (N alone: {moe.DEFAULT_CUT})",
+    )
     return parser
 
 
+def cut_suffix(layers: int) -> str:
+    """The series suffix of a drafter of the cut target (`gemma4-26b-cut<N>-qat-drafter` — never
+    the distribution's `gemma4-26b-qat-drafter`)."""
+    return f"{moe.cut_suffix(layers)}-{GEMMA4_QAT_DRAFTER_SUFFIX}"
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """{@link build_parser}'s parse; with `--layers`, the output and the lender default to the cut's
+    series ({@link cut_suffix}, `gemma4.export_moe.cut_suffix`), and a model without cut models
+    (no expert block — `gemma4.card.GEMMA4_MOE_MODELS`) is refused."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.layers is None:
+        return args
+    if args.model not in GEMMA4_MOE_MODELS:
+        parser.error(f"--layers: model '{args.model}' has no cut model (26B's alone)")
+    if args.out is None:
+        args.out = one_shot.series_dir(args.model, cut_suffix(args.layers))
+    if args.product_dir is None:
+        args.product_dir = one_shot.series_dir(args.model, moe.cut_suffix(args.layers))
+    return args
+
+
 def main(argv: Sequence[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     model = args.model
     options = one_shot.resolve_series_args(args)
     model_dir = options.pop("model_dir")
