@@ -20,10 +20,11 @@ item "The model cards and notices across repositories".
   files a pipeline may put at the root (`LEGAL_PATHS`, passed as `Pipeline.root_files`), and every pipeline of the
   driver passes both.
 - The card is drawn by the pipeline's card renderer (`Pipeline.card_profiles`; every pipeline has one) from the
-  manifest being written. The legal texts are fixed per pipeline, except Gemma 4's (`karume-gemma4`), which follow
-  the models built (`ROOT_FILES` of the driver). The three repositories of the Irodori MIT line
-  (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`) are one pipeline, so they
-  carry the same `NOTICE.md` and the same `LICENSE.md`.
+  manifest being written. The legal texts are fixed per pipeline, except where the notice names what only some
+  models carry: then they follow the models built (`ROOT_FILES` of the driver) — Gemma 4's (`karume-gemma4`, whose
+  drafters differ per model), SigLIP2's (a checkpoint per model) and the Irodori MIT line's, whose three repositories
+  (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`) are one pipeline: each
+  carries the same `LICENSE.md` and a `NOTICE.md` naming its own checkpoint and the repositories it references.
 - Rendering is deterministic: the same manifest gives the same bytes. Sizes, the model list, the quant tables and the
   dtype labels are read from the manifest, never written by hand; what the manifest does not hold (upstream, license,
   provenance) is a constant of the recipe.
@@ -191,10 +192,10 @@ The level-2 sections come in this order:
 - The three Anima notices open with `# Notice` and follow the CircleStone license's layout: `## Attribution Notice`
   (the notice, then the modifications after "modified as follows:"), `## Not an official product`, `## NVIDIA Open
   Model License`, `## License`. They have no closing paragraph.
-- How a notice names the upstream differs: its repository ID in code font (`karume-birefnet-hr`, `karume-lucida`,
-  `karume-embeddinggemma-2`, the three Gemma 4 repositories, `karume-umt5-xxl`); "the … checkpoint listed in
-  `README.md`" (`karume-depth-anything-v2`, `karume-siglip2`, `karume-moss-image`, `karume-wan2.2`, the four Irodori
-  repositories); an angle-bracket URL (`karume-sbv2-jvnv`); prose names and bare URLs (the three Anima repositories).
+- A notice names each upstream — every `base_model` of its card — by its repository ID in code font
+  (`` `<owner>/<name>` ``), without a link, and a Karume repository it references the same way
+  (`` `hdae/<name>` ``); it does not point at `README.md` for an upstream's name. The three Anima notices name theirs
+  in prose.
 
 ## LICENSE.md
 

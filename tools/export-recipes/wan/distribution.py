@@ -78,10 +78,11 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from karume.modelcard import HF_OWNER
 from wan import umt5_tokenizer
 from wan.card import WAN22_CARD, WanCard, render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES, WAN22_TEXT_MODEL
+from wan.sources import SOURCES, WAN22_MODELS, WAN22_TEXT_MODEL
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
@@ -534,11 +535,11 @@ WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
 #: shipping.
 #: SPEC: docs/spec/distribution-cards.md#noticemd
-WAN22_NOTICE_MARKDOWN = """# NOTICE
+WAN22_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in
-`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
-following changes were made:
+This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint
+`{SOURCES[WAN22_MODELS[0]].repo}` (Wan-AI, licensed under the Apache License, Version 2.0 — see
+`LICENSE.md`). The following changes were made:
 
 - The weights were converted into the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors).
@@ -592,13 +593,14 @@ following changes were made:
   VAE decoder; computation runs in float32.
 - **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
   encoder of `google/umt5-xxl` (this checkpoint's `text_encoder` folder holds the same encoder
-  rounded to bfloat16), converted to int8, from the separate repository `karume-umt5-xxl` at a
-  pinned commit (with the size and the SHA-256 of every part); the changes made to it are listed in
-  that repository's own `NOTICE.md`.
+  rounded to bfloat16), converted to int8, from the separate repository
+  `{HF_OWNER}/{UMT5_REPO_NAME}` at a pinned commit (with the size and the SHA-256 of every part);
+  the changes made to it are listed in that repository's own `NOTICE.md`.
 - The umT5-XXL outputs of a fixed set of prompts are included as a precomputed asset, for use
   without the text encoder. They were computed with the umT5-XXL encoder of the Wan2.1 T2V 1.3B
-  checkpoint (the same encoder) in bfloat16 and are stored as float32.
-- The tokenizer of the Wan2.1 T2V 1.3B checkpoint (its files are identical to the `tokenizer`
+  checkpoint `{SOURCES[WAN22_TEXT_MODEL].repo}` (the same encoder) in bfloat16 and are stored as
+  float32.
+- The tokenizer of that checkpoint (its files are identical to the `tokenizer`
   folder of this checkpoint) was converted into one JSON table (vocabulary, scores, added tokens
   and the whitespace set), together with lookup tables for the upstream prompt cleaning (evaluated
   from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database, including a

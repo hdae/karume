@@ -1619,14 +1619,18 @@ class TestSbv2LegalText:
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
         assert notice == SBV2_JVNV_NOTICE_MARKDOWN
-        assert "https://huggingface.co/litagin/style_bert_vits2_jvnv" in notice
-        assert f"https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}" in notice
+        assert "`litagin/style_bert_vits2_jvnv`" in notice
+        assert f"`{SBV2_TEXT_ENCODER_MODEL}`" in notice
         assert SBV2_JVNV_CORPUS_PAGE in notice
         # The notice of changes: the truncation to 22 layers (the only change that alters the text
         # encoder's structure) and quantization.
         assert f"first {SBV2_TEXT_ENCODER_LAYERS} encoder layers" in notice
         assert "quantized" in notice
-        assert "licensed under CC BY-SA 4.0 as well" in notice
+        prose = " ".join(notice.split())
+        assert (
+            "licensed under the Creative Commons Attribution-ShareAlike 4.0 International"
+            " license as well" in prose
+        )
 
     def test_the_notice_holds_for_any_subset_of_the_voices(self) -> None:
         """MUST: the voices are not named one by one — one set of `root_files` also goes with any

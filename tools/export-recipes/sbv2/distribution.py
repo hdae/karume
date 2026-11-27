@@ -1104,14 +1104,12 @@ Attribution-ShareAlike 4.0 International license (the full text is in `LICENSE.m
 <{SBV2_JVNV_LICENSE_URL}>):
 
 - **Voices**: Style-Bert-VITS2 JP-Extra models of JVNV-corpus speakers from
-  <https://huggingface.co/{_JVNV_VOICES_REPO}>
-  (published by `{_owner(_JVNV_VOICES_REPO)}`) — the model card
+  `{_JVNV_VOICES_REPO}` (published by `{_owner(_JVNV_VOICES_REPO)}`) — the model card
   (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
   (<{SBV2_JVNV_CORPUS_PAPER_URL}>; corpus page: <{SBV2_JVNV_CORPUS_PAGE}>).
   The source repository states that the corpus's Creative Commons Attribution-ShareAlike 4.0
   International license carries over to the models.
-- **Text encoder**: <https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}>
-  (published by `{_owner(SBV2_TEXT_ENCODER_MODEL)}`).
+- **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by `{_owner(SBV2_TEXT_ENCODER_MODEL)}`).
 
 The following changes were made:
 

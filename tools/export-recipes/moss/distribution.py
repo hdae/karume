@@ -250,10 +250,10 @@ MOSS_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
 #: SPEC: docs/spec/distribution-cards.md#noticemd
-MOSS_NOTICE_MARKDOWN = """# NOTICE
+MOSS_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the MOSS-Image-SFT checkpoint listed in
-`README.md` (OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`),
+This repository redistributes a modified form of the MOSS-Image-SFT checkpoint `{SOURCE.repo}`
+(OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`),
 including two parts that the checkpoint bundles from other releases, both licensed under the
 Apache License, Version 2.0 as well:
 

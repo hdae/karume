@@ -520,7 +520,7 @@ class TestLayout:
         out_dir, _ = assembled
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "**The text encoder is referenced, not stored here.**" in prose
-        assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
+        assert f"`hdae/{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "for use without the text encoder" in prose
         assert "ftfy's mojibake-detection pattern" in prose
         assert "text encoder is not distributed" not in prose
@@ -1763,7 +1763,7 @@ class TestTheWan22Distribution:
         assert "so only that slice is stored" in prose
         assert "The VAE encoder is not included." not in prose
         assert "**The text encoder is referenced, not stored here.**" in prose
-        assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
+        assert f"`hdae/{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "umT5-XXL encoder of the Wan2.1 T2V 1.3B checkpoint" in prose
         # A copy of the 2.1 sentences with facts that differ for 2.2 does not remain.
         assert "float16 transformer" not in prose

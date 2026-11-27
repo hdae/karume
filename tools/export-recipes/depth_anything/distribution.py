@@ -418,12 +418,16 @@ def depth_anything_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: has shipped. The measured width of the ConvTranspose replacement is not hard-coded but taken
 #: from the card's spelling ({@link depth_anything.card.DEPTH_ANYTHING_CONVT_DIFF}) (the body and
 #: the card do not state different numbers).
+#: The checkpoints the notice names, by their repository IDs (every model of the attribution table
+#: — only Small can be shipped, so the fixed notice of the one pipeline names it).
+_DEPTH_ANYTHING_CHECKPOINTS = " and ".join(f"`{repo}`" for repo in DEPTH_ANYTHING_UPSTREAM.values())
+
 #: SPEC: docs/spec/distribution-cards.md#noticemd
 DEPTH_ANYTHING_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the Depth Anything V2 checkpoint listed in
-`README.md`, which is licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The
-following changes were made:
+This repository redistributes a modified form of the Depth Anything V2 checkpoint
+{_DEPTH_ANYTHING_CHECKPOINTS}, which is licensed under the Apache License, Version 2.0 (see
+`LICENSE.md`). The following changes were made:
 
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors).

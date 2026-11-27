@@ -509,8 +509,8 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 UMT5_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
-`google/umt5-xxl` listed in `README.md` (Google, licensed under the Apache License, Version 2.0 —
-see `LICENSE.md`; that repository has no NOTICE file), and a converted form of that checkpoint's
+`google/umt5-xxl` (Google, licensed under the Apache License, Version 2.0 — see `LICENSE.md`; that
+repository has no NOTICE file), and a converted form of that checkpoint's
 tokenizer. That checkpoint holds the encoder in float32. Its encoder weights are bit-identical to
 the float32 `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit
 `0fad780a534b6463e45facd96134c9f345acfa5b`, checked on 2026-10-04). The following changes were

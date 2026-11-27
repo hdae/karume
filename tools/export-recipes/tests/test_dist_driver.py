@@ -840,6 +840,33 @@ class TestTheLicenseNamesOfEveryPublishedRepository:
         assert [name for name in _SHORT_LICENSE_NAMES if name in notice] == []
 
 
+#: The notices that do not name every `base_model` of their card by its repository ID yet: the
+#: Anima ones, whose notices take the common structure in a commit of their own
+#: (docs/spec/distribution-cards.md#noticemd).
+NOTICES_WITHOUT_EVERY_UPSTREAM_ID = frozenset(
+    {"karume-anima", "karume-anima-extra", "karume-anima-2.9b"}
+)
+
+
+class TestTheUpstreamsEveryNoticeNames:
+    """docs/spec/distribution-cards.md#noticemd — a notice names each upstream by its repository ID
+    in code font."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_notice_names_every_base_model_of_its_card_in_code_font(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        manifest, card = _published_card(pipeline, directory)
+        # The notice of the models the mirror holds (the card is drawn from the same manifest).
+        notice = _root_files(pipeline, list(manifest["models"]))[NOTICE_FILENAME]
+        unnamed = [
+            repo for repo in _listed(_front_matter(card)["base_model"]) if f"`{repo}`" not in notice
+        ]
+
+        assert "listed in `README.md`" not in notice
+        assert bool(unnamed) is (directory in NOTICES_WITHOUT_EVERY_UPSTREAM_ID), unnamed
+
+
 #: The three Anima repositories, whose notice follows the CircleStone license's layout.
 ANIMA_REPOSITORIES = frozenset({"karume-anima", "karume-anima-extra", "karume-anima-2.9b"})
 
@@ -1284,13 +1311,21 @@ class TestRootFilesOfTheModelsBuilt:
     def test_a_pipeline_without_an_entry_keeps_its_fixed_root_files(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        assert "siglip2" not in dist.ROOT_FILES
+        assert "depth-anything" not in dist.ROOT_FILES
 
         root_files = self._handed_to_core(
-            monkeypatch, tmp_path, "siglip2", [SIGLIP2_PIPELINE.default_model]
+            monkeypatch, tmp_path, "depth-anything", [DEPTH_ANYTHING_PIPELINE.default_model]
         )
 
-        assert root_files == dict(SIGLIP2_PIPELINE.root_files)
+        assert root_files == dict(DEPTH_ANYTHING_PIPELINE.root_files)
+
+    def test_a_siglip2_build_of_one_model_names_its_checkpoint_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        notice = self._handed_to_core(monkeypatch, tmp_path, "siglip2", ["base"])["NOTICE.md"]
+
+        assert "`google/siglip2-base-patch16-224`" in notice
+        assert "google/siglip2-so400m-patch14-384" not in notice
 
 
 #: The README sentence that spells out the accepted set (the names usable as `--pipeline` arguments,
