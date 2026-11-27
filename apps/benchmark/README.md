@@ -14,9 +14,9 @@ pnpm --filter @karume/benchmark build                # a static site in apps/ben
 ```
 
 A short trial narrows the run by URL: `?cases=<id>,<id>` (case ids of either sweep's table; a sweep none of them
-belongs to does not run) and `?idleSeconds=<s>`, for example
+belongs to does not run) and `?idleSeconds=<s>` (default 0: no idle time between cases), for example
 `http://127.0.0.1:8792/?cases=i8-n256-k1536,i8a8-conv3d-cin256-cout256-k333-in6x128x128&idleSeconds=0`. A run of the
-defaults (both sweeps, every case) takes about 1 h 39 min.
+defaults (both sweeps, every case) takes about 1 h 7 min.
 
 ## The file a collaborator sends
 

@@ -4,7 +4,10 @@ import {
   gemvSweepSelection,
   planGemvSweep,
 } from "@karume/sweep-app-support/gemv-sweep/settings";
-import { GEOMETRY_SWEEP_PARAMETERS } from "@karume/sweep-app-support/geometry-sweep/settings";
+import {
+  GEOMETRY_SWEEP_PARAMETERS,
+  sweepSelection,
+} from "@karume/sweep-app-support/geometry-sweep/settings";
 import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -13,28 +16,44 @@ import { CONV3D_A, CONV3D_B, GEMV_A } from "./helpers/fakes.ts";
 
 const BOTH = { gemv: true, geometry: true };
 
+/** What the workbench is given for the run of the page's defaults. */
+const DEFAULT_RUN = { candidateSet: "explore", idleSeconds: "0" };
+
 describe("planBenchmark", () => {
-  it("runs both sweeps at the explore set with the entries' defaults: the parameters the workbench parses for the same run", () => {
+  it("runs both sweeps at the explore set with the entries' defaults and no idle time: the parameters the workbench parses for the same run", () => {
     const plan = planBenchmark(BOTH, {});
     expect(plan.sweeps.map(({ entryId }) => entryId)).toEqual(["gemv-sweep", "geometry-sweep"]);
     const [gemv, geometry] = plan.sweeps;
-    expect(gemv?.parameters).toEqual(
-      parseParameters(GEMV_SWEEP_PARAMETERS, { candidateSet: "explore" }),
-    );
-    expect(geometry?.parameters).toEqual(
-      parseParameters(GEOMETRY_SWEEP_PARAMETERS, { candidateSet: "explore" }),
-    );
+    expect(gemv?.parameters).toEqual(parseParameters(GEMV_SWEEP_PARAMETERS, DEFAULT_RUN));
+    expect(geometry?.parameters).toEqual(parseParameters(GEOMETRY_SWEEP_PARAMETERS, DEFAULT_RUN));
     // Same key order as the workbench's record (the text is compared, not only the values)
     expect(JSON.stringify(gemv?.parameters)).toBe(
-      JSON.stringify(parseParameters(GEMV_SWEEP_PARAMETERS, { candidateSet: "explore" })),
+      JSON.stringify(parseParameters(GEMV_SWEEP_PARAMETERS, DEFAULT_RUN)),
     );
     expect(gemv?.sweep === "gemv" ? gemv.plan : undefined).toEqual(
-      planGemvSweep(
-        gemvSweepSelection(parseParameters(GEMV_SWEEP_PARAMETERS, { candidateSet: "explore" })),
-      ),
+      planGemvSweep(gemvSweepSelection(parseParameters(GEMV_SWEEP_PARAMETERS, DEFAULT_RUN))),
     );
-    expect(plan.idleSeconds).toBe(10);
+    expect(plan.idleSeconds).toBe(0);
     expect(plan.cases).toHaveLength(gemvSweepCases().length + geometrySweepCases("explore").length);
+  });
+
+  it("idles before no case by default, the geometry sweep too, whose workbench default for the explore set is 10 s", () => {
+    const plan = planBenchmark(BOTH, {});
+    expect(plan.idleSeconds).toBe(0);
+    expect(plan.sweeps.map((sweep) => sweep.plan.idleSeconds)).toEqual([0, 0]);
+    expect(plan.sweeps.map((sweep) => sweep.parameters["idleSeconds"])).toEqual(["0", 0]);
+    // The workbench's own default for the same set: the page does not take it
+    expect(
+      sweepSelection(parseParameters(GEOMETRY_SWEEP_PARAMETERS, { candidateSet: "explore" }))
+        .idleSeconds,
+    ).toBe(10);
+  });
+
+  it("takes the trial's idle time for both sweeps, above the default too", () => {
+    const plan = planBenchmark(BOTH, { idleSeconds: 10 });
+    expect(plan.idleSeconds).toBe(10);
+    expect(plan.sweeps.map((sweep) => sweep.plan.idleSeconds)).toEqual([10, 10]);
+    expect(plan.sweeps.map((sweep) => sweep.parameters["idleSeconds"])).toEqual(["10", 10]);
   });
 
   it("names the kinds the estimate reads: the GEMV sentinels first, and the first geometry case of each class", () => {

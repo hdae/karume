@@ -129,6 +129,26 @@ describe("the gemv-sweep entry's settings", () => {
     );
   });
 
+  it("idle 10 s before every case but the first by default, none for the explore set (fault: one default for every set)", () => {
+    const idleOf = (given: Record<string, string>) =>
+      planGemvSweep(gemvSweepSelection(parseParameters(entry.parameters, given))).idleSeconds;
+    expect(idleOf({ candidateSet: "explore" })).toBe(0);
+    expect(idleOf({ candidateSet: "full" })).toBe(10);
+    expect(idleOf({ candidateSet: "row-blocks" })).toBe(10);
+    expect(idleOf({ candidateSet: "explore", idleSeconds: "" })).toBe(0);
+  });
+
+  it("take idle seconds given as they are, whatever the set, and refuse what is no integer of at least 0", () => {
+    const idleOf = (given: Record<string, string>) =>
+      planGemvSweep(gemvSweepSelection(parseParameters(entry.parameters, given))).idleSeconds;
+    expect(idleOf({ candidateSet: "explore", idleSeconds: "10" })).toBe(10);
+    expect(idleOf({ candidateSet: "full", idleSeconds: "0" })).toBe(0);
+    expect(idleOf({ candidateSet: "quick", idleSeconds: "90" })).toBe(90);
+    for (const text of ["-1", "1.5", " 3", "ten"]) {
+      expect(() => idleOf({ idleSeconds: text })).toThrow(/Parameter idleSeconds/);
+    }
+  });
+
   it("refuse a case the table does not have and a set that does not exist", () => {
     expect(() => parseParameters(entry.parameters, { cases: "i4g32-n1-k1" })).toThrow(
       /Parameter cases/,

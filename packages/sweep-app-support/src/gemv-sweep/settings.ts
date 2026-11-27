@@ -99,12 +99,12 @@ export const GEMV_SWEEP_PARAMETERS: readonly Parameter[] = [
     default: 5,
   },
   {
-    kind: "integer",
+    // Text, so that empty can mean the set's default (10 s; none for explore)
+    kind: "text",
     name: "idleSeconds",
-    label: "Idle before every case but the first (s)",
-    min: 0,
-    max: Number.MAX_SAFE_INTEGER,
-    default: 10,
+    label:
+      "Idle before every case but the first (s; empty: the set's default, 10 and 0 for explore)",
+    default: "",
   },
 ];
 
@@ -120,8 +120,8 @@ export type GemvSweepSelection = {
   /** The quick look's margin (0: off; absent: the set's default). */
   readonly quickLookMargin?: number;
   readonly rounds: number;
-  /** Idle time before every case but the first (cooling). */
-  readonly idleSeconds: number;
+  /** Idle time before every case but the first (cooling; absent: the set's default). */
+  readonly idleSeconds?: number;
 };
 
 /** A checked selection: what one sweep runs. */
@@ -137,7 +137,37 @@ export type GemvSweepPlan = {
   /** The margin every call runs with: the one given, or the set's default. */
   readonly quickLookMargin: number;
   readonly rounds: number;
+  /** The idle time every case but the first waits: the one given, or the set's default. */
   readonly idleSeconds: number;
+};
+
+/**
+ * The idle time before every case but the first when a run gives none: 10 s of cooling, none for
+ * the `explore` set. Why none there: on an RTX 3080 Ti under Node (2026-11-27) two explore runs
+ * with 10 s took 3,609 and 3,610 s, two without 2,433 and 2,408 s; the derivation from the pair
+ * without differed from the pair with on 28 of 216 decisions, while two pairs each mixing one run
+ * of either kind differed from each other on 30 (the repeat noise); against the two full records
+ * the pairs differed on 41 (with) and 40 (without) of 214; a baseline's median spread over its
+ * rounds was ×1.05 either way. The warm start that opens every group brings the device to a steady
+ * state whatever came before it. One device only, and not a thermally limited one.
+ */
+const gemvSweepIdleSeconds = (candidateSet: GemvSweepCandidateSet, given?: number): number =>
+  given ?? (candidateSet === "explore" ? 0 : 10);
+
+/**
+ * The idle seconds of the parameter's text: none for an empty text (the set's default), else an
+ * integer of at least 0 — anything else is a {@link ParameterError}.
+ */
+const idleSecondsOf = (text: string): number | undefined => {
+  if (text === "") return undefined;
+  const seconds = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(seconds)) {
+    throw new ParameterError(
+      "idleSeconds",
+      `expected empty (the set's default) or an integer of at least 0, got "${text}"`,
+    );
+  }
+  return seconds;
 };
 
 /**
@@ -166,11 +196,12 @@ const marginOf = (text: string): number | undefined => {
 /**
  * The selection the entry's parameters (`candidateSet`, `cases`, `rows`, `candidates`,
  * `quickLookMargin`, `rounds`, `idleSeconds`) give. A margin that is not a number, one between 0
- * and 1, and candidates named for the `explore` set (which chooses its own) are a
- * {@link ParameterError}.
+ * and 1, idle seconds that are not an integer of at least 0, and candidates named for the `explore`
+ * set (which chooses its own) are a {@link ParameterError}.
  */
 export const gemvSweepSelection = (values: ParameterValues): GemvSweepSelection => {
   const quickLookMargin = marginOf(textValue(values, "quickLookMargin"));
+  const idleSeconds = idleSecondsOf(textValue(values, "idleSeconds"));
   const candidateSet = choiceValue(values, "candidateSet", GEMV_CANDIDATE_SETS);
   const candidates = choicesValue(values, "candidates", GEMV_CANDIDATE_NAMES);
   if (candidateSet === "explore" && candidates.length > 0) {
@@ -186,14 +217,15 @@ export const gemvSweepSelection = (values: ParameterValues): GemvSweepSelection 
     candidates,
     ...(quickLookMargin === undefined ? {} : { quickLookMargin }),
     rounds: integerValue(values, "rounds"),
-    idleSeconds: integerValue(values, "idleSeconds"),
+    ...(idleSeconds === undefined ? {} : { idleSeconds }),
   };
 };
 
 /**
  * The plan of a selection over the case table: the cases in the table's order (the sentinels first
- * for the `explore` set, as one `runGemvSweep` call over them measures them) and the margin the set
- * runs with (`gemvSweepQuickLookMargin`: the one given, else the set's default).
+ * for the `explore` set, as one `runGemvSweep` call over them measures them), the margin the set
+ * runs with (`gemvSweepQuickLookMargin`: the one given, else the set's default) and the idle time
+ * (the one given, else the set's default).
  */
 export const planGemvSweep = (
   selection: GemvSweepSelection,
@@ -211,6 +243,6 @@ export const planGemvSweep = (
     candidates: selection.candidates,
     quickLookMargin: gemvSweepQuickLookMargin(selection.candidateSet, selection.quickLookMargin),
     rounds: selection.rounds,
-    idleSeconds: selection.idleSeconds,
+    idleSeconds: gemvSweepIdleSeconds(selection.candidateSet, selection.idleSeconds),
   };
 };

@@ -19,16 +19,17 @@ GPU.
   `explore` set ([workbench](workbench.md#the-explore-set),
   [workbench](workbench.md#the-geometry-sweeps-explore-set)) with its entry's defaults for that set — 5 rounds, the
   quick look's margin of the set (×1.10 for the GEMV sweep's, ×1.25 for the geometry sweep's), every case of its table
-  (116 and 78) — and the workbench's idle time of 10 s before every case but the first. The second sweep's first case
-  has the idle time before it too.
-- Each sweep's parameters are parsed from `candidateSet=explore` by the workbench entry's own declarations, and
-  planned by the shared settings, so a sweep's record holds the `entry.parameters` the workbench writes for the same
-  run, in the same order.
+  (116 and 78) — and no idle time between cases: the page gives both sweeps `idleSeconds` 0 (the workbench's defaults
+  for these sets are none for the GEMV sweep's and 10 s for the geometry sweep's). An idle time the trial sets is
+  waited before every case but the first, the second sweep's first case too.
+- Each sweep's parameters are parsed from `candidateSet=explore` and the run's `idleSeconds` by the workbench
+  entry's own declarations, and planned by the shared settings, so a sweep's record holds the `entry.parameters` the
+  workbench writes for the same run, in the same order.
 - Two checkboxes (both on) choose the sweeps; there is no other setting on the page.
 - For a short trial the URL takes `?cases=` (comma-separated case ids of either table: each sweep runs the ids of its
   own table, and a sweep the list names none of does not run) and `?idleSeconds=` (an integer of at least 0, for both
-  sweeps). Both reach the records' parameters and the file's `trial`. Any other parameter, an unknown case id, an
-  empty list and an idle time that does not fit are shown as a problem, and nothing can start.
+  sweeps, in place of 0). Both reach the records' parameters and the file's `trial`. Any other parameter, an unknown
+  case id, an empty list and an idle time that does not fit are shown as a problem, and nothing can start.
 
 ## Before a run
 
@@ -91,8 +92,8 @@ idle time before it. Before any case finished it is labelled as a first estimate
 
 The priors come from the maintainer's records: the GEMV sweep's `full` records of an Apple M5 (2026-11-23) and the
 `explore` set's replay (half the in-group time), the geometry sweep's `full` records of an RTX 5070 Ti (2026-11-18) and
-the `explore` set's estimate on them (58 % less time in the cases); the full run of both sweeps is then about 1 h 39
-min, a third of it idle time.
+the `explore` set's estimate on them (58 % less time in the cases); the full run of both sweeps is then about 1 h 7 min
+(about 1 h 39 min with `?idleSeconds=10`).
 
 ## The patterns found
 

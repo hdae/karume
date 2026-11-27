@@ -60,11 +60,15 @@ measurements in `docs/research/`.
   a record's ratio material) and `geometryTimestampQuantum` (the record's rounding step). The derivations use these
   same functions, so the results of `deriveLinearGemvChoices` and `deriveGeometryProfile` do not change.
 - The benchmark app (`apps/benchmark`, private): a small static page an outside collaborator opens to run the two
-  sweeps' `explore` sets on their own GPU — one case per call with idle time between cases, two progress bars, the
-  time left and the patterns found so far — and that leaves one file (`karume-benchmark/1`) to send back;
+  sweeps' `explore` sets on their own GPU — one case per call, with no idle time between cases unless the URL sets
+  one (`?idleSeconds=`), two progress bars, the time left and the patterns found so far — and that leaves one file
+  (`karume-benchmark/1`) to send back;
   `node apps/benchmark/unpack.ts` writes its records where the workbench would have. The workbench and the app share
   the sweeps' plans, runs and merged records through the private package `@karume/sweep-app-support`; the workbench's
-  `gemv-sweep` and `geometry-sweep` entries take `candidateSet=explore`.
+  `gemv-sweep` and `geometry-sweep` entries take `candidateSet=explore`. The `gemv-sweep` entry idles before no
+  case with `explore` unless `idleSeconds` is given (10 s with the other sets, and in `geometry-sweep`): on an RTX
+  3080 Ti two explore runs without idle time took a third less time, and the derivation from them differed from that of
+  two runs with 10 s on 28 of 216 decisions, where two pairs each mixing one run of either kind differed on 30.
 
 ### Changed
 

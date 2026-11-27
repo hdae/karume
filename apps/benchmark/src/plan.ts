@@ -1,9 +1,9 @@
 /**
  * What a run measures: the GEMV sweep's and the geometry sweep's `explore` sets at their defaults
- * (rounds, margins) and the workbench's idle time between cases, each sweep planned by the shared
- * settings exactly as the workbench's entry plans it, and the run's cases in order with the kind the
- * estimate reads them by. The URL may narrow a run for a short trial (`?cases=`, comma-separated ids
- * of either table) and set the idle time (`?idleSeconds=`); nothing else. Pure.
+ * (rounds, margins) with no idle time between cases (`IDLE_SECONDS`), each sweep planned by the
+ * shared settings exactly as the workbench's entry plans it, and the run's cases in order with the
+ * kind the estimate reads them by. The URL may narrow a run for a short trial (`?cases=`,
+ * comma-separated ids of either table) and set the idle time (`?idleSeconds=`); nothing else. Pure.
  *
  * SPEC: docs/spec/benchmark.md#what-a-run-measures
  */
@@ -90,6 +90,15 @@ export type SweepChoice = Readonly<Record<SweepId, boolean>>;
 
 const TRIAL_KEYS = ["cases", "idleSeconds"] as const;
 
+/**
+ * The idle time before every case of a run but the first when the trial gives none, for both
+ * sweeps: none. The warm start that opens every group brings the device to a steady state whatever
+ * came before it; on an RTX 3080 Ti the GEMV explore set's derivation moved no more without the
+ * idle time than between two runs with it (the measurement: `gemvSweepIdleSeconds` of the shared
+ * GEMV settings), and the run is a third shorter.
+ */
+const IDLE_SECONDS = 0;
+
 /** The geometry explore set's table (`full`'s). */
 const geometryCaseIds = (): readonly string[] => geometrySweepCases("explore").map(({ id }) => id);
 
@@ -124,7 +133,7 @@ export const trialOfQuery = (query: string): Trial => {
     idleText === null
       ? undefined
       : integerValue(
-          parseParameters(GEMV_SWEEP_PARAMETERS, { idleSeconds: idleText }),
+          parseParameters(GEOMETRY_SWEEP_PARAMETERS, { idleSeconds: idleText }),
           "idleSeconds",
         );
   return {
@@ -133,11 +142,14 @@ export const trialOfQuery = (query: string): Trial => {
   };
 };
 
-/** The parameter text a sweep's record is parsed from: the explore set, and the trial's values. */
-const givenOf = (trial: Trial, caseIds: readonly string[] | undefined): Record<string, string> => ({
+/** The parameter text a sweep's record is parsed from: the explore set, its cases, the idle time. */
+const givenOf = (
+  caseIds: readonly string[] | undefined,
+  idleSeconds: number,
+): Record<string, string> => ({
   candidateSet: "explore",
   ...(caseIds === undefined ? {} : { cases: caseIds.join(",") }),
-  ...(trial.idleSeconds === undefined ? {} : { idleSeconds: String(trial.idleSeconds) }),
+  idleSeconds: String(idleSeconds),
 });
 
 /** The cases of a sweep the trial names (undefined: no narrowing; empty: the sweep does not run). */
@@ -166,14 +178,15 @@ const runCasesOf = (sweep: PlannedSweep): RunCase[] => {
 /**
  * The run of the chosen sweeps under a trial: each sweep's parameters parsed by its entry's own
  * declarations (so its record's `entry.parameters` is what the workbench writes for the same run)
- * and planned by the shared settings. A sweep that is not chosen, or that the trial names no case
- * of, does not run.
+ * and planned by the shared settings, both with the trial's idle time, else {@link IDLE_SECONDS}. A
+ * sweep that is not chosen, or that the trial names no case of, does not run.
  */
 export const planBenchmark = (choice: SweepChoice, trial: Trial): BenchmarkPlan => {
+  const idleSeconds = trial.idleSeconds ?? IDLE_SECONDS;
   const sweeps: PlannedSweep[] = [];
   const gemvCases = trialCasesIn(trial, GEMV_CASE_IDS);
   if (choice.gemv && gemvCases?.length !== 0) {
-    const parameters = parseParameters(GEMV_SWEEP_PARAMETERS, givenOf(trial, gemvCases));
+    const parameters = parseParameters(GEMV_SWEEP_PARAMETERS, givenOf(gemvCases, idleSeconds));
     sweeps.push({
       sweep: "gemv",
       entryId: GEMV_SWEEP_ENTRY_ID,
@@ -183,7 +196,10 @@ export const planBenchmark = (choice: SweepChoice, trial: Trial): BenchmarkPlan 
   }
   const geometryCases = trialCasesIn(trial, geometryCaseIds());
   if (choice.geometry && geometryCases?.length !== 0) {
-    const parameters = parseParameters(GEOMETRY_SWEEP_PARAMETERS, givenOf(trial, geometryCases));
+    const parameters = parseParameters(
+      GEOMETRY_SWEEP_PARAMETERS,
+      givenOf(geometryCases, idleSeconds),
+    );
     const selection = sweepSelection(parameters);
     sweeps.push({
       sweep: "geometry",
@@ -192,7 +208,5 @@ export const planBenchmark = (choice: SweepChoice, trial: Trial): BenchmarkPlan 
       plan: planSweep(selection, geometrySweepCases(selection.candidateSet)),
     });
   }
-  // Both sweeps parse the same idle time (the trial's, else the entries' default)
-  const idleSeconds = sweeps[0]?.plan.idleSeconds ?? 0;
   return { sweeps, cases: sweeps.flatMap(runCasesOf), idleSeconds, trial };
 };
