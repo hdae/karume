@@ -48,7 +48,9 @@ maintainer's ruling of 2026-11-06).
    [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md), the grouped `expert_linear` is perf-ledger K-104. The
    cache is built even if slow (the maintainer's ruling of 2026-11-09: a model whose experts do not fit in VRAM becomes
    possible in principle). Left:
-   - the drafter and vision of 26B;
+   - 26B's QAT MTP drafter, which the recipe ships: the export's goldens, the distribution rebuilt with it and its e2e,
+     the run in Chrome on the RTX 5070 Ti (the VRAM headroom and the acceptance), and the upload at the next release;
+   - the vision of 26B;
    - the grouped `expert_linear` in a chat's decode in Chrome on the RTX 5070 Ti (its `kernel-check` identity passed
      there on 2026-11-19);
    - a depth sweep of self-speculation in Chrome (the Node sweep is research 2026-11-10 §7);

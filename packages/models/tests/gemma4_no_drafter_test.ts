@@ -1,7 +1,8 @@
-// A gemma4 distribution whose model ships no drafter — 26B A4B of the q4_0 QAT line, until its
-// drafter lands (ADR 0145 decision 1). `speculative` is refused through the missing role: the
-// weights resolution has no `drafter` to select, so the load fails before any weight part is fetched,
-// with nothing in the pipeline named after the model. No GPU: a fake hub serving one small container.
+// A gemma4 distribution whose model ships no drafter (a manifest entry without the `drafter` role —
+// as a mirror published before a model's drafter declares it). `speculative` is refused through the
+// missing role: the weights resolution has no `drafter` to select, so the load fails before any
+// weight part is fetched, with nothing in the pipeline named after the model. No GPU: a fake hub
+// serving one small container.
 
 import { assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -59,7 +60,7 @@ const component = (): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** A distribution with the `model` role alone, as 26B ships. */
+/** A distribution with the `model` role alone. */
 const drafterless = async () => {
   const model = await serveContainer("model/model.i4", component());
   const tokenizer = Uint8Array.from([0x7b, 0x7d]);
