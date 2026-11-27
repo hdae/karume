@@ -48,7 +48,9 @@ maintainer's ruling of 2026-11-06).
    [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md), the grouped `expert_linear` is perf-ledger K-104. The
    cache is built even if slow (the maintainer's ruling of 2026-11-09: a model whose experts do not fit in VRAM becomes
    possible in principle). Left:
-   - the drafter and vision of 26B;
+   - the drafter of 26B (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`), with every expert resident
+     only: the expert cache keeps refusing `speculative`, and the two together are not planned (the maintainer's
+     ruling of 2026-11-27 — taken up later if needed). 26B's vision is in the `later` item "Vision on E2B / E4B";
    - the grouped `expert_linear` in a chat's decode in Chrome on the RTX 5070 Ti (its `kernel-check` identity passed
      there on 2026-11-19);
    - a depth sweep of self-speculation in Chrome (the Node sweep is research 2026-11-10 §7);
@@ -238,6 +240,17 @@ maintainer's ruling of 2026-11-06).
        sending the file from the page (by hand for now — the maintainer's direction of 2026-11-26); and whether a
        record of the explore sets joined with a full record should count a skipped row as no observation, as it
        does now.
+     - Improvements to the benchmark page (filed 2026-11-27, the maintainer's request after a run in Chrome on the
+       RTX 5070 Ti lost its results to a page reload):
+       - Resume: a run that a reload or a closed tab interrupts continues from the cases already measured instead
+         of starting over (what caused that reload is not established; the dev server's hot reload is suspected).
+       - Fewer words and less specialist explanation; the page reworked around what the run shows:
+         1. the title "Karume Benchmark";
+         2. after a button to go on, a screen that shows the GPU and the environment and lets the collaborator
+            confirm or correct them (with a list of candidates);
+         3. an optional guide to the browser's WebGPU developer settings;
+         4. once started, one square per measured item, many at a time, coloured by state: a faster choice found
+            (blue), the default kept (green), running (white), failed (red).
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
@@ -431,7 +444,8 @@ maintainer's ruling of 2026-11-06).
 - **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
   heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real
   vision tower and causal attention, and need the product graph's input for image vectors but not the marking of which
-  rows are one image). 12B's vision shipped with 0.18.0.
+  rows are one image). 12B's vision shipped with 0.18.0. 26B's vision goes with these two (the maintainer's ruling of
+  2026-11-27: low priority, 12B's vision is enough for now).
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
   - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
     one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed). No scoring run since the schema 4 / 5 reader (local `inputs/`
