@@ -25,6 +25,14 @@ check made on that date, and moving a pin needs the check again.
   imported classes and re-implements `transforms.py`'s spline in a branch-free equivalent form; the
   installed package is not modified and no file is copied here.
 - **Corpus** — the JVNV profile cites <https://arxiv.org/abs/2310.06072> in the model card.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `litagin/style_bert_vits2_jvnv` at `205830ca1d49e666ddfbf2a755f0108e9cade4dd` — that the JVNV
+    corpus's license carries over to the voices (in Japanese, with Karume's English translation
+    labeled as such; `NOTICE.md` keeps one line stating it and refers to the card).
 
 ## Upstream inventory
 

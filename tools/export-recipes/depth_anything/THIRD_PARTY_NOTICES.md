@@ -23,6 +23,13 @@ check made on that date, and moving a pin needs the check again.
   module type; nothing is copied. `export.py` self-reports a verbatim port of `DPTImageProcessor`'s
   normalization for the synthetic goldens.
 - **Paper** — Depth Anything V2, <https://arxiv.org/abs/2406.09414>.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `depth-anything/Depth-Anything-V2-Small-hf` at `5426e4f0f36572d16453bbda7a8389317b1bef99` — how
+    Depth Anything V2 was trained.
 
 ## Upstream inventory
 

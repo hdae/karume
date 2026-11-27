@@ -44,6 +44,13 @@ check made on that date, and moving a pin needs the check again.
   from the distribution** (ADR 0087 — the official Turbo checkpoint replaced it). The machinery is
   kept for possible future fine-tune intake, and the conversion to diffusers naming uses the
   diffusers-supplied function.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-24.
+  - `Gazingstars123/Anima-2.9B` at `9f9cb502dbae7a616c3cc5a530633427fe735665` — what the model is
+    and what was trained (`karume-anima-2.9b`).
 
 ## Upstream inventory
 
