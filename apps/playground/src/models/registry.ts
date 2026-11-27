@@ -111,7 +111,7 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/gemma4",
     title: "Gemma 4 chat",
     summary:
-      "A chat with Gemma 4 (E2B / E4B), its q4_0 QAT line (E2B / E4B / 12B, MTP drafters) or the fixed mobile QAT (E2B / E4B), streaming tokens on the GPU.",
+      "A chat with Gemma 4 (E2B / E4B), its q4_0 QAT line (E2B / E4B / 12B / 26B A4B, MTP drafters) or the fixed mobile QAT (E2B / E4B), streaming tokens on the GPU.",
     group: "Text",
     icon: MessageSquareTextIcon,
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
