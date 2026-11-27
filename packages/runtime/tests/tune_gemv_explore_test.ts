@@ -57,10 +57,10 @@ const TABLE_SENTINELS = [
   "i8-n262144-k256",
   "bf16-n256-k2560",
   "i2-n12288-k1536",
-  "i8-n256-k3072",
+  "i8-n256-k5120",
   "bf16-n262144-k1536",
   "i4g32-n262144-k256",
-  "i8-n2560-k256",
+  "i8-n2048-k256",
   "bf16-n2560-k256",
   "i2-n1536-k12288",
   "bf16-n10752-k2560",
@@ -84,20 +84,20 @@ describe("the sentinels", () => {
   });
 
   it("are the same whatever a run is narrowed to: the whole table's sentinels among the narrowed cases go first, each part in the order given (fault: the table's order)", () => {
-    // Table order: i4g32-n8960-k1536, i8-n256-k3072 (a sentinel), i8-n1536-k256, i8-n2560-k256 (one)
+    // Table order: i4g32-n8960-k1536, i8-n256-k5120 (a sentinel), i8-n1024-k256, i8-n2048-k256 (one)
     const narrowed = GEMV_CASES.filter(({ id }) =>
-      ["i8-n1536-k256", "i8-n2560-k256", "i4g32-n8960-k1536", "i8-n256-k3072"].includes(id),
+      ["i8-n1024-k256", "i8-n2048-k256", "i4g32-n8960-k1536", "i8-n256-k5120"].includes(id),
     );
     assertEquals(
       narrowed.map(({ id }) => id),
-      ["i4g32-n8960-k1536", "i8-n256-k3072", "i8-n1536-k256", "i8-n2560-k256"],
+      ["i4g32-n8960-k1536", "i8-n256-k5120", "i8-n1024-k256", "i8-n2048-k256"],
     );
     assertEquals(
       gemvExploreOrder(narrowed).map(({ id }) => id),
-      ["i8-n256-k3072", "i8-n2560-k256", "i4g32-n8960-k1536", "i8-n1536-k256"],
+      ["i8-n256-k5120", "i8-n2048-k256", "i4g32-n8960-k1536", "i8-n1024-k256"],
     );
     // The sentinels of the narrowed list alone would be another choice: a run takes the table's
-    assertEquals(gemvSentinels(narrowed, 2).includes("i8-n2560-k256"), false);
+    assertEquals(gemvSentinels(narrowed, 2).includes("i8-n2048-k256"), false);
     // Computed from the list alone: the same in every call
     assertEquals(gemvSentinels(GEMV_CASES), gemvSentinels([...GEMV_CASES]));
   });
@@ -473,7 +473,7 @@ describe("the explore set's measurement plans", () => {
 });
 
 describe("the planning of an explore sweep (planGemvSweep, before the GPU is touched)", () => {
-  const SENTINEL = "i8-n2560-k256";
+  const SENTINEL = "i8-n2048-k256";
   const OTHER = "i8-n1536-k256";
   const LATER = "i4g32-n8960-k1536";
 
@@ -490,9 +490,9 @@ describe("the planning of an explore sweep (planGemvSweep, before the GPU is tou
     const full = planGemvSweep({ candidateSet: "full", cases: [OTHER, SENTINEL, LATER] });
     assertEquals(
       full.cases.map(({ id }) => id),
-      [LATER, OTHER, SENTINEL],
+      [LATER, SENTINEL, OTHER],
     );
-    assertEquals(full.caseIds, [LATER, OTHER, SENTINEL]);
+    assertEquals(full.caseIds, [LATER, SENTINEL, OTHER]);
     assertEquals(full.sentinels, undefined);
   });
 
@@ -547,7 +547,9 @@ describe("the planning of an explore sweep (planGemvSweep, before the GPU is tou
         planGemvSweep({
           candidateSet: "explore",
           cases: [OTHER],
-          sentinelEvidence: [{ gemvCase: { ...caseOf(SENTINEL), n: 2048 }, rows: [] }],
+          sentinelEvidence: [
+            { gemvCase: { ...caseOf(SENTINEL), n: caseOf(SENTINEL).n * 2 }, rows: [] },
+          ],
         }),
       Error,
       "another shape",
@@ -584,7 +586,7 @@ describe("the planning of an explore sweep (planGemvSweep, before the GPU is tou
 describe("the sentinel evidence of a record (gemvSweepExploreEvidence)", () => {
   it("is each of its sentinels with the rows of its M = 1 group, and nothing for a case that is no sentinel or a record of another set", () => {
     const record = gemvRecord("2026-11-26T00:00:00.000Z", [
-      { caseId: "i8-n2560-k256", rows: [1, 4] },
+      { caseId: "i8-n2048-k256", rows: [1, 4] },
       { caseId: "i8-n1536-k256", rows: [1] },
     ]);
     assertEquals(gemvSweepExploreEvidence(record), []);
@@ -599,11 +601,11 @@ describe("the sentinel evidence of a record (gemvSweepExploreEvidence)", () => {
     const evidence = gemvSweepExploreEvidence(explore);
     assertEquals(
       evidence.map(({ gemvCase }) => gemvCase.id),
-      ["i8-n2560-k256"],
+      ["i8-n2048-k256"],
     );
     const [first] = evidence;
     assert(first !== undefined);
-    const m1 = record.rows.filter((row) => row.caseId === "i8-n2560-k256" && row.m === 1);
+    const m1 = record.rows.filter((row) => row.caseId === "i8-n2048-k256" && row.m === 1);
     assert(m1.length > 0 && m1.length < record.rows.length);
     assertEquals(first.rows, m1);
     // Its case is the table's: a later sweep takes it as evidence

@@ -1514,7 +1514,7 @@ describe("a record of the explore set", () => {
       settings: {
         ...record.settings,
         candidateSet: "explore",
-        sentinels: ["i8-n2560-k256"],
+        sentinels: ["i8-n2048-k256"],
       },
       rows: record.rows.filter(keep),
     });

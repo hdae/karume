@@ -365,7 +365,7 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
   });
 
   it("measures an explore run over a sentinel and a predicted case: the sentinel first with every candidate, the other narrowed at M = 1 to its prediction, M = 4 to what M = 1 carries; its progress counts what the record holds", async () => {
-    const sentinelId = "i8-n2560-k256";
+    const sentinelId = "i8-n2048-k256";
     const otherId = "i8-n1536-k256";
     const progress: GemvSweepProgress[] = [];
     const record = await runGemvSweep({

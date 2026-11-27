@@ -1,4 +1,4 @@
-import type { GemvSweepReport } from "@karume/runtime/tune";
+import { type GemvSweepReport, gemvSweepCases } from "@karume/runtime/tune";
 import { gemvSweepResult } from "@karume/sweep-app-support/gemv-sweep/summary";
 import { geometrySweepResult } from "@karume/sweep-app-support/geometry-sweep/summary";
 import { recordRun, type WorkbenchRecord } from "@karume/sweep-app-support/record";
@@ -54,7 +54,11 @@ describe("beforeRunNotes", () => {
     const plan = planBenchmark({ gemv: true, geometry: true }, {});
     const notes = beforeRunNotes(plan, 5940);
     expect(notes).toHaveLength(5);
-    expect(notes[0]).toMatch(/the GEMV sweep .*115 cases.* and the tile geometry sweep .*78 cases/);
+    expect(notes[0]).toMatch(
+      new RegExp(
+        `the GEMV sweep .*${gemvSweepCases().length} cases.* and the tile geometry sweep .*78 cases`,
+      ),
+    );
     expect(notes[1]).toContain(`How long: ${durationText(5940)}`);
     expect(notes[2]).toMatch(/keep this tab in front/);
     expect(notes[3]).toMatch(/second run/);

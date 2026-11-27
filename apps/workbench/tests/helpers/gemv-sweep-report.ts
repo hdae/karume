@@ -16,7 +16,8 @@ import {
 /** Two i8 cases of the table (no group): E2B QAT's per_layer_projection and per_layer_input_gate. */
 export const CASE_A = "i8-n1536-k256";
 export const CASE_B = "i8-n256-k1536";
-export const CASE_C = "i8-n2560-k256";
+/** A sentinel of the table that comes after CASE_A and CASE_B in it (the explore set moves it first). */
+export const CASE_C = "i4g32-n2112-k2816";
 
 export const ADAPTER = {
   vendor: "nvidia",

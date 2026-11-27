@@ -94,7 +94,7 @@ describe("the gemv-sweep entry's settings", () => {
   });
 
   it("put the table's sentinels first for the explore set, each part in the table's order, at the set's margin of ×1.10 (fault: the table's order, ×1.25)", () => {
-    // CASE_C (i8-n2560-k256) is a sentinel of the table, CASE_A and CASE_B are not
+    // CASE_C (i4g32-n2112-k2816) is a sentinel of the table, CASE_A and CASE_B are not
     const sentinels = gemvSentinels(gemvSweepCases());
     expect([CASE_A, CASE_B, CASE_C].map((id) => sentinels.includes(id))).toEqual([
       false,
