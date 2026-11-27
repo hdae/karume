@@ -234,7 +234,7 @@ class TestIrodoriStorageAttribution:
         assert (
             "Its weights derive from"
             " [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked),\n"
-            "  licensed **Apache-2.0**"
+            "  licensed **apache-2.0**"
         ) in card
 
     def test_a_component_split_across_repositories_fails(self) -> None:
@@ -268,7 +268,7 @@ class TestIrodoriMeanFlowCard:
         assert "# Irodori-TTS v4.1 Small MF — Karume" in card
         assert (
             "[Aratako/Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)"
-            " at revision `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e`, licensed **MIT**"
+            " at revision `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e`, licensed **mit**"
         ) in card
         assert "distilled it from [Aratako/Irodori-TTS-v4.1-Small]" in card
         assert "MeanFlow-distilled DiT" in card
@@ -353,9 +353,9 @@ class TestIrodoriLargeCard:
         assert (
             "[Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy)"
         ) in card
-        assert "licensed **MIT**\n  (as of retrieval). This repository does not store it" in card
+        assert "licensed **mit**\n  (as of retrieval). This repository does not store it" in card
         assert "ModernBERT" not in card
-        assert "licensed **MIT** (as of retrieval). It is redistributed here" not in card
+        assert "licensed **mit** (as of retrieval). It is redistributed here" not in card
 
     def test_a_codec_stored_here_is_said_to_be_redistributed_here(self) -> None:
         card = render_irodori_large_model_card(_large_manifest(codec_repo=None), REPO)

@@ -236,6 +236,11 @@ NVIDIA_NOTICE = (
     "Built on NVIDIA Cosmos."
 )
 
+#: The HF license identifier of the NVIDIA Open Model License Agreement (the `license_name` that
+#: `nvidia/Cosmos-Predict2-2B-Text2Image` writes with `license: other` — THIRD_PARTY_NOTICES.md),
+#: the card's name for the second text of `LICENSE.md`.
+NVIDIA_LICENSE_NAME = "nvidia-open-model-license"
+
 #: The accepted set of the `resolution` knob in one line (**a fact absent from the manifest** — the
 #: source of truth of the accepted set is `packages/models/src/anima/resolution.ts`, and per ADR
 #: 0038 §2 it is not written into the manifest). Step = spatial compression 8 × patch 2; the lower
@@ -542,11 +547,11 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
     lines = [
         "## License",
         "",
-        "Every model here derives from the CircleStone Anima base model and stays under the",
-        "CircleStone Labs Non-Commercial License v1.2 (non-commercial use only). This",
-        "repository ships `LICENSE.md` (the full text of that license, followed by the NVIDIA",
-        "Open Model License Agreement) and `NOTICE.md` (these attribution notices plus the list",
-        "of modifications).",
+        "Every model here derives from the CircleStone Anima base model and is licensed",
+        f"**{ANIMA_METADATA.license_name}** v1.2 (non-commercial use only). This repository ships",
+        "`LICENSE.md` (the full text of that license, followed by the text of",
+        f"**{NVIDIA_LICENSE_NAME}**) and `NOTICE.md` (these attribution notices plus the list of",
+        "modifications).",
         "",
         RIGHTS_GRANT_STATEMENT,
         "",

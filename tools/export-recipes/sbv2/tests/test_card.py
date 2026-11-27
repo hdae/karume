@@ -645,7 +645,7 @@ class TestSbv2CardProfiles:
             "credit the authors",
             "the license URL",
             "**converted to another format and quantized**",
-            "license any derivative work under CC BY-SA 4.0",
+            "license any derivative work under **cc-by-sa-4.0**",
             "no further",
             "There is no NonCommercial and no NoDerivatives clause",
         ):
@@ -680,7 +680,7 @@ class TestSbv2CardProfiles:
             "https://arxiv.org/abs/2310.06072",
             "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus",
             "https://github.com/litagin02/Style-Bert-VITS2",
-            "AGPL-3.0",
+            "licensed **agpl-3.0**",
             "Karume is a separate implementation and does not contain the original",
         ):
             assert required in card, required

@@ -237,10 +237,12 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         attribution=(
             "- **Fine-tune of**:"
             " [ZhengPeng7/BiRefNet_HR](https://huggingface.co/ZhengPeng7/BiRefNet_HR)"
-            " (**mit**) — architecture and initial weights; the upstream copyright notice is"
+            " (licensed **mit**) — architecture and initial weights; the upstream copyright"
+            " notice is"
             " preserved.",
             "- **Illustration training data** includes"
-            " [ToonOut](https://huggingface.co/datasets/joelseytre/toonout) (**CC-BY-4.0**);"
+            " [ToonOut](https://huggingface.co/datasets/joelseytre/toonout) (licensed"
+            " **cc-by-4.0**);"
             " other sets it draws on (P3M-10k, COD10K, DIS5K) are distributed for research"
             " purposes — check them against your own use case.",
             "- **Not included**: `lucida-m35-comfy.safetensors`. That experimental variant has"

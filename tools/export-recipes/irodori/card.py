@@ -143,6 +143,7 @@ def _is_meanflow(model: Mapping[str, Any]) -> bool:
 #: above). It is redistributed, so it is listed in the attribution.
 #: License checked at the source (2026-08-12): `license: mit`.
 IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
+IRODORI_TEXT_BACKBONE_LICENSE = "mit"
 
 
 def irodori_upstream(model_name: str) -> IrodoriUpstream:
@@ -195,6 +196,15 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 #: machine-readable tag and the bundled `LICENSE`.
 IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
 IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
+
+#: The HF license identifiers of the codec's chain above (`IRODORI_CODEC_MODEL` and its parent are
+#: `license: mit`, the original weights `license: apache-2.0`).
+IRODORI_CODEC_MODEL_LICENSE = "mit"
+IRODORI_CODEC_ORIGIN_LICENSE = "apache-2.0"
+
+#: The license of upstream's training / inference implementation (GitHub `Aratako/Irodori-TTS` —
+#: its `LICENSE` is the MIT License), named by its HF identifier as the card names every license.
+IRODORI_IMPLEMENTATION_LICENSE = "mit"
 
 #: License identifier of the distribution (the HF tag in the card's frontmatter — upstream
 #: Irodori-TTS and the direct upstream of the bundled codec, {@link IRODORI_CODEC_MODEL}, are both
@@ -296,7 +306,7 @@ def _irodori_weights_line(upstream: IrodoriUpstream) -> list[str]:
     at = "" if upstream.revision is None else f" at revision `{upstream.revision}`"
     lines = [
         f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},"
-        " licensed **MIT**",
+        f" licensed **{IRODORI_LICENSE}**",
     ]
     if upstream.teacher is not None:
         lines += [
@@ -317,12 +327,13 @@ def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
     holder = _component_holder(model, ("backbone",))
     if holder is None:
         return [
-            "  licensed **MIT** (as of retrieval). It is redistributed here in the container"
-            " format as",
+            f"  licensed **{IRODORI_TEXT_BACKBONE_LICENSE}** (as of retrieval). It is redistributed"
+            " here in the container format as",
             "  the `backbone` component, so that license travels with this repository too.",
         ]
     return [
-        "  licensed **MIT** (as of retrieval). This repository does not store it: the manifest",
+        f"  licensed **{IRODORI_TEXT_BACKBONE_LICENSE}** (as of retrieval). This repository does"
+        " not store it: the manifest",
         f"  references the containers `{holder}` ships as the `backbone` component,",
         "  and they are fetched from there. That license applies to the backbone this distribution",
         "  runs.",
@@ -364,17 +375,19 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
         *_irodori_weights_line(upstream),
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
+        f" **{IRODORI_IMPLEMENTATION_LICENSE}** as well;",
         "  Karume's runtime contains none of that code — it is an independent implementation that",
         "  reads these weights from its own container format.",
         f"- **Text backbone**: fine-tuned from"
         f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
         *_irodori_backbone_lines(model),
         f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
-        " licensed **MIT**",
+        f" licensed **{IRODORI_CODEC_MODEL_LICENSE}**",
         *_irodori_codec_lines(model),
-        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
-        "  the Apache License 2.0 text is included in `LICENSE.md` for the codec components.",
+        f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
+        f" {IRODORI_CODEC_PARENT_MODEL};",
+        "  a verbatim copy of that license is in `LICENSE.md` for the codec components.",
         "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
         "  as `f32` / `f16` / `i8` series, and the DiT (`dit` / `dit_context`) adds an `i4` series",
@@ -678,7 +691,7 @@ def _irodori_large_base_weights(
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
         f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},",
-        f"  tagged `license: {IRODORI_LARGE_LICENSE}` (as of retrieval). Upstream's model card"
+        f"  licensed **{IRODORI_LARGE_LICENSE}** (as of retrieval). Upstream's model card"
         " states that the model is",
         f"  subject to the [Gemma Terms of Use]({GEMMA_TERMS_URL}) because its shared text /"
         " caption encoder is",
@@ -690,7 +703,8 @@ def _irodori_large_base_weights(
         "  as well as the additional ethical restrictions listed on that model card. Both Gemma",
         "  texts are included in `LICENSE.md`, and the notice upstream ships with the model is in",
         "  `NOTICE.md`. The training / inference implementation it comes with",
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT;",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
+        f" **{IRODORI_IMPLEMENTATION_LICENSE}**;",
         "  Karume's runtime contains none of that code — it is an independent implementation that",
         "  reads these weights from its own container format.",
         "- **Text encoder**: the `backbone` component is the checkpoint's fine-tuned text encoder",
@@ -699,14 +713,14 @@ def _irodori_large_base_weights(
         "  format; the tokenizer asset is upstream's tokenizer of the same model, converted into",
         "  Karume's tokenizer format.",
         f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
-        " licensed **MIT**",
+        f" licensed **{IRODORI_CODEC_MODEL_LICENSE}**",
         _irodori_large_codec_line(model),
         "  the `codec_decoder` / `codec_encoder` components so that text-to-audio runs from this",
         "  distribution. Its weights derive from"
         f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
-        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
-        "  the MIT and Apache License 2.0 texts are included in `LICENSE.md` for the codec",
-        "  components.",
+        f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
+        f" {IRODORI_CODEC_PARENT_MODEL};",
+        "  verbatim copies of both licenses are in `LICENSE.md` for the codec components.",
         "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
         f"  container format and **quantization** of the weights — {series}",
         f"  (the quant table below says which storage each quant {selects}).",

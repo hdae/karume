@@ -36,9 +36,11 @@ from anima.card import (
     ANIMA_2_9B_TITLE,
     ANIMA_2_9B_UPSTREAM_DESCRIPTION,
     ANIMA_EXTRA_TITLE,
+    ANIMA_METADATA,
     ANIMA_OFFICIAL_TITLE,
     ATTRIBUTION_NOTICE,
     EXTRA_ORIGINS_INTRO,
+    NVIDIA_LICENSE_NAME,
     NVIDIA_NOTICE,
     OFFICIAL_ORIGINS_INTRO,
     RIGHTS_GRANT_STATEMENT,
@@ -379,8 +381,8 @@ class TestOfficialCard:
         flat = " ".join(section.split())
         assert "(the full license text)" not in flat
         assert (
-            "`LICENSE.md` (the full text of that license, followed by the NVIDIA Open Model"
-            " License Agreement)" in flat
+            "`LICENSE.md` (the full text of that license, followed by the text of"
+            f" **{NVIDIA_LICENSE_NAME}**)" in flat
         )
 
     def test_it_states_that_the_outputs_stay_the_users_own(self, card: str) -> None:
@@ -414,7 +416,8 @@ class TestOfficialCard:
         flat = " ".join(section.split())
         title = LICENSE_SOURCE_PATH.read_text(encoding="utf-8").splitlines()[0]
         assert title == "CircleStone Labs Non-Commercial License v1.2"
-        assert f"{title} (non-commercial use only)" in flat
+        version = title.rsplit(" ", 1)[1]
+        assert f"**{ANIMA_METADATA.license_name}** {version} (non-commercial use only)" in flat
 
     def test_the_license_section_denies_any_official_standing(self, card: str) -> None:
         """§3(d)(iii) — must not be mistaken for an official or endorsed product (checked as **a

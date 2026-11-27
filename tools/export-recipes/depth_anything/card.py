@@ -180,8 +180,8 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " `LICENSE.md`)."
         )
     lines += [
-        "- **Only the Small checkpoint is Apache-2.0.** Upstream ships Base and Large under"
-        " **CC BY-NC 4.0**, so they are not converted or redistributed here.",
+        "- **Only the Small checkpoint is redistributed**: upstream licenses Base and Large"
+        " **cc-by-nc-4.0**, so they are not converted or redistributed here.",
         "- **Training data**: see the upstream model card. Depth Anything V2 is distilled from a",
         "  teacher trained on synthetic data and then trained on pseudo-labelled real images —",
         "  check the upstream sources against your own use case.",

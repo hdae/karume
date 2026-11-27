@@ -588,7 +588,8 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = EMBEDDINGGEMMA2_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed **Apache 2.0**"
+            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+            f" **{EMBEDDINGGEMMA2_LICENSE}**"
             f" ([full text]({EMBEDDINGGEMMA2_LICENSE_TEXT_LINK}); a verbatim copy is in"
             " `LICENSE.md`)."
         )

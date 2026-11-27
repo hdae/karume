@@ -182,14 +182,15 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     # 08:08:02, `inputs/sbv2/{F1,F2,M1,M2}`). Checked against the files on 2026-09-25).
     source_revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
     attribution=(
-        f"- **Terms**: **[CC BY-SA 4.0]({SBV2_JVNV_LICENSE_URL})**, inherited from the JVNV"
-        " corpus the",
+        f"- **Terms**: licensed **{SBV2_JVNV_METADATA.license}** ([legal code]"
+        f"({SBV2_JVNV_LICENSE_URL})), inherited from the JVNV corpus the",
         "  voices were trained on — the source repository states the corpus license carries over",
         "  to the models. Redistribution here keeps it: credit the authors, name the source and",
         "  the license URL, state that the weights were **converted to another format and"
         " quantized**",
         "  (the next bullet lists every change),",
-        "  license any derivative work under CC BY-SA 4.0 as well, and impose no further",
+        f"  license any derivative work under **{SBV2_JVNV_METADATA.license}** as well, and impose"
+        " no further",
         "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
         "  and modification are both allowed.",
         "- **Changes made here**: conversion into the Karume container format, **truncation of the",
@@ -205,7 +206,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
         "  in the container format as the `text_encoder` component — the same license as the",
         "  voices, so the share-alike term is consistent across everything in this repository.",
-        "- **Training data**: the JVNV corpus, licensed CC BY-SA 4.0. Detai Xin, Junfeng Jiang,",
+        f"- **Training data**: the JVNV corpus, licensed **{SBV2_JVNV_METADATA.license}**. Detai"
+        " Xin, Junfeng Jiang,",
         "  Shinnosuke Takamichi, Yuki Saito, Akiko Aizawa, Hiroshi Saruwatari,",
         # The paper title stays on one line (if wrapped, a search for the title would miss it even
         # though it is in the text).
@@ -215,7 +217,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         f"  <{SBV2_JVNV_CORPUS_PAGE}>",
         "- **Training implementation**:"
         " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
-        "  (AGPL-3.0). Karume is a separate implementation and does not contain the original",
+        "  (licensed **agpl-3.0**). Karume is a separate implementation and does not contain the"
+        " original",
         "  implementation.",
     ),
 )

@@ -1916,10 +1916,10 @@ The codec's weights derive from
 [`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
 licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
 that it was derived from
-[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
-itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The Apache License 2.0 text is included in
-`LICENSE.md` and covers the codec components ({_IRODORI_CODEC_COMPONENTS}); the changes made to
-them are listed below.
+[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (licensed
+under the MIT License), itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The text of the
+Apache License, Version 2.0 is included in `LICENSE.md` and covers the codec components
+({_IRODORI_CODEC_COMPONENTS}); the changes made to them are listed below.
 
 The following changes were made:
 
@@ -2143,10 +2143,10 @@ weights derive from
 [`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
 licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
 that it was derived from
-[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
-itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The MIT License and Apache License 2.0
-texts are included in `LICENSE.md` and cover the codec components; the changes made to them are
-listed below.
+[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (licensed
+under the MIT License), itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The texts of the MIT
+License and the Apache License, Version 2.0 are included in `LICENSE.md` and cover the codec
+components; the changes made to them are listed below.
 
 The following changes were made:
 

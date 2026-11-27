@@ -267,7 +267,7 @@ class TestWhatTheCardSays:
     def test_it_names_the_apache_license(self) -> None:
         card = _render()
         assert "license: apache-2.0" in card
-        assert "licensed **Apache 2.0**" in card
+        assert "licensed **apache-2.0**" in card
         assert "a verbatim copy is in `LICENSE.md`" in card
 
     def test_it_quotes_upstreams_sentence_on_the_use_policy_with_its_link(self) -> None:

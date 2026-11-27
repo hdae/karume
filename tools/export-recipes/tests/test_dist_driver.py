@@ -710,6 +710,62 @@ def _root_files(pipeline: str, models: list[str]) -> Mapping[str, str]:
     return root_files(models) if root_files is not None else dist.PIPELINES[pipeline].root_files
 
 
+def _prose(card: str) -> str:
+    """The card's text outside code fences and blockquotes (what the recipe says in its own words),
+    runs of whitespace as one space."""
+    lines = []
+    fenced = False
+    for line in card.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and not line.lstrip().startswith(">"):
+            lines.append(line)
+    return " ".join(" ".join(lines).split())
+
+
+#: "licensed X" in a card's own words, but for "licensed by" (the licensor of a notice).
+_LICENSED = re.compile(r"\blicensed (?!by\b)(\S+)")
+
+#: An HF license identifier in bold, as a card writes it (`**apache-2.0**`), with its punctuation.
+_BOLD_LICENSE_ID = re.compile(r"\*\*[a-z0-9][a-z0-9.-]*\*\*[,.;:)]*")
+
+#: What a notice does not call a license: its short names (the notice names a license by its full
+#: title — docs/spec/distribution-cards.md#noticemd).
+_SHORT_LICENSE_NAMES = (
+    "Apache 2.0",
+    "Apache-2.0",
+    "Apache License 2.0",
+    "CC BY-SA 4.0",
+    "(MIT)",
+    "CC-BY",
+)
+
+
+class TestTheLicenseNamesOfEveryPublishedRepository:
+    """docs/spec/distribution-cards.md#license-statements — a card names a license by its HF
+    identifier in bold, a notice by its full title."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_every_license_a_card_states_is_its_hf_identifier_in_bold(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        named = [match.group(1) for match in _LICENSED.finditer(_prose(card))]
+        other = [name for name in named if not _BOLD_LICENSE_ID.fullmatch(name)]
+
+        assert named
+        # The Gemma 4 cards write "licensed **Apache 2.0**" until their stage.
+        assert bool(other) is (directory in GEMMA4_REPOSITORIES), other
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_a_notice_calls_no_license_by_a_short_name(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        notice = _root_files(pipeline, models)[NOTICE_FILENAME]
+
+        assert [name for name in _SHORT_LICENSE_NAMES if name in notice] == []
+
+
 #: The three Anima repositories, whose notice follows the CircleStone license's layout.
 ANIMA_REPOSITORIES = frozenset({"karume-anima", "karume-anima-extra", "karume-anima-2.9b"})
 

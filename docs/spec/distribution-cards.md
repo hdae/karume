@@ -126,16 +126,12 @@ The level-2 sections come in this order:
 ### License statements
 
 - The card names `LICENSE.md` and `NOTICE.md`, except `karume-sbv2-jvnv`'s, which names neither.
-- How the attribution section names an upstream's license differs:
-
-  | Repositories | Form |
-  | --- | --- |
-  | `karume-depth-anything-v2`, `karume-siglip2`, `karume-moss-image`, `karume-umt5-xxl`, `karume-wan2.2`, `karume-birefnet-hr`, `karume-lucida` | the HF identifier in bold: "licensed **apache-2.0**", "licensed **mit**" |
-  | `karume-gemma4`, `karume-gemma4-qat`, `karume-gemma4-qat-mobile`, `karume-embeddinggemma-2` | "licensed **Apache 2.0**" with the license page and the text linked |
-  | the four Irodori repositories | "licensed **MIT**", "licensed **Apache-2.0**" |
-  | `karume-sbv2-jvnv` | the voices: "**[CC BY-SA 4.0](…)**"; the text encoder: "licensed **cc-by-sa-4.0**" |
-  | the three Anima repositories | the CircleStone license named in prose under `## License` |
-
+- A card names every license it states by its HF identifier in bold: "licensed **apache-2.0**", "licensed **mit**",
+  "licensed **cc-by-sa-4.0**", "licensed **gemma**", and for a custom license (`license: other`) its `license_name`,
+  "licensed **circlestone-labs-non-commercial-license**". It refers to a text in `LICENSE.md` as a verbatim copy,
+  not by the text's title. Two kinds of words keep a license's own name: a clause the card cites ("per Apache 2.0
+  §4(b)", "license §2(e)") and a notice the card shows in a license's own words (Anima's). The three Gemma 4 cards
+  are the exception: they write "licensed **Apache 2.0**", with the license page and the text linked.
 - Sixteen cards (all but the three Anima ones) carry a "**Changes made here**" bullet in the attribution section
   summarising the changes. Its pointer differs: "(also listed in `NOTICE.md`…)" on eleven cards, "(listed in full in
   `NOTICE.md`…)" on `karume-gemma4-qat-mobile`, `karume-moss-image`, `karume-umt5-xxl` and `karume-wan2.2`, none on
@@ -183,6 +179,8 @@ The level-2 sections come in this order:
   "The following changes were made:" and a
   bullet list; then a closing paragraph beginning "No retraining and no fine-tuning were performed." that says the
   original checkpoint is not distributed here.
+- Every license a notice names is named by its full title, never by a short name ("Apache 2.0", "CC BY-SA 4.0",
+  "(MIT)").
 - Statements a license or an upstream requires in its own words stand before the change list or after the closing
   paragraph, verbatim: the Gemma `NOTICE` line first in `karume-irodori-v4-large`, the Black Forest Labs
   non-endorsement in `karume-moss-image`, the share-alike statement after the closing in `karume-sbv2-jvnv`, the
