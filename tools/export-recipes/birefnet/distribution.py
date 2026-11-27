@@ -770,6 +770,7 @@ BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
 #: shipping. The per-preset storage description (`{storage}`) is built from the same single place as
 #: the card's attribution section (`birefnet.card.birefnet_storage_lines`), from that checkpoint's
 #: presets ({@link birefnet_seat_dtypes}) and storage.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under

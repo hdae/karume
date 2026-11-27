@@ -1,5 +1,7 @@
 """The model card (`README.md`) of the Anima distribution — pure functions over the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The generic rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. This module holds only **Anima-specific facts**: attribution (base model,
 licence, the origin of baked-in LoRAs) and what this pipeline's card says.

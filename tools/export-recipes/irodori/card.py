@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the Irodori distribution — pure functions derived from the
 manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
 live in `karume.modelcard`. This module holds only **facts specific to Irodori**: attribution (where
 the weights come from, the bundled codec and text backbone, the licenses) and what this pipeline's

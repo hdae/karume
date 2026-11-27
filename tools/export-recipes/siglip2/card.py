@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the SigLIP2 distribution — a pure function derived mechanically from
 the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. This module holds only **facts specific to SigLIP2**: attribution (source,
 license, citation) and what this pipeline's card says.

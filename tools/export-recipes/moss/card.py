@@ -1,5 +1,7 @@
 """The model card (`README.md`) of the MOSS-Image distribution — a pure function of the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The generic rendering parts (front matter, the model list, the quant table, the section assembly)
 are `karume.modelcard`'s. This module holds what is specific to MOSS-Image: the attribution
 (upstream, pinned revision, licence, the VAE's origin) and what the card of this pipeline says.

@@ -418,6 +418,7 @@ def depth_anything_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: has shipped. The measured width of the ConvTranspose replacement is not hard-coded but taken
 #: from the card's spelling ({@link depth_anything.card.DEPTH_ANYTHING_CONVT_DIFF}) (the body and
 #: the card do not state different numbers).
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 DEPTH_ANYTHING_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the Depth Anything V2 checkpoint listed in

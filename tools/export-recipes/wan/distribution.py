@@ -533,6 +533,7 @@ WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: MUST: the text matches the contents of the distribution — as values it is plausible prose, so
 #: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
 #: shipping.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 WAN22_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in

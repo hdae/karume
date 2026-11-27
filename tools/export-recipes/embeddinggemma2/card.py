@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the EmbeddingGemma 2 distribution — a pure function derived by
 machine from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the
 sections) live in `karume.modelcard`. What lives here is **the facts specific to EmbeddingGemma 2**
 only: attribution (source, license) and what this pipeline's card says.

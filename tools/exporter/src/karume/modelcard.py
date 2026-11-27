@@ -1,6 +1,8 @@
 """**Generic rendering components** of the distribution's model card (`README.md`) — pure
 functions derived mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 HF reads the YAML frontmatter of `README.md` as the model's machine-readable metadata (the last
 piece of ADR 0037 §3's "a form that can be uploaded as an HF repository as is"). Licence and
 provenance are by decision not written into the manifest (ADR 0038 §6), so that responsibility
@@ -79,6 +81,7 @@ _SHA_DIGITS = 16
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
 
 
+# SPEC: docs/spec/distribution-cards.md#front-matter
 @dataclass(frozen=True)
 class CardMetadata:
     """**Facts not in the manifest** that go into the frontmatter (the area ADR 0038 §6 took out
@@ -117,6 +120,7 @@ class CardMetadata:
 #: search must not take it for the upstream's own release. {@link introduction} fills it in.
 #: A sentence an upstream licence requires in its own words (anima's, MOSS-Image's) is kept as it
 #: is, beside this one — this sentence does not stand in for a licence clause.
+#: SPEC: docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence
 UNOFFICIAL_CONVERSION_NOTICE = (
     "This is an unofficial conversion of {upstream} for Karume."
     " It is not affiliated with or endorsed by {author}."
@@ -288,6 +292,7 @@ def _base_model(base_models: Sequence[str]) -> list[str]:
     return ["base_model:", *(f"  - {model}" for model in base_models)]
 
 
+# SPEC: docs/spec/distribution-cards.md#front-matter
 def frontmatter(metadata: CardMetadata) -> list[str]:
     return [
         "---",
@@ -308,6 +313,7 @@ def frontmatter(metadata: CardMetadata) -> list[str]:
     ]
 
 
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
 def models(manifest: Mapping[str, Any]) -> list[str]:
     """The list of models the repository carries (the axis that first became machine-readable in
     v2 — ADR 0041 decision 2)."""
@@ -424,6 +430,7 @@ def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[
     }
 
 
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
 def quants(
     model: Mapping[str, Any],
     *,
@@ -494,6 +501,7 @@ def quants(
             "A path under `shared/` is one this model shares byte for byte with another model in"
             " this repository (it is fetched and cached once)."
         )
+    # SPEC: docs/spec/distribution-cards.md#naming-and-pinning-an-upstream
     for repo, revision in _borrowed(refs):
         lines.append(
             f"Some components are fetched from [`{repo}`](https://huggingface.co/{repo}) at commit"
@@ -511,6 +519,7 @@ def quants(
 #: reader who did not pin breaks one day without warning — the pin is placed, commented out,
 #: **right next to** the default line, so removing the comment is all it takes (splitting the
 #: sample in two would make it unclear which one is recommended).
+#: SPEC: docs/spec/distribution-cards.md#usage
 REVISION_PIN_COMMENT: tuple[str, ...] = (
     "  // Pin a commit for reproducible builds — without it you track `main`, and a future",
     "  // repo update (renamed files, new manifest format) may break your app.",
@@ -565,6 +574,7 @@ def render(sections: Sequence[Sequence[str]]) -> str:
     return "\n".join(line for section in sections for line in section) + "\n"
 
 
+# SPEC: docs/spec/distribution-cards.md#sections-and-their-order
 def model_sections(
     manifest: Mapping[str, Any],
     per_model: Sequence[ModelSection],

@@ -1,6 +1,8 @@
 """License texts bundled at the root of a distribution repository (the `LICENSE.md` of
 `karume.dist.Pipeline.root_files`).
 
+SPEC: docs/spec/distribution-cards.md#licensemd
+
 ADR [0092](../../../../docs/decisions/0092-distribution-repos-and-sources.md) decision 7 —
 Apache-2.0 puts "the full text + the §4(b) modification notice", MIT "the full text + the
 copyright lines" and CC BY-SA 4.0 "the legal code + the §3(a) attribution and modification

@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the SBV2 distribution — a pure function derived mechanically from
 the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The generic rendering pieces (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. This module holds only **the facts specific to SBV2**: attribution (where the
 voices come from, licenses, citations, the redistributed text encoder) and what the card of this

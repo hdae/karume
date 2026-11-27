@@ -400,6 +400,7 @@ def siglip2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: {@link siglip2.card.SIGLIP2_MAP_HEAD_NORM} — `siglip2.measurements` is the source of truth for
 #: both the number and the format). The size of the difference can only be read as a ratio to the
 #: scale (the L2 norm), so both enter through the same path.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 SIGLIP2_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the SigLIP2 checkpoints listed in `README.md`,

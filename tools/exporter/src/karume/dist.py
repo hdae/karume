@@ -163,6 +163,7 @@ SHARED_DIRNAME = "shared"
 #: as relative paths rather than names so that a same-named file slipped into a subdirectory is
 #: not overlooked. **Their presence is not required** ({@link verify_dist} runs **before** the
 #: model card is written, so it must pass without them).
+#: SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
 #: Location of the modification notice (at the distribution repository's root). The container's
@@ -180,6 +181,7 @@ LICENSE_FILENAME = "LICENSE.md"
 #: to bring arbitrary files to the root" (a type cannot say whether something is legal text). Like
 #: {@link META_PATHS}, **their presence is not required** (only pipelines that need them pass
 #: them).
+#: SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
 LEGAL_PATHS = frozenset({LICENSE_FILENAME, NOTICE_FILENAME})
 
 #: Size limits (ADR 0041 decision 7). The hub rejects with the same values, so **the writing side

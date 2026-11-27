@@ -213,6 +213,7 @@ CONTAINER_MODIFICATION = (
 )
 
 
+# SPEC: docs/spec/distribution-cards.md#noticemd
 def notice_markdown(modifications: tuple[str, ...]) -> str:
     """`NOTICE.md` at the root of the distribution repository.
 
@@ -1498,6 +1499,7 @@ def assert_output_keeps_mirrors(
         )
 
 
+# SPEC: docs/spec/distribution-cards.md#licensemd
 def license_markdown() -> str:
     """`LICENSE.md` — the CircleStone license, then the NVIDIA Open Model License Agreement.
 

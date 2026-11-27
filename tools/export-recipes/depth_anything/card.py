@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the Depth Anything V2 distribution — a pure function derived
 mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live
 in `karume.modelcard`. This module holds only **facts specific to Depth Anything V2**: the
 attribution (source, licence, citation) and what this pipeline's card says.

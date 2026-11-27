@@ -500,6 +500,7 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: 2026-10-04 (research `2026-10-04-umt5-upstream-provenance` §2.1 — the checked commit is named;
 #: moving Wan's pin does not change the checked fact). The "rejected inputs" of the tokenizer item
 #: come from the docstring of `wan.umt5_xxl_tokenizer` (measured 2026-10-15).
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 UMT5_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
@@ -774,6 +775,7 @@ def _umt5_limits(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+# SPEC: docs/spec/distribution-cards.md#the-model-card
 def render_umt5_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:

@@ -1329,6 +1329,7 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
 #: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_GRAPH_SERIES}), this
 #: text changes with it.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = (
     """# NOTICE
 

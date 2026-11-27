@@ -186,6 +186,7 @@ OUTPUT_CHECKS: Mapping[str, Callable[[Path, Sequence[str]], None]] = {
 #: texts depend on the models built: `Pipeline.root_files` is one fixed set and the core does not
 #: pass it the models, so {@link main} replaces it with this result once the models are resolved
 #: (a build of E2B alone must not carry a NOTICE that names the E4B drafter).
+#: SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
 ROOT_FILES: Mapping[str, Callable[[Sequence[str]], Mapping[str, str]]] = {
     "gemma4": gemma4_distribution.gemma4_root_files,
 }

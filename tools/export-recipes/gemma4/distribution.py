@@ -2077,6 +2077,7 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 
 #: The modification notice's opening and its list of the changes to the main models (Apache 2.0
 #: §4(b)); {@link gemma4_notice_markdown} adds the drafter paragraph of the models built.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 _GEMMA4_NOTICE_HEAD = """# NOTICE
 
 This repository redistributes modified forms of `google/gemma-4-E2B-it` and
@@ -2487,6 +2488,7 @@ def _qat_q4_0_notice_sources() -> str:
 #: The line's modification notice (Apache 2.0 §4(b)). MUST: the text matches the distribution's
 #: content ({@link gemma4_notice_markdown}'s MUST — valid prose passes every machine check), and
 #: it names every upstream of the line's attribution tables (built from them — tests).
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN = (
     """# NOTICE
 

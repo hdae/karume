@@ -209,6 +209,7 @@ def assert_upstream_provenance(container: Path, *, license: str, revision: str |
 #:
 #: MUST: an account missing here fails the card ({@link hf_upstreams}) — adding an upstream means
 #: stating who published it, never a placeholder.
+#: SPEC: docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence
 UPSTREAM_AUTHORS: Mapping[str, str] = {
     # anima — the licensor in the CircleStone licence's attribution notice.
     "circlestone-labs": "CircleStone Labs LLC",

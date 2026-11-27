@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the BiRefNet family distributions — a pure function derived
 mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. What lives here is **only the facts specific to the BiRefNet family**: the
 attribution (origin, license, citation, training data) and what this pipeline's card says.

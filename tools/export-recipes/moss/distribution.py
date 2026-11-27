@@ -249,6 +249,7 @@ MOSS_PIPELINE_CONFIG: Mapping[str, Any] = {
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 MOSS_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the MOSS-Image-SFT checkpoint listed in

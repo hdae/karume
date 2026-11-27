@@ -1096,6 +1096,7 @@ def _owner(repo: str) -> str:
 #: NOTE: neither upstream repository ships a copyright notice (only HF metadata and a README), so
 #: there is no "copyright notice to retain" under §3(a)(1)(A)(ii). The authors are shown by the
 #: namespaces upstream uses.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 SBV2_JVNV_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes modified forms of two works licensed under the Creative Commons

@@ -393,6 +393,7 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+# SPEC: docs/spec/distribution-cards.md#the-model-card
 def render_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
@@ -451,6 +452,7 @@ def render_card(
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 NOTICE = (
     """# NOTICE
 

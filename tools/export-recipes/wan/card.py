@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the Wan distribution — pure functions derived mechanically from
 the manifest (Wan2.2 TI2V 5B).
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
 live in `karume.modelcard`. This module owns only **the facts of each Wan generation**: attribution
 (provenance, pinned revision, license) and what this pipeline's card says (the fixed prompts of

@@ -1898,6 +1898,7 @@ _IRODORI_CODEC_CHANGES = """\
 - Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
   the codec's Snake activations, were precomputed and stored as constants."""
 
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
 
 This distribution is a modified form of the Irodori-TTS checkpoint listed in `README.md` and
@@ -1934,6 +1935,7 @@ No retraining and no fine-tuning were performed. The original checkpoints are no
 """
 
 
+# SPEC: docs/spec/distribution-cards.md#licensemd
 def irodori_license_markdown() -> str:
     """`LICENSE.md` — the MIT (all components) and Apache 2.0 (the 2 codec components) texts side
     by side in one file.
@@ -2029,6 +2031,7 @@ def gemma_notice() -> str:
 IRODORI_LARGE_COPYRIGHTS: tuple[str, ...] = (IRODORI_COPYRIGHTS[0],)
 
 
+# SPEC: docs/spec/distribution-cards.md#licensemd
 def irodori_large_license_markdown() -> str:
     """`LICENSE.md` of the v4-Large line — the Gemma Terms of Use and the Gemma Prohibited Use
     Policy it incorporates (the checkpoint's terms), then the MIT and Apache 2.0 texts of the codec
@@ -2121,6 +2124,7 @@ def _irodori_large_codec_holder() -> str:
 #: publication. As in {@link IRODORI_NOTICE_MARKDOWN}, the model's upstream repository is not named
 #: (`root_files` is fixed per Pipeline; the card names it from the manifest), and the components
 #: are spelled from the weights declarations.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 IRODORI_LARGE_NOTICE_MARKDOWN = f"""# NOTICE
 
 {gemma_notice()}
