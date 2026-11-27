@@ -262,15 +262,18 @@ The attention follows upstream's masks with the block on sliding layers only, no
 
 ## Gemma 4 26B A4B: every expert resident, a 16 GB GPU with about 0.8 GB to spare
 
-26B A4B ships text only, without a drafter (so `speculative` is refused) and without its vision tower (ADR
-[0145](decisions/0145-gemma4-26b-moe-resident.md) decision 1). All 128 experts of every layer stay in VRAM: the text weights are
+26B A4B ships text only, with its QAT MTP drafter and without its vision tower (ADR
+[0145](decisions/0145-gemma4-26b-moe-resident.md) decision 1; the published repository carries the drafter from its next
+upload). `speculative` needs every expert resident: the pipeline refuses it with `expertCache`. The drafter is not yet measured in a browser: the VRAM headroom it leaves on a 16 GB GPU
+and its acceptance are open. All 128 experts of every layer stay in VRAM: the text weights are
 13.4 GiB, and the browser needs about 14.3 GB of CacheStorage quota for one origin.
 
 - **Memory**: in Chrome on the RTX 5070 Ti (16 GB) the model at capacity 4096 used about 14.1 GB of dedicated GPU memory (the
   maintainer's reading of 2026-11-08), leaving about 0.8 GB. A larger capacity, or another tab using the GPU, can go past it. Dawn
   on D3D12 pages heaps over PCIe past its budget instead of failing an allocation (from Dawn's code, not observed), so a model that
   does not fit gets slow instead of stopping, and `capacity: "fit"` and the headroom check may report a fit there; the manifest
-  keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`.
+  keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`. The reading is without the drafter, whose
+  weights come on top.
 - **Prefill**: `expert_linear` runs each of a chunk's T × 8 rows on its own expert's weights; for the long rows of gate_up
   the rows that picked one expert share the walk of its weight row (the grouped form), still with one multiply-add per row
   and element, and the down projection has no grouping of rows by expert. 26B's dense parts have neither the RMS→add

@@ -69,6 +69,11 @@ measurements in `docs/research/`.
   case with `explore` unless `idleSeconds` is given (10 s with the other sets, and in `geometry-sweep`): on an RTX
   3080 Ti two explore runs without idle time took a third less time, and the derivation from them differed from that of
   two runs with 10 s on 28 of 216 decisions, where two pairs each mixing one run of either kind differed on 30.
+- `karume-gemma4-qat` (Gemma 4 26B A4B, recipe only — the repository on Hugging Face carries it from the next
+  upload): 26B ships Google's QAT MTP drafter (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`, its
+  weights on their own int4 grid, borrowing 26B's key/value states and embedding table) as its `drafter` role, so
+  `speculative` works with every expert resident; `expertCache` still refuses `speculative`. The speed sentence of
+  26B's `i4-fast` now says it is of the decode without the drafter.
 
 ### Changed
 
@@ -87,6 +92,10 @@ measurements in `docs/research/`.
   time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
   record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
   needs the field).
+- `@karume/runtime/tune`: the GEMV sweep's case table has the two shapes of 26B A4B's QAT MTP drafter that 12B's
+  drafter does not share — `pre_projection` (i4 g32, n 1024, k 5632) and `post_projection` (n 2816, k 1024) —, 118
+  cases in all (was 116). The drafter's other shapes are 12B's drafter's cases, now labelled for both. The `explore`
+  set's twelve sentinels stay the same cases.
 
 ## [0.24.0] - 2026-11-25
 

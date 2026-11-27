@@ -395,6 +395,27 @@ describe("the drafter switch", () => {
     ).toBe(true);
   });
 
+  it("takes the drafter on 26B A4B, whose manifest entry declares one, with every expert resident (the bench passes no expert cache, which refuses speculative)", () => {
+    const qat = { "gemma4-qat": parseManifest(QAT_WITH_DRAFTERS) };
+    const arm = armOf(
+      resolveArm({ key: { mount: "gemma4-qat", model: "26b" }, tap: true, drafter: true }, qat),
+    );
+    expect(arm.drafter).toBe(true);
+    expect(arm).not.toHaveProperty("pipeline");
+    expect(arm).not.toHaveProperty("expertCache");
+    // Control: the same model in the mirror before its drafter is still refused by its manifest
+    expect(
+      resolveArm(
+        { key: { mount: "gemma4-qat", model: "26b" }, tap: true, drafter: true },
+        { "gemma4-qat": parseManifest(QAT) },
+      ),
+    ).toEqual({
+      ok: false,
+      error:
+        "The gemma4-qat model '26b' ships no MTP drafter (its manifest entry declares no 'drafter' weights).",
+    });
+  });
+
   it("is named in the label after the preset", () => {
     expect(
       armLabel({ mount: "gemma4", model: "e2b", quant: "bf16", tap: true, drafter: true }),

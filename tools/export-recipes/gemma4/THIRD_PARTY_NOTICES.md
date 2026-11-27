@@ -53,8 +53,9 @@ check made on that date, and moving a pin needs the check again.
   `sources.py` pins (`REGULAR_DRAFTER_PINS`) by `export_drafter.py` and re-distributed as
   `e2b/drafter/` and `e4b/drafter/` of `karume-gemma4`.
 - **q4_0 QAT MTP drafter weights** — `google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant`,
-  `google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant` and
-  `google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` on Hugging Face, loaded from the HF cache at
+  `google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant`,
+  `google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` and
+  `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant` on Hugging Face, loaded from the HF cache at
   the commits `sources.py` pins (`QAT_DRAFTER_PINS`) by `export_drafter_qat.py` and re-distributed
   as `<model>/drafter/` of `karume-gemma4-qat`. Their tokenizer files are not read.
 - **Model implementation** — the `transformers` package (`Gemma4ForCausalLM`), added ad hoc with
@@ -237,6 +238,18 @@ is published, and checked again when its pin moves.
 | Weights license          | Apache 2.0 — HF API at this revision, 2026-11-04 (`/api/models/google/gemma-4-12B-it-qat-q4_0-unquantized-assistant/revision/18934064dd4c5c6cc3621f6381e7d377fc8cb7bd`): `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-12B-it-assistant`, `gated` false. Read again on 2026-11-26 in the `README.md` front matter of the HF cache snapshot at this revision: `license: apache-2.0`, the same `license_link`, `base_model` `google/gemma-4-12B-it-assistant`; the card's header reads "License: Apache 2.0", linked to that page. The snapshot holds no LICENSE or NOTICE file. The card of `karume-gemma4-qat` declares the same `license` and `license_link`. |
 | Attribution requirements | Apache 2.0 §4: `karume-gemma4-qat` bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`), which names this repository as 12B's drafter and lists the changes made (§4(b)); the card lists it in `base_model` and in its `12b` drafter attribution bullet. Checked on 2026-11-26 against the mirror `models/karume-gemma4-qat` (`LICENSE.md` byte-identical to the vendored text; `NOTICE.md`; `README.md`). The HF cache snapshot at this revision holds no NOTICE file. |
 | Published in             | `karume-gemma4-qat` (`hdae/karume-gemma4-qat`, first uploaded 2026-11-04 with 0.16.0; uploaded again 2026-11-20 with 0.23.0): `12b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. |
+
+### google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant (26B A4B q4_0 QAT MTP drafter)
+
+| Item                     | Value |
+| ------------------------ | ----- |
+| Upstream repository      | <https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant> |
+| Revision used            | `9537141506fe8875b3ed45b264af13580cb29166` — the hub-cache snapshot `sources.py` pins (`QAT_DRAFTER_PINS["26b"]`, in the cache on 2026-11-27), with the SHA-256 of `model.safetensors` and `config.json` at that revision. Checked offline on 2026-11-27: the snapshot links `model.safetensors` to the LFS blob `c082cc58…` (839,427,840 B), and the SHA-256 of the blob's bytes equals that name and the pin; the SHA-256 of `config.json`'s bytes equals the pin. The LFS oid the HF API reports at this revision: Unverified (not read — offline). |
+| Form of copy             | Loaded, not copied. To be re-distributed in converted storage form (`26b/drafter/` in `models/karume-gemma4-qat`): every drafter weight on the checkpoint's own 4-bit grid (int4, group 32); the output head is a dense projection over the full vocabulary, and the drafter reads the key/value states and the token embedding of its target (`export_drafter_qat.py` states what each one borrows). Its tokenizer and generation files are not read. |
+| Code license             | n/a (weights only) |
+| Weights license          | Apache 2.0 per the `README.md` front matter of the HF cache snapshot at this revision, read on 2026-11-27: `license: apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-26B-A4B-it-assistant`; the card's header reads "License: Apache 2.0", linked to that page. The snapshot holds `README.md`, `config.json`, `generation_config.json` and `model.safetensors` only — no LICENSE or NOTICE file. Unverified (needs the HF API, not read — offline): `cardData` at this revision, whether the repository is gated, and whether `main` still points at this revision. The card of `karume-gemma4-qat` declares the same `license` and `license_link`. |
+| Attribution requirements | Apache 2.0 §4: `karume-gemma4-qat` bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`), which names this repository as 26B A4B's drafter and lists the changes made (§4(b)); the card lists it in `base_model` and in its `26b` drafter attribution bullet. Not yet checked against a mirror: no mirror holds `26b/drafter/` yet. The HF cache snapshot at this revision holds no NOTICE file. |
+| Published in             | Not yet published. `karume-gemma4-qat` gains `26b/drafter/` with the next release (the maintainer's ruling of 2026-11-27); the HF API fields above are to be read before that upload. |
 
 ### transformers (model implementation)
 

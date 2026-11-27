@@ -2,6 +2,33 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "gemma4-26b-cut12+drafter/i4-fast/readme-exporter": {
+      "node-nvidia-geforce-rtx-3080-ti": "5abd9caf138efa231e254f9e72492d3e0ff3e0bab096be6f748feb0a10362256"
+    },
+    "gemma4-26b-cut12+drafter/i4-fast/readme-recipes": {
+      "node-nvidia-geforce-rtx-3080-ti": "4c0c837b3a4e3172d6054205127f7e5488a804c5a47a8f082012d0af98bd52c9"
+    },
+    "gemma4-26b-cut12+drafter/i4-fast/short-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "0944347c7a230097644825c3e4ea99de33f6363e47443276f0bfb60ea89c4e84"
+    },
+    "gemma4-26b-cut12+drafter/i4/readme-exporter": {
+      "node-nvidia-geforce-rtx-3080-ti": "5abd9caf138efa231e254f9e72492d3e0ff3e0bab096be6f748feb0a10362256"
+    },
+    "gemma4-26b-cut12+drafter/i4/readme-recipes": {
+      "node-nvidia-geforce-rtx-3080-ti": "4c0c837b3a4e3172d6054205127f7e5488a804c5a47a8f082012d0af98bd52c9"
+    },
+    "gemma4-26b-cut12+drafter/i4/short-en": {
+      "node-nvidia-geforce-rtx-3080-ti": "0944347c7a230097644825c3e4ea99de33f6363e47443276f0bfb60ea89c4e84"
+    },
+    "gemma4-26b-cut12-qat-drafter/readme-exporter/drafts": {
+      "node-nvidia-geforce-rtx-3080-ti": "46d4d3ba4a44087b9c3f38018c8cfc248c563d8bbe7a0e3e0182cf6aaf2056e7"
+    },
+    "gemma4-26b-cut12-qat-drafter/readme-recipes/drafts": {
+      "node-nvidia-geforce-rtx-3080-ti": "aeb6f71669a46ad1ee004cdb49df15bf81427cde260179791e4b6c8ef2ca240d"
+    },
+    "gemma4-26b-cut12-qat-drafter/short-en/drafts": {
+      "node-nvidia-geforce-rtx-3080-ti": "63e3f077858c3520f8dd20d85e0e93fd9d65503665e12fd962f78ae6ed5b1dca"
+    },
     "gemma4-26b-cut12/capital-en/hidden": {
       "node-nvidia-geforce-rtx-3080-ti": "d8f72a2632456df0a2a8285aa97d18092d4988b56beca6e1ec322c04f6a9a04c"
     },

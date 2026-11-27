@@ -47,9 +47,30 @@ maintainer's ruling of 2026-11-06).
    [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md), the grouped `expert_linear` is perf-ledger K-104. The
    cache is built even if slow (the maintainer's ruling of 2026-11-09: a model whose experts do not fit in VRAM becomes
    possible in principle). Left:
-   - the drafter of 26B (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`), with every expert resident
-     only: the expert cache keeps refusing `speculative`, and the two together are not planned (the maintainer's
-     ruling of 2026-11-27 — taken up later if needed). 26B's vision is in the `later` item "Vision on E2B / E4B";
+   - 26B's QAT MTP drafter (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`), which the recipe ships, with
+     every expert resident only: the expert cache keeps refusing `speculative`, and the two together are not planned
+     (the maintainer's ruling of 2026-11-27 — taken up later if needed). Left: the export's goldens, the distribution
+     rebuilt with it and its e2e, the run in Chrome on the RTX 5070 Ti (the VRAM headroom and the acceptance), and the
+     upload at the next release.
+     This machine checks the drafter on the 12-layer cut (`e2e_gemma4_26b_cut_drafter_test.ts`), where no draft is
+     accepted. When the mirror `models/karume-gemma4-qat` holds `26b/drafter`, these edits follow (each checked
+     against the staged distribution on 2026-11-27; no other test of the core and `models:gemma4` lanes, the
+     workbench or the playground changed outcome without a GPU):
+     - `e2e_gemma4_gemv_cases_test.ts`: `INTEGER_LINEARS` gains `"karume-gemma4-qat 26b drafter i4": 68` after the
+       26B model's row; `CASES_WITHOUT_A_GRAPH` loses `i4g32-n1024-k5632` and `i4g32-n2816-k1024` and the comment
+       above them; `SEQUENTIAL_AT_REORDER` gains, after the 12B drafter's row, `"karume-gemma4-qat 26b drafter i4":
+       ["i4 g32 1024×5632 ×3", "i4 g32 4096×1024 ×9", "i4 g32 8192×1024 ×27", "i4 g32 2816×1024 ×2",
+       "i4 g32 262144×1024 ×3"]`;
+     - `e2e_gemma4_qat_mirror_test.ts`: `MODELS` gains `"26b"` for ① and ②, and ③ – ⑤ loop over
+       `RESIDENT_MODELS = ["e2b", "e4b", "12b"]` (a 12 GB GPU does not hold 26B resident); `SEATS` gains
+       `"26b": [QUANT, "i4-fast"]`, `PRESENT` gains `"26b"`, and `SHAPES` gains `"26b"` with hidden 2816, no PLE,
+       product `gemma4-26b-product` and the slots `l28.k` / `l28.v` `[1, 8, 1032, 256]` and `l29.k` / `l29.v`
+       `[1, 2, C, 512]`; ① checks 26B's dialect `gemma4-unified` and no suppressed id; `ASSEMBLE` gains
+       `--model 26b`, and the header names 26B;
+     - `helpers/census-table.ts`: the 26B row's heading says, as 12B's does, that its drafter's rows are not derived
+       (no count changes); `helpers/gemma-mirror.ts`: the comment of `GEMMA4_QAT_MIRROR` names 26B A4B among the
+       models with their QAT drafters;
+   - 26B's vision: in the `later` item "Vision on E2B / E4B" (the maintainer's ruling of 2026-11-27);
    - the grouped `expert_linear` in a chat's decode in Chrome on the RTX 5070 Ti (its `kernel-check` identity passed
      there on 2026-11-19);
    - a depth sweep of self-speculation in Chrome (the Node sweep is research 2026-11-10 §7);

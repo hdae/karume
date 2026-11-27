@@ -110,6 +110,7 @@ GEMMA4_QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant",
     "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant",
     "12b": "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant",
+    "26b": "google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant",
 }
 
 #: Models whose text decoder carries per-layer embeddings (PLE — container assets the host
@@ -720,6 +721,13 @@ def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
             "  each step stored as f16.",
         ]
     drafters = [name for name, _ in _qat_q4_0_drafters(manifest)]
+    # The runtime's expert cache refuses speculative decoding, so a model that ships both says the
+    # two options do not combine.
+    if [name for name in moe if name in drafters]:
+        lines += [
+            "  `speculative` cannot be combined with `expertCache`: the drafter runs only with",
+            "  every expert resident.",
+        ]
     if drafters:
         lines += [
             f"- **Speculative decoding**: {_spell_models(drafters)} also ship Google's QAT",

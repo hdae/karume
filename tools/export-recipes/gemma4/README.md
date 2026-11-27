@@ -48,7 +48,10 @@ attention and product contract. It is read as 12B is, from two pinned snapshots:
 `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized` (two shards and their index), the tokenizer, the
 chat template (12B's byte for byte, so the `gemma4-unified` dialect) and the generation defaults
 from `google/gemma-4-26B-A4B-it`, whose `tokenizer.json` is still the file from before the
-glitch-token fixes. It ships only in the q4_0 QAT line, without a drafter (later work).
+glitch-token fixes. It ships only in the q4_0 QAT line, with its QAT MTP drafter
+`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant` (`export_drafter_qat.py --model 26b`),
+which runs only with every expert resident (the runtime's expert cache refuses speculative
+decoding).
 
 The E2B checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
@@ -554,13 +557,13 @@ is faithful; it says nothing about how often a draft is accepted.
 
 ### The q4_0 QAT drafters (`export_drafter_qat.py`)
 
-`export_drafter_qat.py --model e2b|e4b|12b` writes the same borrower graph from Google's
+`export_drafter_qat.py --model e2b|e4b|12b|26b` writes the same borrower graph from Google's
 quantization-aware-trained assistants, `google/gemma-4-<model>-it-qat-q4_0-unquantized-assistant`,
 pinned in `sources.py` (`QAT_DRAFTER_PINS`). Google's model card: with a QAT target, the assistant
 must be a QAT checkpoint of the same precision, so each one pairs with its model's QAT target
 (`QAT_TARGET_PINS`) and borrows from that target's product series — `gemma4-e2b-qat-product` /
-`gemma4-e4b-qat-product`, and for 12B `gemma4-12b-product` (12B's only line is the QAT
-checkpoint). What differs from the regular drafter above:
+`gemma4-e4b-qat-product`, and for 12B and 26B `gemma4-12b-product` / `gemma4-26b-product` (their
+only line is the QAT checkpoint). What differs from the regular drafter above:
 
 - **every drafter weight is int4 group-32, imported from the checkpoint's own grid** — the 22
   linears and the head; every group of 32 of the three pinned assistants recovers its q4_0 grid
@@ -574,6 +577,19 @@ checkpoint). What differs from the regular drafter above:
   as E2B / E4B's class under another name), at 12B's widths: `hidden[1,3840]`, and the KV of the
   target's layers 46 (sliding: 8 heads in 1032 rows) and 47 (full: 1 head of width 512). It borrows
   nothing else from the target; its head is tied to its own `[262144, 1024]` table.
+- **26B's assistant is E2B / E4B's class at 12B's drafter shapes**, against the mixture-of-experts
+  target: `hidden[1,2816]`, the KV of the target's layers 28 (sliding: 8 heads in 1032 rows) and 29
+  (full: 2 heads of width 512), the table `model.lm_head.weight` `[262144, 2816]` borrowed from
+  `gemma4-26b-product`. The target's checkpoint is two shards and their index (the table is read
+  from the shard that holds it, and the record fingerprints both shards), and the goldens run
+  against `export_moe.py`'s own reference (its trace, its one grid import, each linear dequantised
+  at use and each picked expert from its packed bytes). Its drafter runs only with every expert
+  resident: the runtime's expert cache refuses speculative decoding.
+- **`--layers N` (26B only) writes a test-only drafter of the cut model**
+  (`gemma4-26b-cut<N>-qat-drafter`, lent by `gemma4-26b-cut<N>`): the target keeps its first N layers,
+  so the drafter reads the cut's last sliding and full layers (10 / 11 for N = 12) and its goldens
+  run against the cut's reference; the record names the depth. It lets this machine's 12 GB GPU
+  check the drafter's wiring and numbers; it is never shipped.
 
 E[a] at k = 3 — the mean accepted prefix, `tokens/cycle − 1` — over N = 200 cycles of one
 teacher-forced target trajectory per case, the checkpoint's BF16 drafter weights against the
@@ -593,6 +609,7 @@ on one sentence, which the drafter predicts easily; the two document cases conti
     outputs/series/gemma4-<model>-qat-drafter/model.krm                          the container
     outputs/series/gemma4-<model>-qat-drafter/drafter-golden.<case>.safetensors  expected drafts
     outputs/series/gemma4-<model>-qat-drafter/reference.json                     provenance
+    outputs/series/gemma4-26b-cut<N>-qat-drafter/                                a cut (test only)
 
 The q4_0 QAT line (`dist.py --pipeline gemma4-qat`) reads these series as its `drafter` role, which
 must hold int4 and may not hold int8 there; the regular line's drafter (`gemma4-e2b-drafter`) stays
@@ -717,6 +734,16 @@ uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
 The PLE scripts (`export.py`, `export_decode.py`, `export_token.py`, `export_product.py`) refuse
 `--model 12b` at the argument.
 
+26B's QAT drafter (the snapshot comes from `hf download
+google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant --revision <its pin in sources.py>`) borrows
+from `gemma4-26b-product`, and its test-only cut drafter from `gemma4-26b-cut12`, so those series
+have to exist first (`export_moe.py`, and `export_moe.py --layers`). Both run on the CPU:
+
+```sh
+uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 26b
+uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 26b --layers
+```
+
 Both fixture writers print the `vp fmt` command to run afterwards — the committed shape of a
 fixture is whatever the repository formatter produces (the format check of `vp check` checks it).
 
@@ -734,7 +761,7 @@ uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../mode
 # the same, staged outside models/ for the implementation-time checks of a new role (models/ holds
 # what Hugging Face holds — e2e_gemma4_e4b_drafter_test.ts reads this one)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../outputs/misc/local-dist/karume-gemma4
-# the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters, and 26B A4B) → models/karume-gemma4-qat/
+# the q4_0 QAT line (E2B / E4B / 12B / 26B A4B with their QAT drafters) → models/karume-gemma4-qat/
 uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b --model 26b --out ../../models/karume-gemma4-qat
 ```
 
@@ -756,10 +783,11 @@ the one bf16 exception of the line's storage gate (its weights are not on the 4-
 spellings of `tokenizer_config.json`) and `hiddenSize`. E2B and E4B have neither, and their entries
 are unchanged by 12B's presence.
 
-26B A4B ships in the same line with the `model` role alone: its entry reads `gemma4-26b-product` and
-its own `gemma4-26b-tokenizer`, declares the line's two quants (the routed experts keep their
-sequential order in each) and 12B's dialect, and has no drafter and no vision embedder, so a load
-that asks for `speculative` is refused at weights resolution. Its expert weights are the line's
+26B A4B ships in the same line with the `model` and `drafter` roles: its entry reads
+`gemma4-26b-product`, its QAT drafter `gemma4-26b-qat-drafter` and its own `gemma4-26b-tokenizer`,
+declares the line's two quants (the routed experts keep their sequential order in each) and 12B's
+dialect, and has no vision embedder. The drafter runs only with every expert resident: a load that
+asks for both `speculative` and `expertCache` is refused. Its expert weights are the line's
 one `i4f16` storage (the grid's codes with f16 steps — ADR
 [0145](../../../docs/decisions/0145-gemma4-26b-moe-resident.md)).
 
