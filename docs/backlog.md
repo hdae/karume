@@ -23,11 +23,12 @@ after this release is the `later` item "The model cards and notices across repos
     the ledgers checked on 2026-11-26 — `outputs/misc/ledger-check-2026-11-26/`; both untracked). The ledgers were
     brought up to date by the commits of 2026-11-26 (the Gemma 4 rows, the stale moss, gemma4_qat and deberta-against-sbv2
     lines, the in-place notice of `deberta/patch.py` and the Swin Transformer notice in the BiRefNet generator among
-    them). Left: the uploads, which the maintainer approved on 2026-11-26 and which are not done at the time of
-    writing — the two BiRefNet repositories with the Swin Transformer notice, and the repositories whose card and
-    notice disagree (Irodori's wording of what a repository stores, sbv2's 22-layer truncation missing from its card,
-    the regular Gemma 4 card's "Changes made here" leaving out the drafter's int8). The wording that differs between
-    families is in the `later` item "The model cards and notices across repositories".
+    them), and the corrected cards and notices were uploaded on 2026-11-26 on the maintainer's approval: the two
+    BiRefNet repositories, the four Irodori repositories, `karume-sbv2-jvnv` and `karume-gemma4`. Left: the package
+    pins still name the revisions before these uploads, and move at the next release. An Irodori `NOTICE.md` is one
+    text for the three repositories of the MIT line (the pipeline's root files are fixed), so it says where a
+    component is stored only through `README.md`. The wording that differs between families is in the `later` item
+    "The model cards and notices across repositories".
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
@@ -420,18 +421,14 @@ maintainer's ruling of 2026-11-06).
   `outputs/series/gemma4-e4b-drafter` (`google/gemma-4-E4B-it-assistant` at the pin of
   `gemma4.sources.REGULAR_DRAFTER_PINS`; its parity, two sha256 rows and
   `packages/e2e/tests/e2e_gemma4_e4b_drafter_test.ts`). Left:
-  - the upload of `karume-gemma4` with `e4b/drafter/` (approved by the maintainer on 2026-11-26), and at the next
-    release its pin in `gemma.SOURCES`;
+  - `karume-gemma4` was uploaded with `e4b/drafter/` on 2026-11-26; at the next release, its pin in `gemma.SOURCES`;
   - the drafter goldens into the test-asset dataset, and the e2e rooted at the mirror: extend
-    `e2e_gemma4_drafter_test.ts` to E4B, and flip `HAS_DRAFTER` in `e2e_gemma4_bf16_mirror_test.ts` when the mirror
-    gains the drafter;
+    `e2e_gemma4_drafter_test.ts` to E4B;
   - a fusion hit-count row for the E4B drafter, and the stale expectation of the series case in
     `e2e_gemma4_fusion_counts_test.ts` (`rmsNormAdd`; it fails under `KARUME_SERIES=1`);
   - an addendum to ADR [0096](decisions/0096-speculative-decoding.md), and the census rows;
   - `docs/limitations.md` and the comment of `tools/export-recipes/gemma4/distribution.py` still describe the E2B
     drafter only;
-  - the GEMV sweep's case table (`packages/runtime/src/tune/gemv-cases.ts`) lacks the E4B drafter's i8 `256 × 5120`
-    shape;
   - whether E4B's sentence on speed gains "without the drafter" (the maintainer's wording).
 - **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
   heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real

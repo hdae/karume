@@ -200,7 +200,7 @@ is published, and checked again when its pin moves.
 | Code license             | n/a (weights only) |
 | Weights license          | Apache 2.0 — read on 2026-11-26 in the `README.md` front matter of the HF cache snapshot at this revision: `license: apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`; the card's header reads "License: Apache 2.0", linked to that page. The snapshot holds no LICENSE or NOTICE file. |
 | Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-E2B-it-assistant`: the distribution's `LICENSE.md` / `NOTICE.md` bundle the license text and the statement of changes. Checked on 2026-11-26 against the generators: the `NOTICE.md` text (`gemma4.distribution.gemma4_notice_markdown`) names this repository as the drafter of `e4b` and states the int8 quantization of the drafters' weights, and the card (`card.py`) lists it in `base_model` and in its `e4b` drafter attribution bullet. The mirror `models/karume-gemma4` does not carry `e4b/drafter/` yet. |
-| Published in             | Not yet uploaded — built as the series `outputs/series/gemma4-e4b-drafter` (2026-11-26). |
+| Published in             | `karume-gemma4` (`hdae/karume-gemma4`), uploaded 2026-11-26: `e4b/drafter/`, and the attribution in its `README.md` and `NOTICE.md`. The package pins move to that revision at the next release. |
 
 ### google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant (E2B q4_0 QAT MTP drafter)
 
