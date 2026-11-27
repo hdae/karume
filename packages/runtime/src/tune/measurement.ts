@@ -55,6 +55,19 @@ export const ROUNDS = 5;
 export const WARM_START_MIN_NS = 1e9;
 
 /**
+ * Time under load a warm start spends at least (ns) when the device is already under load: the GEMV
+ * sweep's warm start of a row count that follows another row count of the same case, which timed a
+ * kernel right before it with no idle time between (the first row count of a case, after the idle
+ * time or the previous case, keeps {@link WARM_START_MIN_NS}). None: its three agreeing passes end
+ * it. Two pairs of `explore` GEMV sweeps on an RTX 3080 Ti under Node on 2026-11-27, no idle time,
+ * 5 rounds: with the full minimum in every row count 2,433 s and 2,408 s; with no minimum after a
+ * case's first row count 2,145 s and 2,174 s. The derivation's decisions differed between the pairs
+ * in 31 of 216 (11 slower, 17 faster by the full sweeps' timings), against 27 to 29 of 216 between
+ * two mixes of the same four records (the repeat noise). Measured on that one device only.
+ */
+export const WARM_START_LOADED_MIN_NS = 0;
+
+/**
  * Time under load a warm start spends at most (ns). Past it the case is measured as it stands and
  * the record shows how unsteady it was (the GEMV sweep's spread of the baseline's rounds, the
  * geometry sweep's drift ratio). It bounds the cost: the 66 `quick` cases of the GEMV sweep spend at

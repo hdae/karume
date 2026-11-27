@@ -58,6 +58,7 @@ import { assertBindingRoles, WARM_START_MAX_PASSES } from "../src/tune/harness.t
 import {
   CALIBRATION_ATTEMPTS,
   RECALIBRATE_BELOW,
+  WARM_START_LOADED_MIN_NS,
   WARM_START_MAX_NS,
   WARM_START_MIN_NS,
   WARM_START_PASSES,
@@ -993,6 +994,7 @@ describe("the record", () => {
   it("states the warm start and the calibration check it timed with, and carries each summary's baseline spread", () => {
     assertEquals(report.settings.warmStart, {
       minNs: WARM_START_MIN_NS,
+      loadedMinNs: WARM_START_LOADED_MIN_NS,
       maxNs: WARM_START_MAX_NS,
       maxPasses: WARM_START_MAX_PASSES,
       stablePasses: WARM_START_PASSES,

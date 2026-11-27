@@ -17,7 +17,10 @@
  * out a plain or staged row whose row-blocked form goes on (`gemvQuickLookGoesOn`): the derivation
  * reads a row block against that unblocked kernel.
  * 1. the pipelines of every kernel are made first, so no compile leaves the device idle later;
- * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady;
+ * 2. a warm start on the baseline (`warmStart`): the device is loaded until its passes are steady —
+ *    with at least measurement.ts's `WARM_START_MIN_NS` of load in the case's first row count, and
+ *    with `WARM_START_LOADED_MIN_NS` (none) in a row count that follows one of the same case that
+ *    timed a kernel, which left the device under load;
  * 3. the quick look (harness.ts's protocol rule 4 — skipped at a margin of 0): the baseline is run
  *    once into its buffer from a zeroed output; then every kernel's calibration probe, with
  *    timestamps, in a shuffled order (`quickLook` — a candidate's from a zeroed output), each
@@ -137,6 +140,7 @@ import {
   RECALIBRATE_BELOW,
   ROUNDS,
   TARGET_PASS_MS,
+  WARM_START_LOADED_MIN_NS,
   WARM_START_MAX_NS,
   WARM_START_MIN_NS,
   WARM_START_PASSES,
@@ -684,11 +688,13 @@ export const sweepGemvCase = async (
   const abortRequested = (): boolean => hooks.signal?.aborted === true;
   /**
    * The kernels of one plan through the module doc's steps 1–5, or nothing when an abort stopped
-   * it. Every params buffer it made is released before it returns.
+   * it; its warm start spends at least `warmStartMinNs` of load. Every params buffer it made is
+   * released before it returns.
    */
   const measurePlan = async (
     plan: GemvMeasurementPlan,
     m1Group: GemvM1Group | undefined,
+    warmStartMinNs: number,
   ): Promise<{ rows: GemvSweepRow[]; summary: GemvSweepCaseSummary } | undefined> => {
     const started = performance.now();
     const { m } = plan;
@@ -756,7 +762,7 @@ export const sweepGemvCase = async (
         if (state.kind !== "prepared") continue;
         hooks.onProgress?.(`${label}: warm start on ${kernel.head.candidate}`);
         try {
-          await warmStart(context, state.ready);
+          await warmStart(context, state.ready, warmStartMinNs);
           break;
         } catch (cause) {
           kernel.state = { kind: "failed", cause };
@@ -974,8 +980,16 @@ export const sweepGemvCase = async (
     // whose baseline has no time reads nothing (the candidates' checks need the baseline, and a lost
     // device leaves every row a failure), so it leaves no candidate out of the later row counts.
     let m1Group: GemvM1Group | undefined;
+    // Whether the group just measured timed a kernel: its calibrations and rounds kept the device
+    // under load up to the next group, which follows with no idle time. A group that timed nothing
+    // (every kernel failed) may have left the device idle, so the next one warms from the floor.
+    let underLoad = false;
     for (const plan of plans) {
-      const measured = abortRequested() ? undefined : await measurePlan(plan, m1Group);
+      // Typed: inferred, it would depend on `measured` through the loop's flow
+      const warmStartMinNs: number = underLoad ? WARM_START_LOADED_MIN_NS : WARM_START_MIN_NS;
+      const measured = abortRequested()
+        ? undefined
+        : await measurePlan(plan, m1Group, warmStartMinNs);
       if (measured === undefined) {
         aborted = true;
         break;
@@ -986,6 +1000,7 @@ export const sweepGemvCase = async (
         (row) => row.isBaseline && row.perDispatch !== undefined,
       );
       if (plan.m === 1 && baselineTimed) m1Group = { ...measured.summary, rows: measured.rows };
+      underLoad = measured.rows.some((row) => row.perDispatch !== undefined);
     }
   } finally {
     for (const resource of resources.values()) resource.destroy();
@@ -1250,6 +1265,7 @@ export const gemvSweepReport = (parts: GemvSweepParts): GemvSweepReport => ({
     maxReps: SWEEP_MAX_REPS,
     warmStart: {
       minNs: WARM_START_MIN_NS,
+      loadedMinNs: WARM_START_LOADED_MIN_NS,
       maxNs: WARM_START_MAX_NS,
       maxPasses: WARM_START_MAX_PASSES,
       stablePasses: WARM_START_PASSES,

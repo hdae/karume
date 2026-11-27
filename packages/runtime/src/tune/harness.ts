@@ -28,7 +28,9 @@
  *    spending at least {@link WARM_START_MIN_NS} and at most {@link WARM_START_MAX_NS} of load (and
  *    at most {@link WARM_START_MAX_PASSES} passes) ({@link warmStart}): the case's first
  *    calibration then reads a device that left its idle
- *    clocks. For each geometry, before measuring, run passes idle until "cumulative ≥
+ *    clocks. (The GEMV sweep's group of a later row count of a case, which follows a group of the
+ *    same case that timed a kernel, spends at least measurement.ts's `WARM_START_LOADED_MIN_NS`
+ *    instead — none.) For each geometry, before measuring, run passes idle until "cumulative ≥
  *    {@link WARMUP_NS} and ≥ {@link WARMUP_MIN_RUNS} runs" (the same lower bounds as opbench's
  *    `pinClocks`, with the same cut-off of {@link WARMUP_MAX_PASSES} passes). The cumulative time
  *    counts GPU time for unit `ns` and wall clock for `deno-raw-tick` / `wall` (raw ticks are not
@@ -1693,7 +1695,9 @@ export type WarmStart = {
 /**
  * Brings the device to a steady state on `ready` (protocol rule 3): passes of the dispatch, back to
  * back, until the last {@link WARM_START_PASSES} agree within {@link WARM_START_TOLERANCE} with at
- * least {@link WARM_START_MIN_NS} of load spent, or until {@link WARM_START_MAX_NS} of load is
+ * least `minNs` of load spent ({@link WARM_START_MIN_NS} unless the caller knows the device is
+ * already under load: the GEMV sweep gives measurement.ts's `WARM_START_LOADED_MIN_NS` to a row
+ * count that follows another of the same case), or until {@link WARM_START_MAX_NS} of load is
  * spent or {@link WARM_START_MAX_PASSES} passes have run. A pass compares by its timestamp
  * difference (its wall clock without timestamps); a clamped difference agrees with nothing. The
  * first passes take the reps a probe gives, which a cold device underestimates: a pass that falls
@@ -1701,7 +1705,11 @@ export type WarmStart = {
  * comparison then starts over — passes of other lengths do not compare), so the load stays
  * continuous.
  */
-export const warmStart = async (context: SweepContext, ready: ReadyLaunch): Promise<WarmStart> => {
+export const warmStart = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  minNs: number = WARM_START_MIN_NS,
+): Promise<WarmStart> => {
   const timed = context.unit !== "wall";
   let reps = await probeReps(context, ready);
   let times: number[] = [];
@@ -1715,7 +1723,7 @@ export const warmStart = async (context: SweepContext, ready: ReadyLaunch): Prom
     times = [...times, sample.clamped ? 0 : (sample.gpu ?? sample.wallNs)].slice(
       -WARM_START_PASSES,
     );
-    if (loadNs >= WARM_START_MIN_NS && passesAgree(times)) return { stable: true, loadNs, passes };
+    if (loadNs >= minNs && passesAgree(times)) return { stable: true, loadNs, passes };
     if (loadNs >= WARM_START_MAX_NS || passes >= WARM_START_MAX_PASSES) {
       return { stable: false, loadNs, passes };
     }

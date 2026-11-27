@@ -267,10 +267,14 @@ export type GemvSweepReport = {
      * The warm start before a row count's calibrations (measurement.ts's `WARM_START_*` and
      * harness.ts's `WARM_START_MAX_PASSES`): the time under load it spends at least and at most
      * (ns), the passes it runs at most, and how many consecutive passes must agree within
-     * `tolerance` (largest ÷ smallest at most 1 + it).
+     * `tolerance` (largest ÷ smallest at most 1 + it). `minNs` is the floor of a case's first row
+     * count, `loadedMinNs` the floor of a row count that follows one of the same case that timed a
+     * kernel (`WARM_START_LOADED_MIN_NS`). A record written before the field existed has no
+     * `loadedMinNs`; no reader needs it.
      */
     readonly warmStart: {
       readonly minNs: number;
+      readonly loadedMinNs: number;
       readonly maxNs: number;
       readonly maxPasses: number;
       readonly stablePasses: number;

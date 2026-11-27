@@ -81,6 +81,12 @@ measurements in `docs/research/`.
   3080 Ti's two `full` records the ×1.25 margin had screened such bases out, so at least nine int4 g32 shapes could
   not adopt a row-blocked form the same records time 21 to 33 % faster than the default. Each set keeps its own
   margin; the record format does not change.
+- `@karume/runtime/tune`: the GEMV sweep's warm start of a row count that follows one of the same case that timed a
+  kernel spends no least load (`WARM_START_LOADED_MIN_NS`, none): the device is under load already, and three
+  agreeing passes end it. The case's first row count keeps the 1 s. On an RTX 3080 Ti an `explore` run without idle
+  time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
+  record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
+  needs the field).
 
 ## [0.24.0] - 2026-11-25
 

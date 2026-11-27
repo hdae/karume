@@ -3,6 +3,12 @@
 // and the GEMV sweep's row count (src/tune/gemv-sweep.ts) — its warm start on the baseline, its
 // interleaved rounds and the spread of the baseline's rounds.
 //
+// The GEMV sweep's warm start over a case's row counts: the case's first row count spends the floor
+// of load, a row count that follows one that timed a kernel ends after its agreeing passes (fault:
+// the floor in every row count), and one that follows a row count that timed nothing spends the
+// floor again (fault: every pipeline of M = 1 fails); in a run without M = 1, M = 8 follows M = 4
+// without the floor (fault: the M = 1 group taken as the only load).
+//
 // The quick look of both sweeps: the kernels within the margin of their class's bar go on, the rest
 // are screened rows (fault: a candidate at ×1.3 the fastest, a geometry at ×1.5 the default); a
 // margin of 0 times everything (fault: a candidate at ×3); the references go on whatever their time
@@ -35,12 +41,13 @@
 // real one; only the device is replaced (as in tune_harness_callbacks_test.ts).
 //
 // Faults injected, one per rule: a dispatch that speeds up over its first passes (the warm start must
-// wait until its passes agree), passes that agree from the start (it must still spend its floor),
-// passes that never agree (it must stop at its ceiling), passes too short to add up the floor at the
-// reps bound (it must stop at its cut-off of passes), a probe that reads the dispatch slow and
-// passes that then come out short (the passes must be resized), a probe taken while the dispatch was
-// slow (the calibration must be done again after more load), rounds of the baseline that differ by
-// 1 % (the spread must say so) and a cancel in the middle of the rounds (no row may come of them).
+// wait until its passes agree), passes that agree from the start (it must still spend its floor;
+// given none, end after them), passes that never agree (it must stop at its ceiling), passes too
+// short to add up the floor at the reps bound (it must stop at its cut-off of passes), a probe that
+// reads the dispatch slow and passes that then come out short (the passes must be resized), a probe
+// taken while the dispatch was slow (the calibration must be done again after more load), rounds of
+// the baseline that differ by 1 % (the spread must say so) and a cancel in the middle of the rounds
+// (no row may come of them).
 // The warm start of each sweep, and the rotation of the rounds, are read from the log of passes.
 
 import { assert, assertEquals, assertStrictEquals } from "@std/assert";
@@ -88,8 +95,10 @@ import {
 import {
   EXPLORE_QUICK_LOOK_MARGIN,
   QUICK_LOOK_MARGIN,
+  WARM_START_LOADED_MIN_NS,
   WARM_START_MAX_NS,
   WARM_START_MIN_NS,
+  WARM_START_PASSES,
 } from "../src/tune/measurement.ts";
 
 /** One pass the fake device ran. */
@@ -305,6 +314,19 @@ describe("the warm start", () => {
     assert(result.loadNs >= WARM_START_MIN_NS, `${result.loadNs} ns`);
     assert(result.loadNs - passNs < WARM_START_MIN_NS, `${result.loadNs} ns`);
     assertEquals(result.passes, Math.ceil(WARM_START_MIN_NS / passNs));
+  });
+
+  it("ends after its agreeing passes, below the floor, when given none: the device already under load (fault: a steady device)", async () => {
+    const passNs = SWEEP_MAX_REPS * 1_000;
+    const result = await withContext({ gpuNs: (pass) => pass.dispatches * 1_000 }, (context) =>
+      withDefaultLaunch(context, (ready) => warmStart(context, ready, WARM_START_LOADED_MIN_NS)),
+    );
+    assertEquals(result, {
+      stable: true,
+      passes: WARM_START_PASSES,
+      loadNs: WARM_START_PASSES * passNs,
+    });
+    assert(result.loadNs < WARM_START_MIN_NS, `${result.loadNs} ns`);
   });
 
   it("stops at its ceiling when its passes never agree (fault: passes alternating 10 % apart)", async () => {
@@ -613,6 +635,66 @@ const rowOf = (rows: readonly GemvSweepRow[], name: string): GemvSweepRow => {
   if (found === undefined) throw new Error(`no row ${name}`);
   return found;
 };
+
+describe("the GEMV sweep's warm start over a case's row counts", () => {
+  const steady: FakeTiming = { gpuNs: (pass) => pass.dispatches * 5_000 };
+  /** What a warm start with no floor spends on the steady device: its agreeing passes at the bound. */
+  const agreeingPasses = WARM_START_PASSES * SWEEP_MAX_REPS * 5_000;
+  /** Each row count's warm start load (ns): the timed passes between its warm-start steps. */
+  const warmLoads = (plans: readonly GemvMeasurementPlan[], timing: FakeTiming) =>
+    withContext(timing, async (context, passes) => {
+      const loads = new Map<number, number>();
+      let from = 0;
+      await sweepGemvCase(
+        context,
+        PLE_CASE,
+        plans,
+        { rounds: 2, tolerance: opTolerance("linear"), quickLookMargin: QUICK_LOOK_MARGIN },
+        {
+          onStep: ({ m, phase, done }) => {
+            if (phase !== "warm-start") return;
+            if (done === 0) from = passes.length;
+            else loads.set(m, gpuTotal(passes.slice(from)));
+          },
+        },
+      );
+      return loads;
+    });
+
+  it("spends the floor of load on the case's first row count and ends a later one after its agreeing passes, below the floor (fault: the floor in every row count)", async () => {
+    assert(agreeingPasses < WARM_START_MIN_NS);
+    const loads = await warmLoads(
+      [namedPlan(PLE_CASE, 1, ["parallel-l4"]), namedPlan(PLE_CASE, 4, [])],
+      steady,
+    );
+    const first = loads.get(1) ?? 0;
+    assert(first >= WARM_START_MIN_NS, `M = 1: ${first} ns`);
+    assertEquals(loads.get(4), agreeingPasses);
+  });
+
+  it("spends the floor again on a row count whose earlier one timed nothing (fault: every pipeline of M = 1 fails)", async () => {
+    const one = namedPlan(PLE_CASE, 1, ["parallel-l4"]);
+    const failing = new Set([one.baseline, ...one.candidates].map((c) => keyAt(PLE_CASE, 1, c)));
+    assert(
+      !failing.has(keyAt(PLE_CASE, 4, namedPlan(PLE_CASE, 4, []).baseline)),
+      "M = 4 shares a pipeline of M = 1",
+    );
+    const loads = await warmLoads([one, namedPlan(PLE_CASE, 4, [])], {
+      ...steady,
+      failingPipelines: failing,
+    });
+    assertEquals(loads.get(1), undefined);
+    const four = loads.get(4) ?? 0;
+    assert(four >= WARM_START_MIN_NS, `M = 4: ${four} ns`);
+  });
+
+  it("ends M = 8 of a run narrowed to M = 4 and 8 after its agreeing passes: M = 4 timed its kernels right before (fault: the M = 1 group taken as the only load)", async () => {
+    const loads = await warmLoads([namedPlan(PLE_CASE, 4, []), namedPlan(PLE_CASE, 8, [])], steady);
+    const four = loads.get(4) ?? 0;
+    assert(four >= WARM_START_MIN_NS, `M = 4: ${four} ns`);
+    assertEquals(loads.get(8), agreeingPasses);
+  });
+});
 
 describe("the GEMV sweep's quick look", () => {
   it("lets the kernels within the margin of their class's fastest go on and screens the rest: no rounds, no check, its quick time (fault: c64u8 at ×1.3 the fastest)", async () => {
