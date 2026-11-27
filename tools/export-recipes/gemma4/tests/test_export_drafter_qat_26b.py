@@ -22,7 +22,11 @@ pinned here is what would pass silently:
 - a cut target keeps its first layers, so the KV owners are the cut's; its reference is the cut
   series' own; a series run lent by the cut series binds to the cut's slots and records the depth,
   and the full target's drafter does not bind to the cut;
-- only 26B takes `--layers`.
+- only 26B takes `--layers`, which points the output and the lender at the cut; `--model 26b`
+  defaults to its one pinned line and its product series;
+- the real configs, the pinned snapshot and the real lender series (SKIP without them): the
+  drafter matches its target (backbone 2816, 8 / 2 KV heads, owners 28 / 29 — 10 / 11 for the
+  12-layer cut), every drafter weight is on the grid, and both series lend an i4 g32 table.
 
 transformers is required (`importorskip`).
 """
@@ -560,3 +564,158 @@ class TestTheCutCommandLine:
     def test_the_cut_drafter_s_series_is_never_the_distribution_s(self) -> None:
         assert qd.cut_suffix(12) == "cut12-qat-drafter"
         assert moe.cut_suffix(12) == "cut12"
+
+
+class TestTheTwentySixBCommandLine:
+    """`--model 26b`: its one pinned line as the target, its product series (or, with `--layers`,
+    its cut series) as the lender."""
+
+    def test_the_defaults_are_26b_s_pinned_sources_and_its_product_series(self) -> None:
+        pytest.importorskip("huggingface_hub")
+        options = gx.resolve_series_args(qd.parse_args(["--model", "26b"]))
+
+        assert options["model_dir"] == sources.checkpoint_dir("26b")
+        assert options["tokenizer_dir"] == sources.tokenizer_dir("26b")
+        assert options["drafter_dir"] == sources.qat_drafter_dir("26b")
+        assert options["out"].name == "gemma4-26b-qat-drafter"
+        assert options["product_dir"].name == "gemma4-26b-product"
+        assert options["layers"] is None
+
+    def test_layers_points_the_output_and_the_lender_at_the_cut(self) -> None:
+        pytest.importorskip("huggingface_hub")
+        options = gx.resolve_series_args(qd.parse_args(["--model", "26b", "--layers"]))
+
+        assert options["layers"] == moe.DEFAULT_CUT == 12
+        assert options["out"].name == "gemma4-26b-cut12-qat-drafter"
+        assert options["product_dir"].name == "gemma4-26b-cut12"
+        assert options["model_dir"] == sources.checkpoint_dir("26b")
+
+    def test_main_hands_the_export_26b_s_pins_and_the_depth(self, monkeypatch, capsys) -> None:
+        pytest.importorskip("huggingface_hub")
+        calls: list[dict[str, Any]] = []
+
+        def export(model_dir: Path, out: Path, **options: Any) -> dict[str, Any]:
+            calls.append({"out": out, **options})
+            return {}
+
+        monkeypatch.setattr(qd, "export_series", export)
+
+        qd.main(["--model", "26b", "--layers", "6"])
+
+        assert calls[0]["pins"] is sources.HUB_PINS["26b"]
+        assert calls[0]["drafter_pin"] is sources.QAT_DRAFTER_PINS["26b"]
+        assert calls[0]["layers"] == 6
+        assert calls[0]["out"].name == "gemma4-26b-cut6-qat-drafter"
+        assert json.loads(capsys.readouterr().out)["model_dir"] == str(
+            sources.checkpoint_dir("26b")
+        )
+
+
+def _real_configs() -> tuple[Any, Path]:
+    pytest.importorskip("huggingface_hub")
+    drafter_dir, target_dir = (
+        sources.qat_drafter_dir("26b"),
+        sources.qat_target_checkpoint_dir("26b"),
+    )
+    if not all((path / "config.json").is_file() for path in (drafter_dir, target_dir)):
+        pytest.skip("26B's QAT drafter or target config is not in the hub cache")
+    return transformers.AutoConfig.from_pretrained(drafter_dir), target_dir
+
+
+class TestTheRealTwentySixB:
+    """The real configs, the pinned snapshot and the real lender series (SKIP without them): the
+    facts the shared pieces read from upstream instead of hard-coding."""
+
+    def test_the_cached_snapshot_matches_the_pin(self) -> None:
+        _real_configs()
+
+        sources.assert_snapshot_pin(sources.qat_drafter_dir("26b"), sources.qat_drafter_pin("26b"))
+
+    def test_the_drafter_matches_its_target(self) -> None:
+        config, target_dir = _real_configs()
+        target = gx.load_text_config(target_dir)
+        text = config.get_text_config()
+
+        assert drafter.assistant_class(config) is transformers.Gemma4AssistantForCausalLM
+        assert config.use_ordered_embeddings is False
+        assert qd.is_moe_target(target)
+        assert int(config.backbone_hidden_size) == int(target.hidden_size) == 2816
+        for layer_type, heads in ((SLIDING_ATTENTION, 8), (FULL_ATTENTION, 2)):
+            assert decode.kv_heads(text, layer_type) == decode.kv_heads(target, layer_type) == heads
+        assert (int(text.head_dim), int(text.global_head_dim)) == (
+            int(target.head_dim),
+            int(target.global_head_dim),
+        )
+        assert int(text.sliding_window) == int(target.sliding_window) == 1024
+        assert decode.rope_specs(text) == decode.rope_specs(target)
+        assert decode.kv_owner_layers(target) == {SLIDING_ATTENTION: 28, FULL_ATTENTION: 29}
+        cut = qd.target_text_config(target_dir, moe.DEFAULT_CUT)
+        assert decode.kv_owner_layers(cut) == {SLIDING_ATTENTION: 10, FULL_ATTENTION: 11}
+        assert qd.target_weights_files(target_dir) == (
+            unified.CHECKPOINT_INDEX,
+            *fx.SHARDS,
+            "config.json",
+        )
+        assert sorted(qd.target_weights_files(target_dir)) == sorted(
+            sources.HUB_PINS["26b"].weights.sha256
+        )
+
+    def test_every_drafter_linear_splits_into_grid_groups(self) -> None:
+        config, _ = _real_configs()
+        config.use_ordered_embeddings = False
+
+        with torch.device("meta"):
+            model = drafter.assistant_class(config)(config)
+
+        linears = {
+            name: module
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Linear)
+        }
+        assert len(linears) == 23
+        assert all(module.in_features % qd.GROUP_SIZE == 0 for module in linears.values())
+        assert model.pre_projection.in_features == 2 * 2816
+        assert model.post_projection.out_features == 2816
+
+    def test_every_drafter_weight_of_the_pinned_snapshot_is_on_the_grid(self) -> None:
+        """The fact the i4 storage rests on: every rank-2 tensor recovers its q4_0 grid."""
+        _real_configs()
+        from gemma4 import export_product_qat as qat
+
+        path = sources.qat_drafter_dir("26b") / "model.safetensors"
+        imported = []
+        with safe_open(str(path), framework="pt") as handle:
+            for key in sorted(handle.keys()):
+                if len(handle.get_slice(key).get_shape()) != 2:
+                    continue
+                qat.import_grid(handle.get_tensor(key).to(torch.float32), key)
+                imported.append(key)
+
+        # 22 linears + the drafter's embedding (the head's tied tensor); no centroid tensor.
+        assert len(imported) == 23
+        assert "model.embed_tokens.weight" in imported
+
+    @pytest.mark.parametrize(
+        ("suffix", "layers", "owners"),
+        [("product", None, (28, 29)), ("cut12", 12, (10, 11))],
+        ids=["product", "cut12"],
+    )
+    def test_the_series_lends_an_i4_g32_table_and_the_owner_slots(
+        self, suffix: str, layers: int | None, owners: tuple[int, int]
+    ) -> None:
+        config, target_dir = _real_configs()
+        product_dir = gx.series_dir("26b", suffix)
+        if not (product_dir / provenance.REFERENCE_FILE).is_file():
+            pytest.skip(f"26B's {suffix} series is not exported ({product_dir})")
+        target = qd.target_text_config(target_dir, layers)
+
+        lender = qd.read_lender(product_dir, config, target, sources.HUB_PINS["26b"])
+
+        sliding, full = owners
+        assert lender.slots == {
+            SLIDING_ATTENTION: (f"l{sliding}.k", f"l{sliding}.v"),
+            FULL_ATTENTION: (f"l{full}.k", f"l{full}.v"),
+        }
+        assert lender.shapes[f"l{sliding}.k"] == [1, 8, 1032, 256]
+        assert lender.shapes[f"l{full}.k"] == [1, 2, decode.CAPACITY_SYMBOL, 512]
+        assert lender.shared_tensor == "model.lm_head.weight"

@@ -48,7 +48,7 @@ from gemma4.distribution import (
 from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, HubPin
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
-from karume.dist import DistError, assemble_family
+from karume.dist import MAX_QUANT_DESCRIPTION_CHARS, DistError, assemble_family
 from karume.ple import PLE_INDEX_ROLE, PLE_ROLES
 
 #: The per-layer embedding width of the stand-in: two groups of the line's grid per layer (the
@@ -178,8 +178,7 @@ def _build(
     twenty_six_b = model == "26b"
     sources = Gemma4Sources(
         product=root / "series" / f"gemma4-{model}-qat-product",
-        # 26B ships no drafter (ADR 0145 decision 1).
-        drafter=None if twenty_six_b else root / "series" / f"gemma4-{model}-qat-drafter",
+        drafter=root / "series" / f"gemma4-{model}-qat-drafter",
         tokenizer=root / "series" / f"gemma4-{model}-tokenizer",
         model=root / "inputs" / f"gemma-4-{base}-it-qat-q4_0-unquantized",
         upstream_tokenizer=root / "inputs" / f"gemma-4-{base}-it",
@@ -191,7 +190,7 @@ def _build(
         sources.model,
         container=product if product is not None else _product(model),
         drafter=sources.drafter,
-        drafter_bytes=drafter if drafter is not None or twenty_six_b else _drafter(model),
+        drafter_bytes=drafter if drafter is not None else _drafter(model),
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(recorded).hexdigest()},
@@ -404,16 +403,15 @@ class TestQatParallelSeats:
         again = gemma4_distribution.gemma4_qat_q4_0_quants("e4b")
         assert again["i4-fast"]["session"] == PARALLEL_SESSIONS["i4-fast"]
 
-    def test_every_model_of_the_line_has_a_default_quant_pins_and_all_but_26b_a_drafter(
+    def test_every_model_of_the_line_has_a_default_quant_pins_and_a_drafter(
         self,
     ) -> None:
-        """26B ships no drafter until one is pinned (ADR 0145 decision 1): it is a model of the
-        line with pins, and no drafter's target."""
+        """26B's drafter is pinned (2026-11-27): every model of the line is a drafter's target."""
         line = set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM)
         assert line == {"e2b", "e4b", "12b", "26b"}
         assert set(GEMMA4_QAT_Q4_0_DEFAULT_QUANT) == line
         assert set(QAT_LINE_PINS) == line
-        drafters = line - {"26b"}
+        drafters = line
         assert set(GEMMA4_QAT_DRAFTER_UPSTREAM) == drafters
         assert set(QAT_TARGET_PINS) == drafters
         assert set(QAT_DRAFTER_PINS) == drafters
@@ -1052,7 +1050,7 @@ class TestQatLegalText:
 
     def test_the_notice_names_every_upstream_of_the_line(self) -> None:
         """Every model's QAT checkpoint and base model, and the drafter of every model that ships
-        one — a model without one (26B) names none."""
+        one — a model without one would name none."""
         for model, weights in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM.items():
             assert f"`{weights}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
             assert f"`{GEMMA4_UPSTREAM[model]}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
@@ -1062,7 +1060,7 @@ class TestQatLegalText:
                 assert f"- `{weights}` and the tokenizer" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
             else:
                 assert f"`{drafter}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
-        assert set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM) - set(GEMMA4_QAT_DRAFTER_UPSTREAM) == {"26b"}
+        assert set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM) - set(GEMMA4_QAT_DRAFTER_UPSTREAM) == set()
 
     def test_the_notice_states_26b_s_extraction_and_its_f16_expert_steps(self) -> None:
         notice = " ".join(GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN.split())
@@ -1074,28 +1072,28 @@ class TestQatLegalText:
 
 
 class TestQat26B:
-    """26B's plan (its one line — ADR 0145): 12B's graph form and dialect, its pins, no drafter
-    (so `speculative` is refused at weights resolution), no vision, the reference seat and the
-    parallel and fused seat."""
+    """26B's plan (its one line — ADR 0145): 12B's graph form and dialect, its pins, its QAT
+    drafter (which runs only with every expert resident — the card says it does not combine with
+    `expertCache`), no vision, the reference seat and the parallel and fused seat."""
 
-    def test_it_ships_the_model_role_alone_with_12b_s_dialect(self, tmp_path: Path) -> None:
+    def test_it_ships_the_model_and_its_drafter_with_12b_s_dialect(self, tmp_path: Path) -> None:
         out_dir, manifest = _assemble(tmp_path, ("26b",))
         entry = manifest["models"]["26b"]
 
-        assert sorted(entry["weights"]) == [GEMMA4_ROLE]
+        assert sorted(entry["weights"]) == [GEMMA4_DRAFTER_ROLE, GEMMA4_ROLE]
         assert list(entry["quants"]) == ["i4", "i4-fast"]
         assert entry["defaultQuant"] == "i4"
         for name, quant in entry["quants"].items():
-            assert quant["weights"] == {GEMMA4_ROLE: "i4"}, name
-        assert entry["quants"]["i4"]["label"] == "QAT int4 grid"
-        assert "drafter" not in entry["quants"]["i4"]["description"]
+            assert quant["weights"] == {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i4"}, name
+        assert entry["quants"]["i4"]["label"] == "QAT int4 grid, drafter included"
+        assert "drafter weight" in entry["quants"]["i4"]["description"]
         assert "f16 steps" in entry["quants"]["i4"]["description"]
         assert entry["pipelineConfig"]["chatDialect"] == "gemma4-unified"
         assert "suppressTokens" not in entry["pipelineConfig"]
         assert "vision" not in entry["pipelineConfig"]
-        assert not [path for path in _files(out_dir) if path.startswith("26b/drafter")]
+        assert [path for path in _files(out_dir) if path.startswith("26b/drafter/model.i4")]
         card = (out_dir / "README.md").read_text(encoding="utf-8")
-        assert "speculative" not in card.split("## Base weights")[0].lower()
+        assert "speculative" in card.split("## Base weights")[0].lower()
         prose = " ".join(card.split())
         assert "By default all of them are resident on the GPU." in prose
         assert "Passing `expertCache: { slots: 64 }` when loading keeps 64 experts" in prose
@@ -1103,18 +1101,62 @@ class TestQat26B:
             card.split()
         )
 
-    def test_a_drafter_series_given_for_26b_is_refused(self, tmp_path: Path) -> None:
+    def test_a_26b_plan_without_its_drafter_series_is_refused(self, tmp_path: Path) -> None:
         sources = _build(tmp_path, "26b")
-        given = replace(sources, drafter=tmp_path / "series" / "gemma4-26b-qat-drafter")
+        missing = replace(sources, drafter=None)
 
-        with pytest.raises(DistError, match="ships no drafter"):
-            gemma4_qat_q4_0_plan(given, "26b")
+        with pytest.raises(DistError, match="the drafter series is missing"):
+            gemma4_qat_q4_0_plan(missing, "26b")
+
+    def test_another_model_s_drafter_given_for_26b_is_refused(self, tmp_path: Path) -> None:
+        """12B's drafter has 26B's form in the stand-in, so only the revision its container names
+        (the 12B assistant's pin) tells the pair apart: 26B's must name its own pin."""
+        assert QAT_DRAFTER_PINS["26b"].revision == "9537141506fe8875b3ed45b264af13580cb29166"
+        assert QAT_DRAFTER_PINS["26b"].repo == GEMMA4_QAT_DRAFTER_UPSTREAM["26b"]
+        gemma4_qat_q4_0_plan(_build(tmp_path / "own", "26b"), "26b")
+        sources = _build(tmp_path / "other", "26b", drafter=_drafter("12b"))
+
+        with pytest.raises(DistError, match=QAT_DRAFTER_PINS["26b"].revision):
+            gemma4_qat_q4_0_plan(sources, "26b")
+
+    def test_the_reference_seat_description_fits_the_manifest(self) -> None:
+        """Naming the drafter and the experts takes 190 of the manifest's 200 characters."""
+        seat = gemma4_distribution.gemma4_qat_q4_0_quants("26b")["i4"]
+
+        assert len(seat["description"]) <= MAX_QUANT_DESCRIPTION_CHARS
+        assert "drafter weight" in seat["description"]
+        assert "experts with f16 steps" in seat["description"]
+
+    def test_the_card_says_the_drafter_does_not_combine_with_the_expert_cache(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("26b",))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        prose = " ".join(card.split())
+
+        experts = prose.split("**Routed experts (`26b`)**")[1].split("- **")[0]
+        assert "`speculative` cannot be combined with `expertCache`" in experts
+        assert "the drafter runs only with every expert resident" in experts
+        assert "**Speculative decoding**: `26b` also ship" in prose
+        assert (
+            "- **`26b` drafter**: [google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant]"
+            in (prose)
+        )
+
+    def test_a_card_without_26b_does_not_mention_the_expert_cache_exclusion(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b",))
+
+        assert "cannot be combined with `expertCache`" not in (out_dir / "README.md").read_text(
+            encoding="utf-8"
+        )
 
     def test_the_sources_are_its_product_series_and_its_pinned_snapshots(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """12B's series naming (`gemma4-26b-product`), its own tokenizer series, no drafter; the
-        weights' config from the QAT checkpoint, the tokenizer from 26B-it."""
+        """12B's series naming (`gemma4-26b-product`), its own tokenizer series, its QAT drafter
+        series; the weights' config from the QAT checkpoint, the tokenizer from 26B-it."""
         constants = pytest.importorskip("huggingface_hub.constants")
         monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
         pins = QAT_LINE_PINS["26b"]
@@ -1123,7 +1165,9 @@ class TestQat26B:
 
         assert sources.product.name == "gemma4-26b-product"
         assert sources.tokenizer.name == "gemma4-26b-tokenizer"
-        assert sources.drafter is None and sources.vision is None
+        assert sources.drafter is not None
+        assert sources.drafter.name == "gemma4-26b-qat-drafter"
+        assert sources.vision is None
         assert sources.model.name == pins.weights.revision
         assert (
             sources.model.parent.parent.name
@@ -1132,16 +1176,17 @@ class TestQat26B:
         assert sources.upstream_tokenizer.name == pins.tokenizer.revision
         assert sources.upstream_tokenizer.parent.parent.name == "models--google--gemma-4-26B-A4B-it"
 
-    def test_the_parallel_seats_state_no_drafter_and_carry_26b_s_speed_note(
+    def test_the_parallel_seats_carry_26b_s_speed_note_of_the_decode_without_the_drafter(
         self, tmp_path: Path
     ) -> None:
-        """The seats' text is the line's own, true for a model without a drafter: the head is on
-        the parallel GEMV (no exclusion note) and the speed sentence is 26B's measured one."""
+        """The seats' text is the line's own: the head is on the parallel GEMV (no exclusion note)
+        and the speed sentence is 26B's measured one, which was of the decode without the drafter
+        (the maintainer's ruling of 2026-11-27)."""
         _, manifest = _assemble(tmp_path, ("26b",))
         quants = manifest["models"]["26b"]["quants"]
 
         note = gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE["26b"]
-        assert note == " Faster than i4 on the tested 26B device."
+        assert note == " Faster than i4 on the tested 26B device without the drafter."
         assert gemma4_distribution.GEMMA4_QAT_Q4_0_HEAD_NOTE["26b"] == ""
         for name, session in PARALLEL_SESSIONS.items():
             assert quants[name]["session"] == dict(session), name
@@ -1149,8 +1194,9 @@ class TestQat26B:
             assert quants[name]["description"].endswith(note), name
             assert "output head" not in quants[name]["description"], name
             assert "drafter" not in quants[name]["label"], name
-            assert "drafter" not in quants[name]["description"], name
+            assert "without the drafter" in quants[name]["description"], name
             assert "speculative" not in quants[name]["description"], name
+            assert len(quants[name]["description"]) <= MAX_QUANT_DESCRIPTION_CHARS, name
 
     def test_the_other_models_keep_their_reference_seat_text(self) -> None:
         for model in ("e2b", "e4b", "12b"):

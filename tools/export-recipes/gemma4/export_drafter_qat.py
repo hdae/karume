@@ -1,11 +1,14 @@
-"""Writes the q4_0 QAT MTP drafter of Gemma 4 E2B / E4B / 12B (`--model`) as the borrower graph of
-the QAT target's product series, every drafter weight imported from the checkpoint's own 4-bit
-grid, with its goldens.
+"""Writes the q4_0 QAT MTP drafter of Gemma 4 E2B / E4B / 12B / 26B (`--model`) as the borrower
+graph of the QAT target's product series, every drafter weight imported from the checkpoint's own
+4-bit grid, with its goldens.
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat              # E2B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model e4b  # E4B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 12b  # 12B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 26b  # 26B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 26b \\
+        --layers                                     # 26B's 12-layer cut (test only — see below)
 
 ## The regular drafter's graph, from other weights
 
@@ -18,9 +21,9 @@ series (`gemma4.export_product_qat`, `outputs/series/gemma4-<model>-qat-product/
 1. **Pinned sources** (`gemma4.sources`): the drafter is Google's
    `google/gemma-4-<model>-it-qat-q4_0-unquantized-assistant` (`QAT_DRAFTER_PINS`), the target's
    weights and tokenizer the QAT target's two pins (`QAT_TARGET_PINS` — E2B / E4B's `QAT_PINS`,
-   12B's `HUB_PINS`). All three are checked before the load, and the record's full digests once
-   more before it is written. Google's model card: with a QAT target, the assistant must be a QAT
-   checkpoint of the same precision.
+   12B's and 26B's `HUB_PINS`). All three are checked before the load, and the record's full
+   digests once more before it is written. Google's model card: with a QAT target, the assistant
+   must be a QAT checkpoint of the same precision.
 2. **Every drafter weight is imported from its q4_0 grid instead of rounded to i8**
    ({@link import_drafter}): the 22 linears (pre / post projection; per layer q_proj, o_proj,
    gate / up / down) and the head (`lm_head`, tied to the drafter's own `embed_tokens`
@@ -80,8 +83,9 @@ parametric, and the shared pieces read it from upstream:
 
 ## 26B A4B: a target with experts
 
-26B's assistant (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`) is E2B / E4B's class,
-`Gemma4AssistantForCausalLM` (`gemma4_assistant`), at 12B's drafter shapes: hidden 1024, 4 layers
+26B's assistant (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant` —
+`QAT_DRAFTER_PINS["26b"]`) is E2B / E4B's class, `Gemma4AssistantForCausalLM` (`gemma4_assistant`),
+at 12B's drafter shapes: hidden 1024, 4 layers
 (sliding × 3 + full), 8 KV heads of width 256 on the sliding layers and 2 of width 512 on the full
 one (`attention_k_eq_v`, `num_global_key_value_heads`), window 1024, `use_ordered_embeddings` false
 and no centroid tensor. Its tensors are 12B's drafter's but for the two projections at 26B's width

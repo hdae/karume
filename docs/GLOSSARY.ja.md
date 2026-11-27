@@ -30,7 +30,7 @@
 | kernel-set fingerprint △ | カーネルの集合の指紋 | テストファイルが dispatch した WGSL（ラベルと sha256）の集合。テストの setup が記録し、sha の参照値に一致した run ごとに `outputs/references/` に残すので、不一致のメッセージが変わったカーネルを示す。参照値の行への格納と集合による fail / warn の規則、検証キャッシュのキーとしての利用は未実装 | — | ADR 0152 決定 4・6・spec/verification.md |
 | verification cache △ | 検証キャッシュ | 環境・データ・コードのキーが変わっていないテストファイルの結果を再利用する仕組み。既定（`record`）は全部走らせて記録だけ、`KARUME_VERIFY_CACHE=reuse` で記録が有効なファイルを走らせず skip 1 件として表示する（pass としては数えない） | — | spec/verification.md |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
-| q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B / 26B A4B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み・26B の expert は step が f16 の `int4-sym-g-f16`）、E2B / E4B / 12B には QAT の MTP drafter が付く（26B には無い）。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
+| q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B / 26B A4B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み・26B の expert は step が f16 の `int4-sym-g-f16`）、各モデルに QAT の MTP drafter が付く（26B の drafter は expert を全常駐したときだけ動く）。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
 | mobile QAT line △ | モバイル QAT 系 | Gemma 4 の配布 `karume-gemma4-qat-mobile`（旧 `karume-gemma4-qat`）。公式モバイル版の固定 INT2 / INT4 / INT8 と SRQ を保つ E2B / E4B。契約は `gemma4-qat/1` | 「QAT 版」だけで呼ぶ（2 系統あるので取り違える） | ADR 0097 追記 10 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
 | storage dtype | 格納型 | コンテナに書いた重みの形（f32 / f16 / bf16 / i8 / i4 / i4f16 / i2 / i32） | — | glossary.md |

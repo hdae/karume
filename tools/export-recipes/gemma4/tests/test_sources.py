@@ -177,12 +177,11 @@ class TestTwentySixBPins:
             PRE_FIX_TOKENIZER_SHA256
         )
 
-    def test_it_is_a_model_of_the_qat_line_and_no_drafter_s_target(self) -> None:
+    def test_it_is_a_model_of_the_qat_line_and_its_qat_drafter_s_target(self) -> None:
         assert sources.QAT_LINE_PINS["26b"] is sources.HUB_PINS["26b"]
-        assert "26b" not in sources.QAT_TARGET_PINS
-        assert "26b" not in sources.QAT_DRAFTER_PINS
-        with pytest.raises(ValueError, match="no q4_0 QAT drafter"):
-            sources.qat_drafter_pin("26b")
+        assert sources.QAT_TARGET_PINS["26b"] is sources.HUB_PINS["26b"]
+        assert "26b" in sources.QAT_DRAFTER_PINS
+        assert sources.qat_drafter_pin("26b") is sources.QAT_DRAFTER_PINS["26b"]
 
     def test_the_line_directories_are_the_two_pinned_snapshots(self, tmp_path, monkeypatch) -> None:
         constants = pytest.importorskip("huggingface_hub.constants")

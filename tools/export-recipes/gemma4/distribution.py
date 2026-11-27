@@ -41,7 +41,7 @@ generation defaults from `google/gemma-4-12B-it` ({@link Gemma4Sources}).
 ## The q4_0 QAT line (`karume-gemma4-qat` — {@link QAT_Q4_0_PIPELINE})
 
 A second distribution of the same `gemma4/1` contract: E2B / E4B / 12B / 26B from Google's q4_0 QAT
-checkpoints, every text weight on its own 4-bit grid (int4 g32), each model but 26B with its QAT MTP
+checkpoints, every text weight on its own 4-bit grid (int4 g32), each model with its QAT MTP
 drafter. It runs {@link gemma4_plan} with another {@link Gemma4Line} — the graph, drafter,
 tokenizer and configuration checks are the regular line's; what differs is read from the line:
 
@@ -57,11 +57,11 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   `i4-fast` over the same storage ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_LINE_PINS` / `QAT_DRAFTER_PINS`);
-- 26B A4B: the `model` role alone (no drafter until one is pinned, so `speculative` is refused at
-  weights resolution; no vision), the reference seat and the parallel and fused seat (its routed
-  experts keep the sequential order in every seat), 12B's graph contract and dialect, its
-  expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
-  `gemma4.sources.QAT_LINE_PINS` (it is no drafter's target);
+- 26B A4B: the `model` and `drafter` roles (no vision), the reference seat and the parallel and
+  fused seat (its routed experts keep the sequential order in every seat), 12B's graph contract
+  and dialect, its expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
+  `gemma4.sources.QAT_LINE_PINS`; its drafter runs only with every expert resident (the runtime's
+  expert cache refuses `speculative`);
 - 12B's image input: a third graph, `vision` — the encoder-free embedder
   (`gemma4/export_vision.py`, series `gemma4-12b-vision`), one bf16 dtype, so every quant of 12B
   maps it — and `pipelineConfig.vision` ({@link gemma4_vision_config}). As with the drafter, it is a
@@ -2251,8 +2251,8 @@ GEMMA4_QAT_Q4_0_VISION_MODELS: frozenset[str] = frozenset({"12b"})
 
 def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
     """Whether the model ships its QAT drafter (`gemma4.card.GEMMA4_QAT_DRAFTER_UPSTREAM`): every
-    model of the line but 26B, whose drafter is later work (ADR 0145 decision 1) — without the
-    role a load that asks for `speculative` fails at weights resolution."""
+    model of the line, 26B since its drafter was pinned (ADR 0145 decision 1 left it for later) —
+    without the role a load that asks for `speculative` fails at weights resolution."""
     return model in GEMMA4_QAT_DRAFTER_UPSTREAM
 
 
@@ -2297,13 +2297,14 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
 #: "every linear weight", and the embedder's are not int4 ({@link GEMMA4_QAT_Q4_0_STORAGE}).
 GEMMA4_QAT_Q4_0_VISION_NOTE = " Vision stays bf16."
 
-#: The reference seat's label and description for a model with routed experts and no drafter
-#: (26B — `gemma4.card.GEMMA4_MOE_MODELS`): the line's own say "drafter included", and its expert
-#: weights keep the grid's codes with f16 steps (`int4-sym-g-f16` — ADR 0145 decision 3).
+#: The reference seat's description for a model with routed experts (26B —
+#: `gemma4.card.GEMMA4_MOE_MODELS`; the label is the line's own, "drafter included"): its expert
+#: weights keep the grid's codes with f16 steps (`int4-sym-g-f16` — ADR 0145 decision 3). Naming
+#: the experts next to the line's own list would take 203 characters, past the manifest's 200, so
+#: the list is said in fewer words (190).
 GEMMA4_QAT_Q4_0_MOE_QUANT: Mapping[str, str] = {
-    "label": "QAT int4 grid",
-    "description": "The q4_0 QAT checkpoint's own 4-bit grid (packed int4, group 32) for every"
-    " linear weight and the embedding table, experts with f16 steps; GEMV and attention use the"
+    "description": "The q4_0 QAT checkpoints' own 4-bit grid (packed int4, group 32) for every"
+    " linear, embedding and drafter weight, experts with f16 steps; GEMV and attention use the"
     " reference summation order.",
 }
 
@@ -2344,13 +2345,15 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: resident, so decode ran under the exact expert cache — 64 slots per layer, every expert in the
 #: host tier, re-run after a miss — one process per arm, greedy, three prompts of 96 tokens with the
 #: same tokens in every arm, two rounds): one decode forward without a miss (median wall) took
-#: 24.6 / 25.7 ms with `i4` and 17.6 / 17.5 ms with `i4-fast`. It has no drafter, so there is no
-#: speculative arm.
+#: 24.6 / 25.7 ms with `i4` and 17.6 / 17.5 ms with `i4-fast`. It had no drafter then, so there
+#: was no speculative arm; its drafter (pinned 2026-11-27) runs only with every expert resident,
+#: which this machine cannot hold, so its sentence names the decode that was measured: "without
+#: the drafter" (the maintainer's ruling of 2026-11-27, E4B's wording in the regular line).
 GEMMA4_QAT_Q4_0_SPEED_NOTE: Mapping[str, str] = {
     "e2b": " Faster than i4 on the tested E2B device.",
     "e4b": " Faster than i4 on the tested E4B device.",
     "12b": " Faster than i4 on the tested 12B device, except when speculative.",
-    "26b": " Faster than i4 on the tested 26B device.",
+    "26b": " Faster than i4 on the tested 26B device without the drafter.",
 }
 
 #: How the seat's description spells the output head: the int4 head's parallel GEMV row exists for
@@ -2471,8 +2474,8 @@ def gemma4_qat_q4_0_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 
 def _qat_q4_0_notice_sources() -> str:
     """The NOTICE's list of redistributed upstreams: per model its QAT checkpoint, its QAT drafter
-    when it ships one (26B ships none — {@link gemma4_qat_q4_0_has_drafter}) and its base model
-    (the tokenizer's source)."""
+    when it ships one ({@link gemma4_qat_q4_0_has_drafter}) and its base model (the tokenizer's
+    source)."""
     lines: list[str] = []
     for model in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM:
         drafter = GEMMA4_QAT_DRAFTER_UPSTREAM.get(model)

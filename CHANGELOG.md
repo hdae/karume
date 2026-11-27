@@ -69,6 +69,11 @@ measurements in `docs/research/`.
   case with `explore` unless `idleSeconds` is given (10 s with the other sets, and in `geometry-sweep`): on an RTX
   3080 Ti two explore runs without idle time took a third less time, and the derivation from them differed from that of
   two runs with 10 s on 28 of 216 decisions, where two pairs each mixing one run of either kind differed on 30.
+- `karume-gemma4-qat` (Gemma 4 26B A4B, recipe only — the repository on Hugging Face carries it from the next
+  upload): 26B ships Google's QAT MTP drafter (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`, its
+  weights on their own int4 grid, borrowing 26B's key/value states and embedding table) as its `drafter` role, so
+  `speculative` works with every expert resident; `expertCache` still refuses `speculative`. The speed sentence of
+  26B's `i4-fast` now says it is of the decode without the drafter.
 
 ### Changed
 
