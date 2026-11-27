@@ -35,6 +35,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
@@ -42,6 +43,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -551,6 +553,7 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
         "  with the bilinear upsample it used to follow (both are linear, so they commute — this",
         "  removes two full-resolution intermediates).",
         *birefnet_storage_lines(checkpoint, _seat_dtypes(default_model(manifest))),
+        *upstream_cards([hf_link(entry.repo)]),
     ]
 
 

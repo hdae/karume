@@ -144,10 +144,12 @@ The level-2 sections come in this order:
 
 ### What the upstream says
 
-- Four cards end the attribution section with a bullet sending the reader to the upstream model card for what the
-  model can and cannot do (capabilities, limitations, intended use, evaluations, safety guidance), which the
-  repository does not restate: `karume-gemma4`, `karume-gemma4-qat`, `karume-gemma4-qat-mobile`,
-  `karume-embeddinggemma-2`. `karume-gemma4` and `karume-gemma4-qat` link the default model's upstream card.
+- Every card ends its attribution section with one bullet, `karume.modelcard.upstream_cards`, sending the reader to
+  the upstream model cards for what the model can and cannot do (capabilities, limitations, intended use, evaluations,
+  safety guidance), which the repository does not restate. It links the card of every redistributed upstream: the
+  `base_model` repositories, preceded on `karume-anima-extra` by the Civitai pages of its fine-tunes. The Gemma 4
+  cards write the bullet in their own words: `karume-gemma4` and `karume-gemma4-qat` link the default model's upstream
+  card only.
 - `karume-birefnet-hr` and `karume-depth-anything-v2` send the reader to the upstream card for the training data. The
   other cards link the upstream in the attribution section only.
 - `karume-anima-2.9b` quotes the upstream card's description verbatim, and its `NOTICE.md` refers to the upstream card
@@ -221,12 +223,13 @@ The level-2 sections come in this order:
 
 One constant, imported where it is written:
 
-- In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the revision-pin comment, the notes under
-  the quant tables and the cross-repository note.
+- In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the upstream-card bullet, the link and
+  pin of an upstream (`hf_link`, `pinned`), the revision-pin comment, the notes under the quant tables and the
+  cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; EmbeddingGemma 2's
   use-policy sentence.
 
-Everything else above (the Apache text URL, the Gemma 4 license page, the notices' closing paragraph, the "What is
-this" sentences, the upstream-card bullet) is written per family.
+Everything else above (the Apache text URL, the notices' closing paragraph, the "What is this" sentences) is written
+per family.

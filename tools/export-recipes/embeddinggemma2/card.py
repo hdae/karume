@@ -37,6 +37,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
@@ -44,6 +45,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model). The TypeScript family
@@ -606,7 +608,6 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" ([full text]({EMBEDDINGGEMMA2_LICENSE_TEXT_LINK}); a verbatim copy is in"
             " `LICENSE.md`)."
         )
-    upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
     weights_change = (
         [
             "  checkpoint's bf16 values unchanged in `bf16`, and an int8-quantized copy (`i8`) was",
@@ -656,15 +657,12 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         *audio_change,
         "  No retraining and no fine-tuning.",
         *_precision_lines(manifest),
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model card, and this",
-        f"  repository does not restate it: read [{upstream}](https://huggingface.co/{upstream})",
-        "  before using it.",
         '- **The upstream use policy**: the upstream model card states, under "Ethics & Safety":',
         "",
         f"  > {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}",
         "",
         "  The policy is upstream's document: read it at that link. It is not reproduced here.",
+        *upstream_cards([hf_link(repo) for repo in _metadata(manifest).base_model]),
     ]
     return lines
 

@@ -164,6 +164,27 @@ def pinned(repo: str, revision: str) -> str:
     return f"{hf_link(repo)} at commit `{revision}`"
 
 
+# SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
+def upstream_cards(links: Sequence[str]) -> list[str]:
+    """The bullet that ends every card's attribution section (maintainer's ruling of 2026-11-27):
+    what the model can and cannot do is the upstream's to say, so the card sends the reader to
+    the card of every upstream it redistributes instead of restating it. `links` are Markdown
+    links to those cards (the `base_model` repositories, and the pages of works not on the Hub),
+    each listed once, in order.
+
+    MUST: no upstream is left out — a card that names one of its upstreams' cards only would read
+    as if that card covered the others.
+    """
+    if not links:
+        raise ValueError("no upstream card to send the reader to")
+    cards = "the upstream model card" if len(links) == 1 else "the upstream model cards"
+    return [
+        "- **What the model can and cannot do** — capabilities, limitations, intended use,"
+        f" evaluations and safety guidance — is documented on {cards}, and this repository does"
+        f" not restate it: read {_spell_list(links)} before using it."
+    ]
+
+
 @dataclass(frozen=True)
 class Upstream:
     """One upstream work a card names in {@link UNOFFICIAL_CONVERSION_NOTICE}: how it is spelled

@@ -36,6 +36,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
@@ -44,6 +45,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -413,6 +415,7 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         "  as effective weights, keeps only the mean half of `quantizer.in_proj` in",
         "  `codec_encoder`, and bypasses the watermarking branch in `codec_decoder`; constant",
         "  sub-expressions are precomputed. No retraining, no fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _irodori_metadata(upstream).base_model]),
     ]
 
 
@@ -747,6 +750,7 @@ def _irodori_large_base_weights(
         "  `quantizer.in_proj` in `codec_encoder`, and bypasses the watermarking branch in",
         "  `codec_decoder`; constant sub-expressions are precomputed. No retraining, no",
         "  fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _irodori_large_metadata(upstream).base_model]),
     ]
 
 

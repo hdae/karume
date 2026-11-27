@@ -35,6 +35,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -609,8 +610,20 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
         " approved or",
         "  validated by CircleStone Labs LLC.",
+        *upstream_cards(_upstream_card_links(manifest)),
     ]
     return lines
+
+
+def _upstream_card_links(manifest: Mapping[str, Any]) -> list[str]:
+    """Links to the card of every redistributed upstream: the source page of each model that is
+    not on the Hub (manifest order), then the `base_model` repositories."""
+    off_hub = [
+        f"[{upstream.source.removeprefix('https://')}]({upstream.source})"
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    return [*off_hub, *(hf_link(repo) for repo in _anima_metadata(manifest).base_model)]
 
 
 #: Introduction of the origins section (the facts differ per repository — official / extra).

@@ -30,6 +30,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
@@ -37,6 +38,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .measurements import convt_diff_text
@@ -206,6 +208,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  became a 1×1 convolution followed by a pixel shuffle (they have",
         "  `kernel == stride`, so the two are exactly the same sum in a different order —",
         f"  measured max {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1).",
+        *upstream_cards([hf_link(repo) for repo in _depth_anything_metadata(manifest).base_model]),
     ]
     return lines
 

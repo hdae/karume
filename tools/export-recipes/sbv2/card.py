@@ -43,6 +43,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -277,6 +278,7 @@ def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
         f"- **Voices**: {dirs} of {voices}",
         f"- **Architecture**: {SBV2_ARCHITECTURE} (`version: {profile.source_version}`)",
         *profile.attribution,
+        *upstream_cards([hf_link(repo) for repo in profile.metadata.base_model]),
     ]
 
 

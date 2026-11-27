@@ -31,6 +31,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 # ---- optional frontmatter fields ------------------------------------------------
@@ -115,6 +116,23 @@ class TestPinned:
     def test_a_branch_or_a_shortened_commit_is_refused(self, revision: str) -> None:
         with pytest.raises(ValueError, match="not a full commit"):
             pinned("owner/name", revision)
+
+
+class TestUpstreamCards:
+    """The bullet that sends the reader to the card of every redistributed upstream."""
+
+    def test_it_names_one_card_in_the_singular_and_several_in_the_plural(self) -> None:
+        (one,) = upstream_cards(["[a/x](https://huggingface.co/a/x)"])
+        (two,) = upstream_cards(["[a/x](u)", "[b/y](v)", "[c/z](w)"])
+
+        assert "is documented on the upstream model card, and" in one
+        assert one.endswith("read [a/x](https://huggingface.co/a/x) before using it.")
+        assert "is documented on the upstream model cards, and" in two
+        assert two.endswith("read [a/x](u), [b/y](v) and [c/z](w) before using it.")
+
+    def test_a_card_without_an_upstream_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="no upstream card"):
+            upstream_cards([])
 
 
 class TestIntroduction:

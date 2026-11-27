@@ -48,6 +48,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
@@ -56,6 +57,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import SOURCES, UMT5_SOURCES, WAN22_MODELS, WAN22_TEXT_MODEL
@@ -434,7 +436,11 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
             f"- **Authors**: {card.generation} is released by Wan-AI"
             f" ([technical report](https://{card.paper}))."
         )
-    return lines + card.attribution_notes(manifest)
+    return [
+        *lines,
+        *card.attribution_notes(manifest),
+        *upstream_cards([hf_link(repo) for repo in _wan_metadata(manifest, card).base_model]),
+    ]
 
 
 def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:

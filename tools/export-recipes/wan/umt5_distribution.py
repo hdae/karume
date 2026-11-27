@@ -69,6 +69,7 @@ from karume.modelcard import (
     FileRefKey,
     Upstream,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
@@ -76,6 +77,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 from wan import umt5_tokenizer, umt5_xxl_tokenizer
 from wan.sources import SOURCES as WAN_SOURCES
@@ -676,6 +678,7 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         '  `GELU(approximate="tanh")`; the graph runs on the valid tokens with the bucket indices',
         "  as an input; the tokenizer converted into one JSON table. No retraining and no",
         "  fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _umt5_metadata(manifest).base_model]),
     ]
     return lines
 

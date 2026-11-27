@@ -701,6 +701,34 @@ class TestTheRuntimeSentenceOfEveryPublishedCard:
         assert start < lines.index(RUNTIME_SENTENCE) < end
 
 
+#: The bullet that sends the reader to the upstream cards (`karume.modelcard.upstream_cards`).
+_UPSTREAM_CARDS = "- **What the model can and cannot do** — "
+
+#: The cards whose upstream-card bullet does not list every `base_model` yet, or does not end the
+#: attribution section: the Gemma 4 ones, whose recipes change in a stage of their own
+#: (docs/spec/distribution-cards.md#what-the-upstream-says).
+CARDS_WITH_A_PARTIAL_UPSTREAM_CARD_BULLET = GEMMA4_REPOSITORIES
+
+
+class TestTheUpstreamCardsOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#what-the-upstream-says."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_attribution_ends_by_sending_the_reader_to_every_upstream_card(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        lines = card.split("\n")
+        bullets = [line for line in lines if line.startswith(_UPSTREAM_CARDS)]
+        attribution = lines[: lines.index("## Models")]
+        last = next(line for line in reversed(attribution) if line)
+        listed = all(hf_link(repo) in last for repo in _listed(_front_matter(card)["base_model"]))
+
+        assert len(bullets) <= 1
+        complete = bullets == [last] and listed
+        assert complete is (directory not in CARDS_WITH_A_PARTIAL_UPSTREAM_CARD_BULLET), bullets
+
+
 #: The card without a usage section (docs/spec/distribution-cards.md#usage).
 CARDS_WITHOUT_USAGE = frozenset({"karume-gemma4-qat-mobile"})
 

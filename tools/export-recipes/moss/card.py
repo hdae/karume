@@ -28,6 +28,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
@@ -36,6 +37,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN, VAE_ORIGINS
 
@@ -161,6 +163,7 @@ def _base_weights() -> list[str]:
         "- This is not an official release of Black Forest Labs, and it is not endorsed by them;",
         "  the Black Forest Labs and FLUX names are used only to describe where the VAE weights",
         "  come from.",
+        *upstream_cards([hf_link(repo) for repo in _metadata().base_model]),
     ]
     return lines
 

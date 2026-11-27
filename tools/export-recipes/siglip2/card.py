@@ -30,6 +30,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
@@ -37,6 +38,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .measurements import map_head_diff_text, map_head_norm_text
@@ -169,6 +171,7 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  q/k/v projections, which is equivalent up to floating-point rounding"
         f" ({SIGLIP2_MAP_HEAD_DIFF}",
         f"  measured on the pooled vector, whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}).",
+        *upstream_cards([hf_link(repo) for repo in _siglip2_metadata(manifest).base_model]),
     ]
     return lines
 
