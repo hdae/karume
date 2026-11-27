@@ -110,7 +110,8 @@ others with); an arm is `<mount>/<model>[@<preset>][:<switch>]…`:
   (the model's MTP drafter: the pipeline option `speculative` at the drafter's own draft count, and
   every chat sent with `speculative: "always"` — speculative decode in every cycle, no self-tuning
   gate; only on a model whose manifest entry declares `drafter` weights, not on the mobile QAT
-  line, and not with `ple-gpu`, a run-ahead depth or `host`,
+  line, and not with `ple-gpu`, a run-ahead depth or `host`; the bench builds no expert cache, so
+  26B's drafter arm has every expert resident,
   [the spec](../../docs/spec/workbench.md#the-decode-benchs-drafter-arm)), `no-signal`
   (the chats are sent without an `AbortSignal`, so the generation loop makes no abort check before
   a run; a cancel then takes effect between two chats) and `sampled` (this arm's chats

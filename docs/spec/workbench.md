@@ -123,7 +123,8 @@ the drafter (`fromPretrained` with `speculative`, at the drafter's own draft cou
 `speculative: "always"` — speculation in every cycle, without the self-tuning gate, so the arm times speculative
 decode itself. An arm without the switch builds no drafter and passes no `speculative`: it decodes one run per token.
 So two arms of one model and preset, with and without the switch, compare speculative decode with plain decode; under
-greedy decoding their outputs are the same tokens.
+greedy decoding their outputs are the same tokens. The bench builds no expert cache: an arm of Gemma 4 26B A4B, with
+the switch or without it, has every expert resident, the only way the pipeline takes `speculative` there.
 
 The switch is refused, naming the arm, before any GPU work: on a model whose manifest entry declares no `drafter`
 weights (it ships none), on the mobile QAT line (`gemma4QatMobile.Pipeline` takes no drafter), with `ple-gpu` and with

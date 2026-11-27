@@ -91,12 +91,12 @@ export const QAT = gemmaBenchManifestText({
   defaultPreset: "i4",
 });
 
-/** {@link QAT} with the MTP drafters its mirror ships (E2B, E4B and 12B; 26B has none). */
+/** {@link QAT} with the MTP drafters its line ships (every model: E2B, E4B, 12B and 26B). */
 export const QAT_WITH_DRAFTERS = gemmaBenchManifestText({
   models: ["e2b", "e4b", "12b", "26b"],
   presets: { i4: {}, "i4-fast": { numerics: { level: "reorder" }, packedStaticQuantize: true } },
   defaultPreset: "i4",
-  drafters: ["e2b", "e4b", "12b"],
+  drafters: ["e2b", "e4b", "12b", "26b"],
 });
 
 /**

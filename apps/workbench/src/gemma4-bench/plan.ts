@@ -219,7 +219,9 @@ export type BenchArm = {
   /**
    * Whether the arm decodes with the model's MTP drafter: its pipeline is built with the drafter and
    * every chat is sent with `speculative: "always"` — speculation in every cycle, no self-tuning
-   * gate, so the arm times speculative decode itself (absent = no drafter, one run per token).
+   * gate, so the arm times speculative decode itself (absent = no drafter, one run per token). The
+   * bench builds no expert cache, so a 26B A4B arm with the drafter has every expert resident, the
+   * only way the pipeline takes `speculative` there.
    */
   readonly drafter?: true;
   /** The distribution's declared sampler (for the "distribution's sampler" choice). */
