@@ -32,6 +32,7 @@ from karume.modelcard import (
     knob,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -113,15 +114,14 @@ def _base_weights() -> list[str]:
         "",
         "Converted and partly quantized — the original checkpoint is not distributed here.",
         "",
-        f"- **Weights**: [{SOURCE.repo}](https://huggingface.co/{SOURCE.repo}) at commit"
-        f" `{SOURCE.revision}`, licensed **{SOURCE.license}** (as of retrieval;"
+        f"- **Weights**: {pinned(SOURCE.repo, SOURCE.revision)}, licensed **{SOURCE.license}**"
+        " (as of retrieval;"
         f" [full text]({MOSS_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`).",
         f"- **Authors**: MOSS-Image is released by OpenMOSS ([technical report]"
         f"({MOSS_TECHNICAL_REPORT})).",
         "- **Text encoder** (`text_encoder`, `tokenizer`): the checkpoint's bundled Qwen3.5 text"
-        " encoder, from"
-        f" [{TEXT_ENCODER_ORIGIN.repo}](https://huggingface.co/{TEXT_ENCODER_ORIGIN.repo}) at"
-        f" commit `{TEXT_ENCODER_ORIGIN.revision}` (the Qwen team, Alibaba Cloud), licensed"
+        f" encoder, from {pinned(TEXT_ENCODER_ORIGIN.repo, TEXT_ENCODER_ORIGIN.revision)}"
+        " (the Qwen team, Alibaba Cloud), licensed"
         f" **{TEXT_ENCODER_ORIGIN.license}** (as of retrieval), and its tokenizer. Only the text"
         " tower is redistributed here; its copyright notice is kept in `NOTICE.md`.",
         "- **VAE decoder** (`vae_decoder_pre` / `vae_decoder_attn` / `vae_decoder_post`): the"
@@ -130,8 +130,8 @@ def _base_weights() -> list[str]:
     ]
     lines += [
         f"  - {MOSS_VAE_PARTS[origin.source.repo]}:"
-        f" [{origin.source.repo}](https://huggingface.co/{origin.source.repo}) at commit"
-        f" `{origin.source.revision}`, licensed **{origin.source.license}** (as of retrieval)"
+        f" {pinned(origin.source.repo, origin.source.revision)}, licensed"
+        f" **{origin.source.license}** (as of retrieval)"
         for origin in VAE_ORIGINS
     ]
     cards = ", ".join(

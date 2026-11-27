@@ -105,20 +105,16 @@ The level-2 sections come in this order:
 ### Naming and pinning an upstream
 
 - In the attribution section an HF upstream is a link with its repository ID as plain link text:
-  `[<owner>/<name>](https://huggingface.co/<owner>/<name>)`. The Anima origins write the source as a bare URL
-  (`**Source**: https://…`, a Civitai URL for a fine-tune). A Karume repository named as the source of fetched
-  components is a link with the ID in code font: the quant tables' note, and the `karume-wan2.2` and `karume-umt5-xxl`
-  cards' mentions of each other.
-- Which cards pin an upstream at a commit:
-
-  | Repositories | Pin |
-  | --- | --- |
-  | `karume-gemma4-qat-mobile`, `karume-moss-image`, `karume-umt5-xxl`, `karume-wan2.2` | "at commit `<40 hex digits>`" |
-  | `karume-irodori-v4.1-small-mf`, `karume-irodori-v4-large` | the checkpoint "at revision `<40 hex digits>`" |
-  | `karume-anima-2.9b` | the converted file "(revision `<40 hex digits>`)" |
-  | the other twelve | none |
-
-  `karume-umt5-xxl` also names the two Wan checkpoints it was checked against at 8-digit commits.
+  `[<owner>/<name>](https://huggingface.co/<owner>/<name>)` (`karume.modelcard.hf_link`). The Anima origins link a
+  model's source the same way, and a Civitai source by its address as link text (`[civitai.com/models/…](…)`). A
+  Karume repository named as the source of fetched components is a link with the ID in code font: the quant tables'
+  note, and the `karume-wan2.2` and `karume-umt5-xxl` cards' mentions of each other.
+- A card pins every upstream it stores, and every upstream of a component it fetches from another Karume repository,
+  at the full commit the bytes were taken from: `` [<owner>/<name>](…) at commit `<40 hex digits>` ``
+  (`karume.modelcard.pinned`). The commits are the ones the recipes and their `THIRD_PARTY_NOTICES.md` ledgers
+  record (a fetch record, the commit a checkpoint's own config names for its text encoder, a pinned source table).
+  A Civitai source, which has no commits, is pinned by its model version ("(version `<id>`)"). Every `base_model`
+  is pinned somewhere in the card, except on `karume-gemma4` and `karume-gemma4-qat`, which pin no upstream.
 - A commit of another Karume repository (the manifest holds it in full) is written as its first 16 hex digits and
   "…", in the quant tables' note "Some components are fetched from … at commit … — those bytes are identical to this
   model's own, so they are not stored here a second time." (`karume.modelcard.quants`).

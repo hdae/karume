@@ -52,6 +52,7 @@ from karume.modelcard import (
     knob,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -88,6 +89,7 @@ WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 #: in f32 to this checkpoint's `text_encoder`, but the provenance names the original — so that it
 #: does not disagree with the card of the umT5 distribution).
 WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
+WAN_TEXT_ENCODER_REVISION = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.revision
 
 #: The pipeline contract the Wan2.2 TI2V 5B card can describe (`WAN_TI2V_PIPELINE_NAME` /
 #: `WAN_TI2V_PIPELINE_MAJOR` in the TS side's `packages/models/src/wan/config.ts`).
@@ -417,8 +419,8 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
     for name in manifest["models"]:
         source = _upstream(name, card)
         lines.append(
-            f"- **`{name}`**: [{source.repo}](https://huggingface.co/{source.repo}) at commit"
-            f" `{source.revision}`, licensed **{source.license}** (as of retrieval;"
+            f"- **`{name}`**: {pinned(source.repo, source.revision)}, licensed"
+            f" **{source.license}** (as of retrieval;"
             f" [full text]({WAN_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
         )
     if card.paper is not None:
@@ -473,7 +475,8 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
         repo, revision = borrowed
         lines += [
             "- **The text encoder is not stored here.** `karume.json` references the encoder of",
-            f"  `{WAN_TEXT_ENCODER_UPSTREAM}` (this checkpoint's `text_encoder` holds the same",
+            f"  {pinned(WAN_TEXT_ENCODER_UPSTREAM, WAN_TEXT_ENCODER_REVISION)} (this checkpoint's"
+            " `text_encoder` holds the same",
             "  encoder rounded to bfloat16), converted to int8, at commit"
             f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
             "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
@@ -482,8 +485,7 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
     lines += [
         "- **Precomputed embeddings and tokenizer**: the repository also ships the encoder's",
         "  outputs for a fixed set of prompts (see below), computed in bfloat16 with the umT5-XXL",
-        f"  encoder of [{text.repo}](https://huggingface.co/{text.repo}) at commit"
-        f" `{text.revision}`",
+        f"  encoder of {pinned(text.repo, text.revision)}",
         "  and stored as float32, for use without the text encoder, and the tokenizer table",
         "  converted from the same commit (its tokenizer files are the same as this checkpoint's).",
     ]

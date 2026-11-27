@@ -16,7 +16,8 @@ explain and what to spell out in the usage section are family-specific facts, so
 
 NOTE: the rendering components ({@link frontmatter} / {@link introduction} / {@link models} /
 {@link quants} / {@link model_sections} / {@link render} / {@link require_pipeline} /
-{@link default_model} / {@link knob} / {@link from_pretrained}) are **the public surface for
+{@link default_model} / {@link knob} / {@link from_pretrained} / {@link hf_link} /
+{@link pinned}) are **the public surface for
 recipes** (ADR 0065 stage 6). Since `card.py`, outside the wheel, calls them by name, keeping
 private names would make "calling across private" the default. Only the components closed within
 this module keep a leading `_` ({@link _base_model} and the like).
@@ -60,6 +61,7 @@ assets changed" is the premise of reassembly). Dicts from JSON keep insertion or
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -135,6 +137,28 @@ UNOFFICIAL_CONVERSION_NOTICE = (
 RUNTIME_SENTENCE = (
     "Runs in the browser, in Node (with a WebGPU implementation passed in) and in Deno."
 )
+
+
+#: A full commit of an HF repository (40 lower-case hex digits).
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def hf_link(repo: str) -> str:
+    """An HF repository as a card links it: the repository ID as plain link text."""
+    return f"[{repo}](https://huggingface.co/{repo})"
+
+
+# SPEC: docs/spec/distribution-cards.md#naming-and-pinning-an-upstream
+def pinned(repo: str, revision: str) -> str:
+    """An upstream with the commit the stored bytes were taken from:
+    `[<owner>/<name>](https://huggingface.co/<owner>/<name>) at commit `<40 hex digits>``.
+
+    MUST: the revision is the full commit — a branch, a tag or a shortened commit does not pin the
+    bytes, and a reader copies it as it is.
+    """
+    if _COMMIT.fullmatch(revision) is None:
+        raise ValueError(f"{repo}: {revision!r} is not a full commit (40 lower-case hex digits)")
+    return f"{hf_link(repo)} at commit `{revision}`"
 
 
 @dataclass(frozen=True)

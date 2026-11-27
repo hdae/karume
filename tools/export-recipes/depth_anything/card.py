@@ -33,6 +33,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -66,6 +67,13 @@ DEPTH_ANYTHING_PAPER = "arxiv.org/abs/2406.09414"
 #: single value today).
 DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",
+}
+
+#: Model name → the commit of the upstream checkpoint the stored weights were taken from (the one
+#: fetched on 2026-08-16 into `inputs/depth-anything/Depth-Anything-V2-Small-hf` —
+#: THIRD_PARTY_NOTICES.md). The card pins every model at it.
+DEPTH_ANYTHING_REVISIONS: Mapping[str, str] = {
+    "small": "5426e4f0f36572d16453bbda7a8389317b1bef99",
 }
 
 #: Checked 2026-08-14 against the HF model API: `license: apache-2.0`. The frontmatter is written
@@ -174,7 +182,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = _depth_anything_repo(name)
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+            f"- **`{name}`**: {pinned(repo, DEPTH_ANYTHING_REVISIONS[name])}, licensed"
             f" **{DEPTH_ANYTHING_LICENSE}** (as of retrieval;"
             f" [full text]({DEPTH_ANYTHING_LICENSE_TEXT_LINK}) — a verbatim copy is in"
             " `LICENSE.md`)."

@@ -27,9 +27,11 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -96,11 +98,23 @@ class UpstreamModel:
     #: Permission fields of the origin page (checked at the source — retrieved on
     #: {@link PERMISSIONS_RETRIEVED} below).
     permissions: tuple[tuple[str, str], ...]
-    #: The commit of the source repository the file was read at (`None` = not recorded — the
-    #: rows written before this field). A third party's repository may replace its file under the
-    #: same name, so its row pins the bytes the conversion read.
+    #: The commit of the source repository the file was read at (an HF source — the card pins it).
+    #: A repository may replace its file under the same name, so the row pins the bytes the
+    #: conversion read.
     revision: str | None = None
+    #: The model version of a source that has no commits (a Civitai page — the version the file
+    #: was matched to, THIRD_PARTY_NOTICES.md); `None` for an HF source.
+    version: str | None = None
 
+
+#: The commit of `circlestone-labs/Anima` the official single-file checkpoints were read at (its
+#: `main` at fetch time, from the HF cache's `refs/main` — THIRD_PARTY_NOTICES.md).
+ANIMA_SINGLE_FILE_REVISION = "f973fc41ec7545364ac9776c2440285f43ff2a30"
+
+#: The commit of `circlestone-labs/Anima-Base-v1.0-Diffusers` the base model and the shared
+#: components (text encoder, VAE, tokenizers) were read at (fetched 2026-08-16 into the HF cache —
+#: THIRD_PARTY_NOTICES.md).
+ANIMA_BASE_REVISION = "073c3a9db359c31ad0e8aa268d15775473c2176c"
 
 #: Date the permission fields were checked at the source (shown "as of" in the card — the facts
 #: may change later).
@@ -116,6 +130,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.1.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-v1.0": UpstreamModel(
         title="Anima Base v1.0",
@@ -123,6 +138,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
         file=None,
         permissions=(),
+        revision=ANIMA_BASE_REVISION,
     ),
     "anima-aesthetic-v1.1": UpstreamModel(
         title="Anima Aesthetic v1.1",
@@ -130,6 +146,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.1.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     # The v1.0 generation is distributed alongside (maintainer ruling of 2026-09-01 — preferences
     # between versions differ for this family; an instance of ADR 0077's "the latest is not
@@ -140,6 +157,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.0.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-aesthetic-v1.0": UpstreamModel(
         title="Anima Aesthetic v1.0",
@@ -147,6 +165,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.0.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-wai-v1.0": UpstreamModel(
         title="WAI-ANIMA v1.0 (base 1.0)",
@@ -159,6 +178,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDerivatives", "true"),
             ("allowDifferentLicense", "true"),
         ),
+        version="2983680",
     ),
     "anima-copycat-20260610": UpstreamModel(
         title="copycat-anima 20260610",
@@ -171,6 +191,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDerivatives", "true"),
             ("allowDifferentLicense", "false"),
         ),
+        version="3020450",
     ),
     # Anima-2.9B (a layer expansion with its own repository, karume-anima-2.9b). It is on the Hub,
     # so there are no permission fields; its card states the CircleStone license for a derivative
@@ -489,6 +510,21 @@ def _upstream_model(name: str) -> UpstreamModel:
     return upstream
 
 
+#: The URL prefix of an HF repository (a source under it is named by its repository ID).
+_HF_URL = "https://huggingface.co/"
+
+
+def _source(upstream: UpstreamModel) -> str:
+    """Where a model was converted from, as a plain-text link, with what pins its bytes: the
+    commit of an HF source, the version of a source without commits (nothing is guessed for a row
+    that records neither)."""
+    if upstream.source.startswith(_HF_URL):
+        repo = upstream.source.removeprefix(_HF_URL)
+        return hf_link(repo) if upstream.revision is None else pinned(repo, upstream.revision)
+    link = f"[{upstream.source.removeprefix('https://')}]({upstream.source})"
+    return link if upstream.version is None else f"{link} (version `{upstream.version}`)"
+
+
 def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
     """Origins per model (**only the models in this repository**, listed from the manifest).
 
@@ -514,11 +550,10 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
             f"### `{name}` — {upstream.title}",
             "",
             f"- **Author**: {upstream.author}",
-            f"- **Source**: {upstream.source}",
+            f"- **Source**: {_source(upstream)}",
         ]
         if upstream.file is not None:
-            at = "" if upstream.revision is None else f" (revision `{upstream.revision}`)"
-            lines.append(f"- **Converted from**: `{upstream.file}`{at}")
+            lines.append(f"- **Converted from**: `{upstream.file}`")
         if upstream.permissions:
             lines += [
                 "",
@@ -585,20 +620,27 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
 
 
 #: Introduction of the origins section (the facts differ per repository — official / extra).
+#: Where the shared components come from (the text encoder, VAE and tokenizers of the base model's
+#: Diffusers repository, at the commit they were read at).
+_SHARED_COMPONENTS = (
+    "The text encoder, VAE and tokenizers are those of"
+    f" {pinned(ANIMA_METADATA.base_model[0], ANIMA_BASE_REVISION)}"
+)
 OFFICIAL_ORIGINS_INTRO = (
     "Each model below is an official CircleStone release — the Anima base model itself or an",
-    "official variant of it. The text encoder, VAE and tokenizers are shared across them.",
+    "official variant of it.",
+    f"{_SHARED_COMPONENTS}, shared across them.",
 )
 EXTRA_ORIGINS_INTRO = (
-    "Each model below is a community fine-tune of the CircleStone Anima base model. The text",
-    "encoder, VAE and tokenizers are shared with the official repository",
+    "Each model below is a community fine-tune of the CircleStone Anima base model.",
+    f"{_SHARED_COMPONENTS}, shared with the official repository",
     "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
     "cross-repository references in `karume.json`.",
 )
 ANIMA_2_9B_ORIGINS_INTRO = (
     "The model below is a third party's layer expansion of the CircleStone Anima base model,",
-    "not an official CircleStone release. The text encoder, VAE and tokenizers are the official",
-    "ones, shared with the official repository",
+    "not an official CircleStone release.",
+    f"{_SHARED_COMPONENTS} (the official ones), shared with the official repository",
     "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
     "cross-repository references in `karume.json`.",
 )

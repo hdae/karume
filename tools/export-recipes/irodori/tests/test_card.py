@@ -268,7 +268,7 @@ class TestIrodoriMeanFlowCard:
         assert "# Irodori-TTS v4.1 Small MF — Karume" in card
         assert (
             "[Aratako/Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)"
-            " at revision `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e`, licensed **mit**"
+            " at commit `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e`, licensed **mit**"
         ) in card
         assert "distilled it from [Aratako/Irodori-TTS-v4.1-Small]" in card
         assert "MeanFlow-distilled DiT" in card
@@ -347,7 +347,7 @@ class TestIrodoriLargeCard:
 
         assert (
             "[Aratako/Irodori-TTS-v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large)"
-            " at revision `2e0c55428ce97268a507f1feeb2478f8d9148e8b`,"
+            " at commit `2e0c55428ce97268a507f1feeb2478f8d9148e8b`,"
         ) in card
         assert "[Gemma Terms of Use](https://ai.google.dev/gemma/terms)" in card
         assert (

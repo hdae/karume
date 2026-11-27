@@ -623,10 +623,12 @@ class TestLayeredCard:
         assert upstream.source == "https://huggingface.co/Gazingstars123/Anima-2.9B"
         assert f"### `{LAYERED}` — {upstream.title}" in layered_card
         assert f"- **Author**: {upstream.author}" in layered_card
-        assert f"- **Source**: {upstream.source}" in layered_card
+        assert (
+            "- **Source**: [Gazingstars123/Anima-2.9B](https://huggingface.co/Gazingstars123/Anima-2.9B)"
+            " at commit `9f9cb502dbae7a616c3cc5a530633427fe735665`"
+        ) in layered_card.splitlines()
         assert (
             "- **Converted from**: `Anima-2.9B-preview-v1.safetensors`"
-            " (revision `9f9cb502dbae7a616c3cc5a530633427fe735665`)"
         ) in layered_card.splitlines()
 
     def test_a_row_without_a_revision_prints_none(self, card: str, extra_card: str) -> None:

@@ -29,6 +29,7 @@ from functools import partial
 from typing import Any
 
 from _shared.upstream import hf_upstreams
+from embeddinggemma2.sources import PIN
 from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
@@ -39,6 +40,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -201,6 +203,14 @@ EMBEDDINGGEMMA2_PRECISION_STATEMENT = (
     "upstream says to run the model in bfloat16 or float32, never float16: its activations exceed"
     " float16's range, and float16 returns NaN or silently degraded embeddings"
 )
+
+
+def _revision(repo: str) -> str:
+    """The commit the stored weights of `repo` were exported from (`embeddinggemma2.sources.PIN` —
+    every container's provenance is checked against it at assembly)."""
+    if repo != PIN.repo:
+        raise ValueError(f"{repo} is not the pinned source {PIN.repo} — no commit to name")
+    return PIN.revision
 
 
 def _metadata(manifest: Mapping[str, Any]) -> CardMetadata:
@@ -588,7 +598,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = EMBEDDINGGEMMA2_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+            f"- **`{name}`**: {pinned(repo, _revision(repo))}, licensed"
             f" **{EMBEDDINGGEMMA2_LICENSE}**"
             f" ([full text]({EMBEDDINGGEMMA2_LICENSE_TEXT_LINK}); a verbatim copy is in"
             " `LICENSE.md`)."

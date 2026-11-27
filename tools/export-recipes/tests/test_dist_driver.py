@@ -70,6 +70,7 @@ from karume.modelcard import (
     REVISION_PIN_COMMENT,
     RUNTIME_SENTENCE,
     UNOFFICIAL_CONVERSION_NOTICE,
+    hf_link,
     introduction,
 )
 from moss.distribution import PIPELINE as MOSS_PIPELINE
@@ -566,6 +567,41 @@ class TestTheTitleAndTheNonEndorsementSentence:
         expected = introduction("", hf_upstreams(base_models))[3]
 
         assert (expected in card.split("\n")) is (directory not in SENTENCES_BY_TITLE)
+
+
+#: The cards that do not pin their upstreams yet: two of the Gemma 4 ones, whose recipes change in
+#: a stage of their own (docs/spec/distribution-cards.md#naming-and-pinning-an-upstream).
+CARDS_WITHOUT_PINS = frozenset({"karume-gemma4", "karume-gemma4-qat"})
+
+#: A shortened commit or digest of a card (the 16 hex digits and "…" a card may write for a commit
+#: of another Karume repository or a file digest).
+_SHORTENED_HEX = re.compile(r"`([0-9a-f]{7,39})…`")
+
+
+class TestThePinsOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_every_base_model_is_pinned_at_its_full_commit(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        unpinned = [
+            repo
+            for repo in _listed(_front_matter(card)["base_model"])
+            if re.search(re.escape(f"{hf_link(repo)} at commit `") + "[0-9a-f]{40}`", card) is None
+        ]
+
+        assert bool(unpinned) is (directory in CARDS_WITHOUT_PINS), unpinned
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_a_pin_is_a_commit_and_only_a_karume_commit_is_shortened(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+
+        assert "at revision `" not in card and "(revision `" not in card
+        assert {len(digits) for digits in _SHORTENED_HEX.findall(card)} <= {16}
 
 
 #: The level-2 sections before the family's own

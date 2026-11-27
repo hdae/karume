@@ -72,11 +72,13 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
 )
 from wan import umt5_tokenizer, umt5_xxl_tokenizer
+from wan.sources import SOURCES as WAN_SOURCES
 from wan.sources import UMT5_SOURCES, Umt5Source
 from wan.umt5_intake import (
     UNDECLARED_LICENSE,
@@ -647,8 +649,8 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         # keys read.
         lines.append(
             f"- **`{name}`**: the encoder weights (`shared.weight` and `encoder.*`) of"
-            f" [{source.repo}](https://huggingface.co/{source.repo}) at commit `{source.revision}`,"
-            f" licensed **{source.license}** (as of retrieval;"
+            f" {pinned(source.repo, source.revision)}, licensed **{source.license}** (as of"
+            " retrieval;"
             f" [full text]({UMT5_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
             " The decoder and `lm_head` are not included."
         )
@@ -662,9 +664,9 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         )
     lines += [
         "- **Relation to the Wan checkpoints**: every tensor is bit-identical to the float32",
-        "  `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit `0fad780a…`), and",
-        "  the bfloat16 `text_encoder` of `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (commit `b8fff731…`)",
-        "  is its round-to-nearest-even rounding (checked on 2026-10-04).",
+        f"  `text_encoder` folder in {_wan_checkpoint(UMT5_WAN21_TEXT_MODEL)}, and the bfloat16",
+        f"  `text_encoder` in {_wan_checkpoint(UMT5_WAN22_MODEL)} is its round-to-nearest-even",
+        "  rounding (checked on 2026-10-04).",
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
         "  only the encoder converted (no decoder, no `lm_head`);",
         "  conversion into the Karume container format; the weight matrices of the linear layers",
@@ -676,6 +678,18 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  fine-tuning.",
     ]
     return lines
+
+
+#: The two Wan checkpoints the card relates this encoder to, by their names in `wan.sources.SOURCES`
+#: (the commits it states are theirs — the checks of 2026-10-04 named these commits).
+UMT5_WAN21_TEXT_MODEL = "t2v-1.3b"
+UMT5_WAN22_MODEL = "ti2v-5b"
+
+
+def _wan_checkpoint(name: str) -> str:
+    """A Wan checkpoint of `wan.sources.SOURCES` with its full commit."""
+    source = WAN_SOURCES[name]
+    return pinned(source.repo, source.revision)
 
 
 def _consumer_link() -> str:

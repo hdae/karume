@@ -35,6 +35,7 @@ from sbv2.card import (
     SBV2_JVNV_PROFILE,
     SBV2_QUANT_ROUNDING,
     SBV2_SUPPORTED_PIPELINE,
+    SBV2_TEXT_ENCODER_REVISION,
     Sbv2CardProfile,
     render_sbv2_model_card,
 )
@@ -586,6 +587,18 @@ class TestSbv2CardProfiles:
     def test_it_offers_exactly_the_families_it_can_attribute(self) -> None:
         assert sorted(SBV2_CARD_PROFILES) == ["jvnv"]
         assert SBV2_CARD_PROFILES["jvnv"] is SBV2_JVNV_PROFILE
+
+    def test_it_pins_the_text_encoder_at_the_commit_its_export_bakes(self) -> None:
+        """The card's pin is the revision `deberta/export.py` loads and writes into the container's
+        provenance — a literal on the card's side (importing the export loads torch)."""
+        from deberta.export import MODEL_ID, MODEL_REVISION
+
+        card = _profile_card(SBV2_JVNV_PROFILE)
+
+        assert SBV2_TEXT_ENCODER_REVISION == MODEL_REVISION
+        assert f"[{MODEL_ID}](https://huggingface.co/{MODEL_ID}) at commit `{MODEL_REVISION}`" in (
+            card
+        )
 
     def test_it_refuses_to_draw_a_card_without_naming_the_family(self) -> None:
         """There is no default profile — if it could be rendered by omission, wrong attribution

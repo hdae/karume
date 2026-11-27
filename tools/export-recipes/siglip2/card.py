@@ -33,6 +33,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -60,6 +61,14 @@ SIGLIP2_TITLE = "SigLIP2 Vision Tower — Karume"
 SIGLIP2_UPSTREAM: Mapping[str, str] = {
     "base": "google/siglip2-base-patch16-224",
     "so400m": "google/siglip2-so400m-patch14-384",
+}
+
+#: Model name → the commit of the upstream checkpoint the stored weights were taken from (the HF
+#: cache's `refs/main` when each was fetched — the local fetch record, THIRD_PARTY_NOTICES.md). The
+#: card pins every model at it.
+SIGLIP2_REVISIONS: Mapping[str, str] = {
+    "base": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+    "so400m": "e8e487298228002f3d8a82e0cd5c8ea9c567f57f",
 }
 
 SIGLIP2_LICENSE = "apache-2.0"
@@ -146,7 +155,7 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = SIGLIP2_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+            f"- **`{name}`**: {pinned(repo, SIGLIP2_REVISIONS[name])}, licensed"
             f" **{SIGLIP2_LICENSE}** (as of retrieval;"
             f" [full text]({SIGLIP2_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
         )

@@ -38,6 +38,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -534,7 +535,7 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
     return [
         "## Base weights and attribution",
         "",
-        f"- **Weights**: [{entry.repo}](https://huggingface.co/{entry.repo}), licensed"
+        f"- **Weights**: {pinned(entry.repo, entry.revision)}, licensed"
         f" **{BIREFNET_LICENSE}** (as of retrieval) — a verbatim copy of the license, carrying"
         " the copyright notices that apply to this repository, is in `LICENSE.md`.",
         *entry.attribution,

@@ -27,6 +27,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -99,6 +100,21 @@ class TestFrontmatterOptionalFields:
             "license_link",
             "tags",
         ]
+
+
+class TestPinned:
+    """An upstream named with the full commit its bytes were taken from."""
+
+    def test_it_links_the_repository_and_names_the_full_commit(self) -> None:
+        assert pinned("owner/name", "0123456789abcdef0123456789abcdef01234567") == (
+            "[owner/name](https://huggingface.co/owner/name) at commit"
+            " `0123456789abcdef0123456789abcdef01234567`"
+        )
+
+    @pytest.mark.parametrize("revision", ["main", "0123456789abcdef", "A" * 40, "0" * 41])
+    def test_a_branch_or_a_shortened_commit_is_refused(self, revision: str) -> None:
+        with pytest.raises(ValueError, match="not a full commit"):
+            pinned("owner/name", revision)
 
 
 class TestIntroduction:

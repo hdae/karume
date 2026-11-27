@@ -34,10 +34,12 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -58,6 +60,11 @@ SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
 #: rather than in a profile field.
 SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
+
+#: The commit of {@link SBV2_TEXT_ENCODER_MODEL} the text encoder is exported from (`MODEL_REVISION`
+#: of `deberta/export.py`, which bakes it into the container's provenance — kept as a literal here,
+#: as importing that module would load torch; `tests/test_card.py` checks the two agree).
+SBV2_TEXT_ENCODER_REVISION = "547b0e8b044fba3f9b84d0ab9f990440bd130c8b"
 
 #: The number of encoder layers left in the distributed text_encoder. It is the layer count that
 #: makes `hidden_states[-3]`, which SBV2 uses (`[0]` = embedding output, `[i+1]` = output of layer
@@ -201,8 +208,7 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         "  where the mixed form stores the group-quantizable weights as `i4` and everything else",
         "  as `i8` (the quant table below says which storage each quant selects). No retraining,",
         "  no fine-tuning — the voices are the source checkpoints in a different storage form.",
-        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
-        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
+        f"- **Text encoder**: {pinned(SBV2_TEXT_ENCODER_MODEL, SBV2_TEXT_ENCODER_REVISION)},",
         f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
         "  in the container format as the `text_encoder` component — the same license as the",
         "  voices, so the share-alike term is consistent across everything in this repository.",
@@ -256,12 +262,19 @@ def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
     (= the source of the weights itself)."""
     base_model = profile.metadata.base_model[0]
     dirs = " / ".join(f"`{name}`" for name in profile.source_dirs)
+    # A family whose retrieved revision is not recorded names its source unpinned (no commit is
+    # guessed — the profile's `source_revision`).
+    voices = (
+        hf_link(base_model)
+        if profile.source_revision is None
+        else pinned(base_model, profile.source_revision)
+    )
     return [
         "## Base weights and attribution",
         "",
         "Converted into the container format — the original checkpoints are not distributed here.",
         "",
-        f"- **Voices**: {dirs} of [{base_model}](https://huggingface.co/{base_model})",
+        f"- **Voices**: {dirs} of {voices}",
         f"- **Architecture**: {SBV2_ARCHITECTURE} (`version: {profile.source_version}`)",
         *profile.attribution,
     ]
