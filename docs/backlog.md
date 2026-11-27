@@ -250,6 +250,11 @@ maintainer's ruling of 2026-11-06).
          3. an optional guide to the browser's WebGPU developer settings;
          4. once started, one square per measured item, many at a time, coloured by state: a faster choice found
             (blue), the default kept (green), running (white), failed (red).
+       - Conditions under which timing is steadier, held for the length of a run (filed 2026-11-28, the
+         maintainer's request): the page already holds a screen wake lock (`apps/benchmark/src/wake-lock.ts`) and
+         records whether it held and how long the tab was hidden; left are entering full screen for the run
+         (the Fullscreen API), showing before the start which of the conditions hold, and recording full screen
+         in the file beside the wake lock.
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
