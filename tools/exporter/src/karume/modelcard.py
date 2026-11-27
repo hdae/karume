@@ -127,6 +127,16 @@ UNOFFICIAL_CONVERSION_NOTICE = (
 )
 
 
+#: **The runtime sentence**, the same words in every card's "What is this" section (maintainer's
+#: ruling of 2026-11-27): the runtimes a distribution runs in. Node has no WebGPU of its own, so the
+#: sentence says that one is passed in (the runtime's `acquireGpu({ gpu })`). A card writes it as a
+#: line of its own, so that the one constant is found whole wherever the paragraph wraps.
+#: SPEC: docs/spec/distribution-cards.md#what-is-this
+RUNTIME_SENTENCE = (
+    "Runs in the browser, in Node (with a WebGPU implementation passed in) and in Deno."
+)
+
+
 @dataclass(frozen=True)
 class Upstream:
     """One upstream work a card names in {@link UNOFFICIAL_CONVERSION_NOTICE}: how it is spelled

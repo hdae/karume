@@ -30,6 +30,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -400,7 +401,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
             f"A text embedding distribution: the **text tower** of `{upstream}`, with its mean"
             " pooling and",
         ]
-        runs = "a string in, a unit vector out."
+        runs = "A string goes in and a unit vector comes out."
         graphs = "  of the prompt you name, tokenizes on the host and runs one graph."
         scope = list(_TEXT_ONLY_SCOPE)
     elif audio is None:
@@ -408,7 +409,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
             "A text and image embedding distribution: the **text and vision towers** of",
             f"`{upstream}`, with the mean pooling and",
         ]
-        runs = "a text, an image or both in, a unit vector out."
+        runs = "A text, an image or both go in and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes on the host, runs the vision tower once per image"
             " and the text graph once."
@@ -419,7 +420,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
             "A text and audio embedding distribution: the **text and audio towers** of",
             f"`{upstream}`, with the mean pooling and",
         ]
-        runs = "a text, an audio or both in, a unit vector out."
+        runs = "A text, an audio or both go in and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes and computes the log-mel frames on the host, runs"
             " the audio tower once per audio and the text graph once."
@@ -430,7 +431,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
             "A text, image and audio embedding distribution: the **text, vision and audio towers**",
             f"of `{upstream}`, with the mean pooling and",
         ]
-        runs = "text, images and audio in any mix, a unit vector out."
+        runs = "Text, images and audio go in, in any mix, and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes (and computes an audio's log-mel frames) on the"
             " host, runs a tower once per image or audio and the text graph once."
@@ -442,7 +443,8 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         *opening,
         "L2 normalisation, converted into the WebGPU inference runtime **Karume**'s container",
         "format (a `.krm` part sequence whose first part carries the graph and model descriptors).",
-        f"Runs as-is in the browser and in Deno — {runs}",
+        RUNTIME_SENTENCE,
+        runs,
         "",
         "- **The tokenizer and the prompts ship with the weights.** `embed()` prepends the prefix",
         graphs,

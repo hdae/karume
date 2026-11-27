@@ -42,6 +42,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -360,6 +361,7 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
         "A **text-to-video** and **image-to-video** distribution of Wan2.2 TI2V 5B, converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
         "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Nine graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
         f" {where}),",

@@ -20,6 +20,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     Upstream,
@@ -273,8 +274,8 @@ def _official_overview(manifest: Mapping[str, Any]) -> list[str]:
         "The official CircleStone **Anima** models —"
         f" [{base_model}](https://huggingface.co/{base_model}) and its official variants —",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- The default model is `{model_name}` — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default.",
@@ -305,8 +306,8 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
         "Community fine-tunes of the CircleStone **Anima** base model"
         f" ([{base_model}](https://huggingface.co/{base_model})),",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
@@ -350,8 +351,8 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "CircleStone **Anima** base model by a third party — its transformer deepened from 28 to",
         "40 blocks of the same width (about 2.9B parameters) — converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
-        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
-        "Deno.",
+        "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         'Its card (at the revision listed under "Models and their origins" below) describes it',
         "as follows:",

@@ -22,6 +22,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -86,7 +87,8 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "A text-to-image distribution: MOSS-Image-SFT (a 5B single-stream diffusion transformer",
         "with a Qwen3.5-9B text encoder and the FLUX.2 VAE), converted into the WebGPU inference",
         "runtime **Karume**'s container format (a `.krm` part sequence whose first part carries",
-        "the graph and model descriptors). Runs in the browser, in Node and in Deno.",
+        "the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         "- Everything runs in Karume: the chat template and the tokenizer on the host, then the",
         "  text encoder, the transformer and the VAE on the GPU, one stage at a time (each stage",

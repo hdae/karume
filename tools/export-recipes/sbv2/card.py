@@ -28,6 +28,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -233,8 +234,8 @@ def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         f"A Japanese text-to-speech distribution: **{SBV2_ARCHITECTURE}** voices converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
-        "first part carries the graph and model descriptors). Runs as-is in the browser and in"
-        " Deno.",
+        "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         "- The acoustic chain is shipped as fused graphs: `text_encoder` (a Japanese DeBERTa),",
         "  `front` (phoneme encoder + duration predictors) and `voice` (flow + HiFi-GAN decoder).",

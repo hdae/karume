@@ -24,6 +24,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -115,8 +116,8 @@ def _siglip2_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "An image embedding distribution: the **vision tower** of SigLIP2, converted into the",
         "WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
-        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
-        "Deno.",
+        "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         "- One graph, one call: pixels in, `pooler_output` out — the pooled `[1,"
         f" {config['hiddenDim']}]` vector from the attention-pooling (MAP) head.",

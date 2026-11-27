@@ -68,6 +68,7 @@ from karume.migrate import card_format_statement
 from karume.modelcard import (
     HF_OWNER,
     REVISION_PIN_COMMENT,
+    RUNTIME_SENTENCE,
     UNOFFICIAL_CONVERSION_NOTICE,
     introduction,
 )
@@ -482,11 +483,13 @@ FRONT_MATTER_KEYS = (
     "tags",
 )
 
+#: The three Gemma 4 repositories, whose recipes change in a stage of their own: where a rule is not
+#: built for them yet, the spec names them as the exception.
+GEMMA4_REPOSITORIES = frozenset({"karume-gemma4", "karume-gemma4-qat", "karume-gemma4-qat-mobile"})
+
 #: The repositories whose `license_link` stands beside an SPDX `license` (the Gemma 4 license page,
 #: as Google's own cards write it — docs/spec/distribution-cards.md#front-matter).
-GEMMA4_LICENSE_LINK_REPOSITORIES = frozenset(
-    {"karume-gemma4", "karume-gemma4-qat", "karume-gemma4-qat-mobile"}
-)
+GEMMA4_LICENSE_LINK_REPOSITORIES = GEMMA4_REPOSITORIES
 
 #: The one card whose tags do not begin with its pipeline tag (the spec states it).
 TAGS_NOT_LED_BY_THE_PIPELINE_TAG = frozenset({"karume-gemma4-qat-mobile"})
@@ -624,6 +627,32 @@ class TestTheSectionsOfEveryPublishedCard:
         assert card.count("| Quant | What it is | Download | Weights | Compute |") == len(
             manifest["models"]
         )
+
+
+#: The cards whose "What is this" does not carry the runtime sentence yet: the Gemma 4 ones, whose
+#: recipes change in a stage of their own (docs/spec/distribution-cards.md#what-is-this).
+CARDS_WITHOUT_THE_RUNTIME_SENTENCE = GEMMA4_REPOSITORIES
+
+
+class TestTheRuntimeSentenceOfEveryPublishedCard:
+    """docs/spec/distribution-cards.md#what-is-this — the browser, Node and Deno in one sentence."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_what_is_this_carries_the_runtime_sentence_once_as_a_line(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        lines = card.split("\n")
+
+        if directory in CARDS_WITHOUT_THE_RUNTIME_SENTENCE:
+            assert RUNTIME_SENTENCE not in card
+            return
+        start = lines.index("## What is this")
+        end = next(
+            index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")
+        )
+        assert lines.count(RUNTIME_SENTENCE) == 1
+        assert start < lines.index(RUNTIME_SENTENCE) < end
 
 
 #: The card without a usage section (docs/spec/distribution-cards.md#usage).

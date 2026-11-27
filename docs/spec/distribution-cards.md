@@ -92,8 +92,10 @@ The level-2 sections come in this order:
 
 - Its first paragraph says what is distributed, converted into Karume's container format, "(a `.krm` part sequence
   whose first part carries the graph and model descriptors)".
-- The runtimes it names: "Runs as-is in the browser and in Deno" on fifteen cards; "Runs in the browser, in Node and
-  in Deno." on `karume-moss-image`; no such sentence on `karume-wan2.2` and `karume-umt5-xxl`.
+- The runtimes it names are one sentence, `karume.modelcard.RUNTIME_SENTENCE` ("Runs in the browser, in Node (with a
+  WebGPU implementation passed in) and in Deno."), written as a line of its own in the first paragraph, on every card
+  but the three Gemma 4 ones: `karume-gemma4` and `karume-gemma4-qat` say "Runs as-is in the browser and in Deno",
+  and `karume-gemma4-qat-mobile` names no runtime.
 - A bullet "Not readable by <library> (it's a different container with an embedded graph); the reader is a pipeline
   that implements `<pipeline>`." — on every card with this section except `karume-umt5-xxl`'s.
 - A bullet "Exporter used for the conversion: `<generator>`. The distribution manifest is `karume.json`
@@ -218,8 +220,8 @@ The level-2 sections come in this order:
 
 One constant, imported where it is written:
 
-- In `karume.modelcard`: the non-endorsement sentence, the revision-pin comment, the notes under the quant tables and
-  the cross-repository note.
+- In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the revision-pin comment, the notes under
+  the quant tables and the cross-repository note.
 - In `_shared`: the license texts (`_shared/licenses`) and the publishers' spelling (`_shared.upstream.UPSTREAM_AUTHORS`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; EmbeddingGemma 2's
   use-policy sentence.

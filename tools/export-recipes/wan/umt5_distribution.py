@@ -64,6 +64,7 @@ from karume.dist import (
 from karume.modelcard import (
     HF_OWNER,
     REVISION_PIN_COMMENT,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     Upstream,
@@ -606,6 +607,7 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
         "WebGPU inference runtime **Karume**: the encoder converted into Karume's container format",
         "(a `.krm` part sequence whose first part carries the graph and model descriptors) with",
         "int8 weights, and the checkpoint's tokenizer converted into one JSON table.",
+        RUNTIME_SENTENCE,
         "",
         f"- One graph, `{UMT5_ROLE}`: the token ids `{UMT5_IDS_INPUT}` `[1, L]` and the",
         f"  relative-position bucket indices `{UMT5_BUCKETS_INPUT}` `[L, L]` (both int32) in,",

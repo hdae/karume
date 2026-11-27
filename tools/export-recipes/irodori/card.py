@@ -30,6 +30,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -262,8 +263,8 @@ def _irodori_overview(
         "",
         f"A Japanese text-to-speech distribution: the **{upstream.display}** {flow} DiT",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Nine graphs make up the chain: {backbone}, the",
         "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
