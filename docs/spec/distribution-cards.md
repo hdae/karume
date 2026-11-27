@@ -67,9 +67,8 @@ item "The model cards and notices across repositories".
   `license_name` never: the three Gemma 4 repositories and `karume-embeddinggemma-2` write
   `license_link: https://ai.google.dev/gemma/docs/gemma_4_license` beside `license: apache-2.0`, the page Google's
   cards link (`_shared.upstream.GEMMA_LICENSE_PAGE`; the Gemma 4 recipes still spell it as their own constant).
-- `tags` contains `webgpu`. It begins with the `pipeline_tag` value, except on `karume-gemma4-qat-mobile`
-  (`webgpu`, `gemma`, `text-generation`). Where `webgpu` stands among the family's tags is not fixed. No card has a
-  `karume` tag (`library_name` carries it).
+- `tags` contains `webgpu`. It begins with the `pipeline_tag` value. Where `webgpu` stands among the family's tags is
+  not fixed. No card has a `karume` tag (`library_name` carries it).
 
 ### Title and the non-endorsement sentence
 
@@ -88,29 +87,29 @@ item "The model cards and notices across repositories".
 
 The level-2 sections come in this order:
 
-1. `## What is this` — except on `karume-gemma4-qat-mobile`, which has four unheaded lines in its place.
+1. `## What is this`.
 2. The attribution: `## Base weights and attribution`. On the three Anima repositories it lists each model as a bullet
    (title, author, source and pin, the permissions its source page lists), then the license terms and the notices
    the CircleStone and NVIDIA licenses require in their own words.
 3. `## Models` — the model table of `karume.modelcard.models`.
-4. `## Usage` — except on `karume-gemma4-qat-mobile`.
+4. `## Usage`.
 5. The family's own sections, where it has any: `## Long context` (`karume-gemma4-qat`); `## Prompts`, `## Accepted
    inputs`, `## Determinism and verification` and `## Resources` (`karume-wan2.2`).
-6. One section per model, in manifest order: `## Model: <name>` (`karume.modelcard.model_sections`), or `## <name>`
-   on `karume-gemma4-qat-mobile`. Each opens with `### Quants`; the family's other level-3 sections follow.
+6. One section per model, in manifest order: `## Model: <name>` (`karume.modelcard.model_sections`). Each opens with
+   `### Quants`; the family's other level-3 sections follow.
 
 ### What is this
 
 - Its first paragraph says what is distributed, converted into Karume's container format, "(a `.krm` part sequence
   whose first part carries the graph and model descriptors)".
 - The runtimes it names are one sentence, `karume.modelcard.RUNTIME_SENTENCE` ("Runs in the browser, in Node (with a
-  WebGPU implementation passed in) and in Deno."), written as a line of its own in the first paragraph, on every card
-  but `karume-gemma4-qat-mobile`, which names no runtime.
+  WebGPU implementation passed in) and in Deno."), written as a line of its own in the first paragraph, on every
+  card.
 - A bullet "Not readable by <library> (it's a different container with an embedded graph); the reader is a pipeline
-  that implements `<pipeline>`." — on every card with this section.
+  that implements `<pipeline>`." — on every card.
 - A bullet "Exporter used for the conversion: `<generator>`. The distribution manifest is `karume.json`
   (`<format>`)." The format is spelled once, as `karume.migrate.card_format_statement` spells it, so the upgrade of a
-  repository rewrites it in place. `karume-gemma4-qat-mobile`'s card does not state the format.
+  repository rewrites it in place.
 
 ### Naming and pinning an upstream
 
@@ -222,9 +221,10 @@ The level-2 sections come in this order:
   `fromPretrained` with the object form `{ repo: "<owner>/<name>", … }` and the commented revision pin
   `karume.modelcard.REVISION_PIN_COMMENT` right after the `repo` line, once per card. The repository is the one the
   card is uploaded to (`resolve_repo`).
-- Every card with a usage section writes the call through `karume.modelcard.from_pretrained`, declared with
-  `await using` or `using` as the family's dispose is, with the model and the quant (and the family's other knobs)
-  as commented options. `karume-gemma4-qat-mobile` has no usage section.
+- Every card writes the call through `karume.modelcard.from_pretrained`, declared with `await using` or `using` as
+  the family's dispose is, with the model and the quant (and the family's other knobs) as commented options. The
+  three Gemma 4 cards share one usage section (`gemma4.card.gemma4_usage`): the regular and q4_0 QAT lines import
+  from `jsr:@karume/models/gemma`, the mobile QAT line from `jsr:@karume/models/gemma4-qat-mobile`.
 
 ## NOTICE.md
 

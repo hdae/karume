@@ -20,6 +20,8 @@ import pytest
 from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
 from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, render_card
+from karume.migrate import card_format_statement
+from karume.modelcard import RUNTIME_SENTENCE
 
 #: The repository ID spelled in the usage snippet (dist passes it from the pipeline's
 #: declaration).
@@ -80,7 +82,13 @@ def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
                     }
                 },
                 "defaultQuant": "i4",
-                "pipelineConfig": {"chunkLength": 3, "capacity": 5, "maxPosition": 7},
+                # The usage section names the recommended sampler (fake values here too).
+                "pipelineConfig": {
+                    "chunkLength": 3,
+                    "capacity": 5,
+                    "maxPosition": 7,
+                    "sampler": {"temperature": 0.25, "topK": 11, "topP": 0.5},
+                },
             }
         },
     }
@@ -129,6 +137,49 @@ class TestQatCardBody:
 
         assert FAKE_QUANT_LABEL in card
         assert FAKE_QUANT_DESCRIPTION in card
+
+
+class TestQatCardSections:
+    """docs/spec/distribution-cards.md#sections-and-their-order — the common sections, in order."""
+
+    def test_the_card_takes_the_common_sections_in_order(self) -> None:
+        card = render_card(_two_model_manifest(), REPO)
+        sections = [line for line in card.split("\n") if line.startswith("## ")]
+
+        assert sections == [
+            "## What is this",
+            "## Base weights and attribution",
+            "## Models",
+            "## Usage",
+            "## Model: e2b",
+            "## Model: e4b",
+        ]
+
+    def test_what_is_this_names_the_runtimes_the_reader_and_the_format(self) -> None:
+        card = render_card(_qat_manifest(), REPO)
+        overview = card.split("## What is this")[1].split("\n## ")[0]
+
+        assert f"\n{RUNTIME_SENTENCE}\n" in overview
+        assert "the reader is a pipeline that implements `gemma4-qat/1`." in " ".join(
+            overview.split()
+        )
+        assert card.count(card_format_statement("karume/6")) == 1
+
+    def test_the_usage_loads_this_repository_through_the_mobile_pipeline(self) -> None:
+        usage = render_card(_two_model_manifest(), REPO).split("## Usage")[1].split("\n## ")[0]
+
+        assert 'import { Pipeline } from "jsr:@karume/models/gemma4-qat-mobile";' in usage
+        assert "await using pipeline = await Pipeline.fromPretrained({" in usage
+        assert f'  repo: "{REPO}",' in usage
+        assert '// model: "e2b", // default — available: e2b / e4b' in usage
+        assert "temperature 0.25, top-k 11, top-p 0.5" in usage
+        assert "speculative" not in usage
+
+    def test_the_tags_begin_with_the_pipeline_tag(self) -> None:
+        front_matter = render_card(_qat_manifest(), REPO).split("---")[1]
+
+        assert "pipeline_tag: text-generation\n" in front_matter
+        assert "tags:\n  - text-generation\n  - webgpu\n" in front_matter
 
 
 def _two_model_manifest() -> dict[str, Any]:

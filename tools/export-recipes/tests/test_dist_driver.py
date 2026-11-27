@@ -405,10 +405,6 @@ class TestTheHouseSentenceOnEveryCard:
                 assert sentences == [lines[title + 2]], manifest_path
 
 
-#: The pipelines whose card does not state the manifest format (the upgrade leaves it as it is).
-CARDS_WITHOUT_THE_FORMAT = frozenset({"gemma4-qat-mobile"})
-
-
 class TestTheFormatStatementOnEveryCard:
     """Every card that names the manifest format does it once, in the one statement the upgrade of
     a repository rewrites (`karume.migrate.card_format_statement` — ADR 0153), drawn from each
@@ -419,13 +415,12 @@ class TestTheFormatStatementOnEveryCard:
         mirrors = _mirrors_built_by(name)
         if not mirrors:
             pytest.skip(f"no distribution mirror under {DIST_ROOT} is built by --pipeline {name}")
-        expected = 0 if name in CARDS_WITHOUT_THE_FORMAT else 1
         for manifest_path in mirrors:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             statement = card_format_statement(manifest["format"])
             for render_card in dist.PIPELINES[name].card_profiles.values():
                 card = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}")
-                assert card.count(statement) == expected, manifest_path
+                assert card.count(statement) == 1, manifest_path
 
 
 #: The published repositories, one parameter set each (`(pipeline, models, directory)`).
@@ -500,9 +495,6 @@ GEMMA4_REPOSITORIES = frozenset({"karume-gemma4", "karume-gemma4-qat", "karume-g
 #: as their upstream cards link it (docs/spec/distribution-cards.md#front-matter).
 GEMMA_LICENSE_LINK_REPOSITORIES = GEMMA4_REPOSITORIES | {"karume-embeddinggemma-2"}
 
-#: The one card whose tags do not begin with its pipeline tag (the spec states it).
-TAGS_NOT_LED_BY_THE_PIPELINE_TAG = frozenset({"karume-gemma4-qat-mobile"})
-
 
 class TestTheFrontMatterOfEveryPublishedCard:
     """docs/spec/distribution-cards.md#front-matter, on the card each published repository's
@@ -545,8 +537,7 @@ class TestTheFrontMatterOfEveryPublishedCard:
 
         assert "webgpu" in tags
         assert "karume" not in tags
-        led = tags[0] == fields["pipeline_tag"]
-        assert led is (directory not in TAGS_NOT_LED_BY_THE_PIPELINE_TAG), tags
+        assert tags[0] == fields["pipeline_tag"], tags
 
 
 #: Words the generated texts do not use: the house word for a preset and British spellings
@@ -823,12 +814,6 @@ class TestThePinsOfEveryPublishedCard:
 #: The level-2 sections before the family's own
 #: (docs/spec/distribution-cards.md#sections-and-their-order).
 STANDARD_PREAMBLE = ("What is this", "Base weights and attribution", "Models", "Usage")
-PREAMBLES = {
-    "karume-gemma4-qat-mobile": ("Base weights and attribution", "Models"),
-}
-
-#: The card whose per-model sections are headed by the model name alone.
-MODEL_SECTIONS_BY_NAME = frozenset({"karume-gemma4-qat-mobile"})
 
 
 class TestTheSectionsOfEveryPublishedCard:
@@ -841,16 +826,13 @@ class TestTheSectionsOfEveryPublishedCard:
     ) -> None:
         manifest, card = _published_card(pipeline, directory)
         sections = [line[3:] for _, line in _headings(card) if line.startswith("## ")]
-        preamble = PREAMBLES.get(directory, STANDARD_PREAMBLE)
-        per_model = [
-            name if directory in MODEL_SECTIONS_BY_NAME else f"Model: {name}"
-            for name in manifest["models"]
-        ]
+        preamble = STANDARD_PREAMBLE
+        per_model = [f"Model: {name}" for name in manifest["models"]]
         family = sections[len(preamble) : len(sections) - len(per_model)]
 
         assert tuple(sections[: len(preamble)]) == preamble
         assert sections[len(sections) - len(per_model) :] == per_model
-        assert not set(family) & {*STANDARD_PREAMBLE, *preamble, *per_model}, family
+        assert not set(family) & {*preamble, *per_model}, family
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_every_model_section_opens_with_its_quant_table(
@@ -858,23 +840,13 @@ class TestTheSectionsOfEveryPublishedCard:
     ) -> None:
         manifest, card = _published_card(pipeline, directory)
         headings = [line for _, line in _headings(card)]
-        name_heading = (
-            (lambda name: f"## {name}")
-            if directory in MODEL_SECTIONS_BY_NAME
-            else (lambda name: f"## Model: {name}")
-        )
 
         for name in manifest["models"]:
-            assert headings[headings.index(name_heading(name)) + 1] == "### Quants", name
+            assert headings[headings.index(f"## Model: {name}") + 1] == "### Quants", name
         assert card.count("| Model | Pipeline | Quants | Default quant |") == 1
         assert card.count("| Quant | What it is | Download | Weights | Compute |") == len(
             manifest["models"]
         )
-
-
-#: The card without a "What is this", which names no runtime
-#: (docs/spec/distribution-cards.md#what-is-this).
-CARDS_WITHOUT_THE_RUNTIME_SENTENCE = frozenset({"karume-gemma4-qat-mobile"})
 
 
 class TestTheRuntimeSentenceOfEveryPublishedCard:
@@ -887,8 +859,6 @@ class TestTheRuntimeSentenceOfEveryPublishedCard:
     ) -> None:
         _, card = _published_card(pipeline, directory)
         lines = card.split("\n")
-        if "## What is this" not in lines:
-            pytest.skip("the card has no What is this section")
         start = lines.index("## What is this")
         end = next(
             index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")
@@ -905,10 +875,6 @@ class TestTheRuntimeSentenceOfEveryPublishedCard:
     ) -> None:
         _, card = _published_card(pipeline, directory)
         lines = card.split("\n")
-
-        if directory in CARDS_WITHOUT_THE_RUNTIME_SENTENCE:
-            assert RUNTIME_SENTENCE not in card
-            return
         start = lines.index("## What is this")
         end = next(
             index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")
@@ -945,10 +911,6 @@ class TestTheUpstreamCardsOfEveryPublishedCard:
         assert complete is (directory not in CARDS_WITH_A_PARTIAL_UPSTREAM_CARD_BULLET), bullets
 
 
-#: The card without a usage section (docs/spec/distribution-cards.md#usage).
-CARDS_WITHOUT_USAGE = frozenset({"karume-gemma4-qat-mobile"})
-
-
 class TestTheUsageOfEveryPublishedCard:
     """docs/spec/distribution-cards.md#usage."""
 
@@ -960,9 +922,6 @@ class TestTheUsageOfEveryPublishedCard:
         lines = card.split("\n")
         pin = "\n".join((f'  repo: "{HF_OWNER}/{directory}",', *REVISION_PIN_COMMENT))
 
-        if directory in CARDS_WITHOUT_USAGE:
-            assert "## Usage" not in lines and REVISION_PIN_COMMENT[-1] not in lines
-            return
         body = lines[lines.index("## Usage") + 1 :]
         block = body[body.index("```ts") : body.index("```", body.index("```ts") + 1)]
         assert next(line for line in body if line) == "```ts"

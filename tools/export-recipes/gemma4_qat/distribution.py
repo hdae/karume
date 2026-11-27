@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
 from _shared.upstream import hf_upstreams
+from gemma4.card import gemma4_usage
 from gemma4.distribution import (
     GEMMA4_ASSETS,
     GEMMA4_ROLE,
@@ -37,10 +39,13 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     frontmatter,
+    hf_link,
     introduction,
+    model_sections,
     models,
     quants,
     render,
@@ -309,7 +314,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     quant_modes = qat_quants(model)
     return ModelPlan(
         name=model,
-        pipeline="gemma4-qat/1",
+        pipeline=QAT_PIPELINE,
         artifacts=artifacts,
         # The component name is the same single word as the regular Gemma's (the writer
         # `gemma4_qat/export.py` names the container's graph with the same constant —
@@ -339,6 +344,17 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat-mobile"
 
 
+#: The pipeline contract of the mobile QAT line (ADR 0041 §2 — per model): what the plan declares
+#: and what the card describes and refuses otherwise.
+QAT_PIPELINE = "gemma4-qat/1"
+
+#: The HF pipeline tag: the distribution carries only the text decoder (the regular Gemma 4
+#: card's reason — `gemma4.card.GEMMA4_PIPELINE_TAG`).
+QAT_PIPELINE_TAG = "text-generation"
+
+#: The JSR subpath of `@karume/models` whose `Pipeline` reads this line (the card's usage).
+QAT_MODULE = "gemma4-qat-mobile"
+
 #: The SPDX identifier of every pinned upstream ({@link SOURCES} — the weights' and the tokenizer's
 #: repositories) and how the card spells it. A pin with another licence fails the render: the
 #: card's attribution sentence would no longer be true.
@@ -351,6 +367,31 @@ QAT_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
 QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: The technical report the upstream cards link at the pinned commits.
 QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
+
+
+def _qat_overview(manifest: Mapping[str, Any]) -> list[str]:
+    """The "What is this" section: what is distributed and where it runs, what the conversion keeps
+    and has not shown yet, the reader the container needs and the exporter."""
+    checkpoints = " / ".join(hf_link(checkpoint_repo(name)) for name in manifest["models"])
+    return [
+        "## What is this",
+        "",
+        f"A chat distribution: the **text decoder** of {checkpoints},",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
+        "String in, string out.",
+        "",
+        "Experimental text-only conversion of the official mobile QAT checkpoints.",
+        "Fixed integers and scales are preserved; activations use static range quantization (SRQ).",
+        "CPU and GPU reductions can cross rounding boundaries and select different tokens.",
+        "Broad quality and long-context validation remain incomplete. MTP is not supported.",
+        "",
+        "- Not readable by transformers (it's a different container with an embedded graph); the",
+        f"  reader is a pipeline that implements `{QAT_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest",
+        f"  is `karume.json` (`{manifest['format']}`).",
+    ]
 
 
 def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
@@ -399,7 +440,7 @@ def render_card(
 ) -> str:
     """Draw the numbers, the model list and the quantization table from the manifest. Keeping the
     fixed values is never called requantization."""
-    require_pipeline(manifest, "gemma4-qat/1")
+    require_pipeline(manifest, QAT_PIPELINE)
     # Every redistributed upstream: per model its base model (the regular `-it` repository its
     # tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
     # lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know.
@@ -414,7 +455,7 @@ def render_card(
                 f" {QAT_LICENSE}"
             )
     metadata = CardMetadata(
-        pipeline_tag="text-generation",
+        pipeline_tag=QAT_PIPELINE_TAG,
         base_model=tuple(upstream),
         # Against the listed `-it` base models the stored integers and scales are a quantized form
         # (the checkpoint's own QAT values, kept as they are) — the relation the q4_0 QAT line's
@@ -424,26 +465,24 @@ def render_card(
         # The same spelling as the upstream cards (and the regular Gemma 4 card), so a reader
         # reaches the one licence page the upstream names.
         license_link=QAT_LICENSE_LINK,
-        tags=("webgpu", "gemma", "text-generation"),
+        tags=(QAT_PIPELINE_TAG, "webgpu", "gemma"),
     )
-    sections = [
-        frontmatter(metadata),
-        introduction("Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)),
-        [
-            "Experimental text-only conversion of the official mobile QAT checkpoints.",
-            "Fixed integers and scales are preserved; activations use "
-            "static range quantization (SRQ).",
-            "CPU and GPU reductions can cross rounding boundaries and select different tokens.",
-            "Broad quality and long-context validation remain incomplete. MTP is not supported.",
-            "",
-        ],
-        _qat_attribution(manifest),
-        [""],
-        models(manifest),
-    ]
-    for name, model in manifest["models"].items():
-        sections.extend([[f"## {name}", ""], quants(model, host_assets=host_assets)])
-    return render(sections)
+    return render(
+        (
+            frontmatter(metadata),
+            introduction(
+                "Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)
+            ),
+            _qat_overview(manifest),
+            [""],
+            _qat_attribution(manifest),
+            [""],
+            models(manifest),
+            [""],
+            gemma4_usage(manifest, repo, module=QAT_MODULE),
+            *model_sections(manifest, (partial(quants, host_assets=host_assets),)),
+        )
+    )
 
 
 #: The notice (Apache 2.0 §4(b)): the upstream checkpoints and **the changes this repository made**.

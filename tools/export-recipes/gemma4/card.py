@@ -491,14 +491,21 @@ def _gemma4_changes(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _gemma4_usage(
-    manifest: Mapping[str, Any], repo: str, extra_options: Sequence[str] = ()
+def gemma4_usage(
+    manifest: Mapping[str, Any],
+    repo: str,
+    extra_options: Sequence[str] = (),
+    *,
+    module: str = "gemma",
 ) -> list[str]:
     """The usage example. Shows one **minimal working form** (`fromPretrained` → `chat`), with the
     options one would commonly touch alongside as comments (the selectable values derived from the
     manifest by machine).
 
-    `extra_options` is the line's own commented-out option lines, after `model` / `quant`.
+    `extra_options` is the line's own commented-out option lines, after `model` / `quant`. `module`
+    is the JSR subpath of `@karume/models` whose `Pipeline` reads the line: the regular and q4_0
+    QAT lines read `gemma`, the mobile QAT line `gemma4-qat-mobile`, which shares this chat
+    surface (`gemma4_qat.distribution`).
 
     NOTE: `fromAssets` is not shown (ruling of 2026-08-29 — the same for every family).
     """
@@ -512,7 +519,7 @@ def _gemma4_usage(
         "## Usage",
         "",
         "```ts",
-        'import { Pipeline } from "jsr:@karume/models/gemma";',
+        f'import {{ Pipeline }} from "jsr:@karume/models/{module}";',
         "",
         *from_pretrained(
             "Pipeline",
@@ -622,7 +629,7 @@ def render_gemma4_model_card(
             [""],
             models(manifest),
             [""],
-            _gemma4_usage(manifest, repo),
+            gemma4_usage(manifest, repo),
             *model_sections(
                 manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
             ),
@@ -896,7 +903,7 @@ def render_gemma4_qat_q4_0_model_card(
             [""],
             models(manifest),
             [""],
-            _gemma4_usage(manifest, repo, speculative),
+            gemma4_usage(manifest, repo, speculative),
             _qat_q4_0_long_context(manifest),
             *model_sections(
                 manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
