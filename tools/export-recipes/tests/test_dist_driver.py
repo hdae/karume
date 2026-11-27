@@ -739,7 +739,26 @@ CARDS_WITHOUT_THE_RUNTIME_SENTENCE = GEMMA4_REPOSITORIES
 
 
 class TestTheRuntimeSentenceOfEveryPublishedCard:
-    """docs/spec/distribution-cards.md#what-is-this — the browser, Node and Deno in one sentence."""
+    """docs/spec/distribution-cards.md#what-is-this — the browser, Node and Deno in one sentence,
+    and the reader the container needs."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_what_is_this_says_which_reader_the_container_needs(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        _, card = _published_card(pipeline, directory)
+        lines = card.split("\n")
+        if "## What is this" not in lines:
+            pytest.skip("the card has no What is this section")
+        start = lines.index("## What is this")
+        end = next(
+            index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")
+        )
+        section = " ".join(" ".join(lines[start:end]).split())
+
+        assert re.search(
+            r"- Not readable by .+; the reader is a pipeline that implements `[^`]+`\.", section
+        )
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_what_is_this_carries_the_runtime_sentence_once_as_a_line(
@@ -811,7 +830,9 @@ class TestTheUsageOfEveryPublishedCard:
         assert any(
             re.match(r'import .* from "jsr:@karume/models/[a-z0-9-]+";$', line) for line in block
         )
-        assert ".fromPretrained({" in "\n".join(block)
+        assert re.search(
+            r"^(await )?using pipeline = await \w+\.fromPretrained\(\{$", "\n".join(block), re.M
+        )
         assert card.count(pin) == 1
         assert pin in "\n".join(block)
 

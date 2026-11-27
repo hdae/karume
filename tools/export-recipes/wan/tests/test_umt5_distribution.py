@@ -444,21 +444,24 @@ class TestTheModelCard:
         assert "has not been checked" not in prose
 
     def test_the_usage_is_the_standalone_encoder(self, assembled) -> None:
-        """Usage is the standalone `Encoder` (`@karume/models/umt5`) — the source is the same
-        object ref form as the other families plus the revision pin."""
+        """Usage is the standalone `Encoder` (`@karume/models/umt5`) — the call every family's card
+        writes (the object ref form plus the revision pin, `await using`, the model and the quant
+        as commented options)."""
         out_dir, _ = assembled
         lines = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").splitlines()
         start = lines.index('import { Encoder } from "jsr:@karume/models/umt5";')
-        assert lines[start : start + 12] == [
+        assert lines[start : start + 14] == [
             'import { Encoder } from "jsr:@karume/models/umt5";',
             "",
-            "const encoder = await Encoder.fromPretrained({",
+            "await using pipeline = await Encoder.fromPretrained({",
             f'  repo: "hdae/{UMT5_REPO_NAME}",',
             *REVISION_PIN_COMMENT,
+            "}, {",
+            '  // model: "xxl", // default — available: xxl',
+            '  // quant: "i8", // default — available: i8',
             "});",
-            'const { inputIds, hiddenStates } = await encoder.encode("a cat");'
+            'const { inputIds, hiddenStates } = await pipeline.encode("a cat");'
             " // hiddenStates: [L, 4096] f32, row-major",
-            "await encoder.dispose();",
             "```",
         ]
         card = " ".join(lines)

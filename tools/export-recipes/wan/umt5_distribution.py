@@ -64,12 +64,13 @@ from karume.dist import (
 from karume.modelcard import (
     APACHE_MODIFICATION_CLAUSE,
     HF_OWNER,
-    REVISION_PIN_COMMENT,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     Upstream,
     changes_made_here,
+    default_model,
+    from_pretrained,
     frontmatter,
     hf_link,
     introduction,
@@ -639,6 +640,8 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  16 buckets (keys after the query use 16–31): distances 0 to 7 get one bucket each,",
         "  and longer distances fall into 8 logarithmically spaced buckets that start at 8, 12,",
         "  16, 23, 32, 46, 64 and 91 (the last one covers every distance from 91 on).",
+        "- Not readable by transformers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{UMT5_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
         f" is `karume.json` (`{manifest['format']}`).",
     ]
@@ -710,30 +713,40 @@ def _consumer_link() -> str:
     return hf_link(f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}")
 
 
-def _umt5_usage(repo: str) -> list[str]:
+def _umt5_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     """Usage: how to use the standalone public class `Encoder` (`@karume/models/umt5`), the input
     rules, and the Wan distribution that references this encoder across repositories.
 
-    The `fromPretrained` source is the same object-ref form as the other families' cards plus the
-    pin slot (`karume.modelcard.REVISION_PIN_COMMENT`). The swap paragraph (ADR 0122 decision 7,
-    item 2) describes plugging a compatible encoder into Wan instead of this one, and states the pin
-    rule (a string source follows main) and that it has no effect on the precomputed path. The
-    input rules are the six rejections of `wan.umt5_xxl_tokenizer` (measured 2026-10-15).
+    The call is the one every family's card writes (`karume.modelcard.from_pretrained` — the
+    object-ref form plus the pin slot, declared with `await using` as `Encoder` disposes
+    asynchronously), with the model and the quant as commented options. The swap paragraph (ADR
+    0122 decision 7, item 2) describes plugging a compatible encoder into Wan instead of this one,
+    and states the pin rule (a string source follows main) and that it has no effect on the
+    precomputed path. The input rules are the six rejections of `wan.umt5_xxl_tokenizer` (measured
+    2026-10-15).
     """
     low, high = UMT5_TOKENS
+    model_name = manifest["defaultModel"]
+    model = default_model(manifest)
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     return [
         "## Usage",
         "",
         "```ts",
         'import { Encoder } from "jsr:@karume/models/umt5";',
         "",
-        "const encoder = await Encoder.fromPretrained({",
-        f'  repo: "{repo}",',
-        *REVISION_PIN_COMMENT,
-        "});",
-        'const { inputIds, hiddenStates } = await encoder.encode("a cat");'
+        *from_pretrained(
+            "Encoder",
+            repo,
+            [
+                f'  // model: "{model_name}", // default — available: {model_names}',
+                f'  // quant: "{model["defaultQuant"]}", // default — available: {quant_names}',
+            ],
+            disposable="await using",
+        ),
+        'const { inputIds, hiddenStates } = await pipeline.encode("a cat");'
         f" // hiddenStates: [L, {UMT5_HIDDEN_WIDTH}] f32, row-major",
-        "await encoder.dispose();",
         "```",
         "",
         "`encode` tokenizes the text with the bundled tokenizer, builds the relative-position",
@@ -826,7 +839,7 @@ def render_umt5_model_card(
             [""],
             models(manifest),
             [""],
-            _umt5_usage(repo),
+            _umt5_usage(manifest, repo),
             *model_sections(
                 manifest,
                 (partial(quants, host_assets=host_assets), _umt5_limits),

@@ -108,7 +108,7 @@ The level-2 sections come in this order:
   but the three Gemma 4 ones: `karume-gemma4` and `karume-gemma4-qat` say "Runs as-is in the browser and in Deno",
   and `karume-gemma4-qat-mobile` names no runtime.
 - A bullet "Not readable by <library> (it's a different container with an embedded graph); the reader is a pipeline
-  that implements `<pipeline>`." — on every card with this section except `karume-umt5-xxl`'s.
+  that implements `<pipeline>`." — on every card with this section.
 - A bullet "Exporter used for the conversion: `<generator>`. The distribution manifest is `karume.json`
   (`<format>`)." The format is spelled once, as `karume.migrate.card_format_statement` spells it, so the upgrade of a
   repository rewrites it in place. `karume-gemma4-qat-mobile`'s card does not state the format.
@@ -179,9 +179,9 @@ The level-2 sections come in this order:
   `fromPretrained` with the object form `{ repo: "<owner>/<name>", … }` and the commented revision pin
   `karume.modelcard.REVISION_PIN_COMMENT` right after the `repo` line, once per card. The repository is the one the
   card is uploaded to (`resolve_repo`).
-- Seventeen cards write the call through `karume.modelcard.from_pretrained`, declared with `await using` or `using`
-  as the family's dispose is. `karume-umt5-xxl` writes it by hand (`const encoder = …`, with `await
-  encoder.dispose()`). `karume-gemma4-qat-mobile` has no usage section.
+- Every card with a usage section writes the call through `karume.modelcard.from_pretrained`, declared with
+  `await using` or `using` as the family's dispose is, with the model and the quant (and the family's other knobs)
+  as commented options. `karume-gemma4-qat-mobile` has no usage section.
 
 ## NOTICE.md
 
