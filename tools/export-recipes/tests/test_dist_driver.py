@@ -872,9 +872,9 @@ class TestTheSectionsOfEveryPublishedCard:
         )
 
 
-#: The cards whose "What is this" does not carry the runtime sentence yet: the Gemma 4 ones, whose
-#: recipes change in a stage of their own (docs/spec/distribution-cards.md#what-is-this).
-CARDS_WITHOUT_THE_RUNTIME_SENTENCE = GEMMA4_REPOSITORIES
+#: The card without a "What is this", which names no runtime
+#: (docs/spec/distribution-cards.md#what-is-this).
+CARDS_WITHOUT_THE_RUNTIME_SENTENCE = frozenset({"karume-gemma4-qat-mobile"})
 
 
 class TestTheRuntimeSentenceOfEveryPublishedCard:

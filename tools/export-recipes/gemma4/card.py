@@ -30,6 +30,7 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     default_model,
@@ -371,17 +372,18 @@ def _gemma4_overview(
         else f"the **text decoder** and {_spell_models(seeing)}'s **vision embedder** of"
     )
     io = (
-        "string in, string out."
+        "String in, string out."
         if not seeing
-        else f"messages in (images on {_spell_models(seeing)}), text out."
+        else f"Messages in (images on {_spell_models(seeing)}), text out."
     )
     return [
         "## What is this",
         "",
         f"A chat distribution: {decoder} {_gemma4_upstream_spellings(manifest, upstream)},",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        f"browser and in Deno — {io}",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
+        io,
         "",
         "- **Tokenizer and chat format ship with the weights.** `chat()` renders the turns,",
         "  encodes them, samples, and decodes incrementally, so callers hand over messages and",
