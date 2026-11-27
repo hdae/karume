@@ -2777,7 +2777,7 @@ class TestModelCard:
     def test_it_writes_a_model_card_next_to_the_manifest(self, tmp_path: Path) -> None:
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert card.startswith("---\n")
-        assert "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers" in card
+        assert "  - circlestone-labs/Anima-Base-v1.0-Diffusers\n" in card
 
     def test_it_derives_the_download_size_from_the_assembled_tree(self, tmp_path: Path) -> None:
         """The number on the card is **the actual byte count of the assembled tree** (table → a

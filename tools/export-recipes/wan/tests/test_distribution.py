@@ -1031,15 +1031,16 @@ class TestTheModelCard:
         lines = _card(manifest).splitlines()
         title = lines.index("# Wan2.2 TI2V 5B — Karume")
         assert lines[title + 2] == (
-            "This is an unofficial conversion of Wan-AI/Wan2.2-TI2V-5B-Diffusers for Karume."
-            " It is not affiliated with or endorsed by Wan-AI."
+            "This is an unofficial conversion of Wan-AI/Wan2.2-TI2V-5B-Diffusers and"
+            " google/umt5-xxl for Karume. It is not affiliated with or endorsed by Wan-AI and"
+            " Google."
         )
 
     def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         upstream = SOURCES[_TI2V]
-        assert f"base_model: {upstream.repo}" in card
+        assert f"base_model:\n  - {upstream.repo}\n  - google/umt5-xxl\n" in card
         assert f"license: {upstream.license}" in card
         assert f"at commit `{upstream.revision}`" in card
 
@@ -2002,7 +2003,7 @@ class TestTheWan22ModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         upstream = SOURCES[_TI2V]
         assert "# Wan2.2 TI2V 5B — Karume" in card
-        assert f"base_model: {upstream.repo}" in card
+        assert f"base_model:\n  - {upstream.repo}\n" in card
         assert f"at commit `{upstream.revision}`" in card
         assert f'repo: "hdae/{WAN22_REPO_NAME}"' in card
         assert "await Ti2vPipeline.fromPretrained(" in card

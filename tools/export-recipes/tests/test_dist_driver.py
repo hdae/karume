@@ -543,9 +543,10 @@ class TestTheFrontMatterOfEveryPublishedCard:
         assert led is (directory not in TAGS_NOT_LED_BY_THE_PIPELINE_TAG), tags
 
 
-#: The cards whose non-endorsement sentence names the models by title instead of the `base_model`
-#: IDs (docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence).
-SENTENCES_BY_TITLE = frozenset({"karume-anima", "karume-anima-extra"})
+#: The card whose non-endorsement sentence also names works that are not on the Hub, by title,
+#: before the `base_model` IDs
+#: (docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence).
+SENTENCES_WITH_OFF_HUB_WORKS = frozenset({"karume-anima-extra"})
 
 
 class TestTheTitleAndTheNonEndorsementSentence:
@@ -565,10 +566,17 @@ class TestTheTitleAndTheNonEndorsementSentence:
         self, pipeline: str, models: list[str], directory: str
     ) -> None:
         _, card = _published_card(pipeline, directory)
-        base_models = _listed(_front_matter(card)["base_model"])
-        expected = introduction("", hf_upstreams(base_models))[3]
+        lines = card.split("\n")
+        sentence = lines[
+            next(index for index, line in enumerate(lines) if line.startswith("# ")) + 2
+        ]
+        upstreams = hf_upstreams(_listed(_front_matter(card)["base_model"]))
+        expected = introduction("", upstreams)[3]
 
-        assert (expected in card.split("\n")) is (directory not in SENTENCES_BY_TITLE)
+        assert (sentence == expected) is (directory not in SENTENCES_WITH_OFF_HUB_WORKS)
+        named, _, publishers = sentence.partition(" for Karume. ")
+        for upstream in upstreams:
+            assert upstream.name in named and upstream.author in publishers
 
 
 #: The cards that do not pin their upstreams yet: two of the Gemma 4 ones, whose recipes change in

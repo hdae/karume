@@ -260,9 +260,12 @@ def _upstream(name: str, card: WanCard) -> Any:
 
 def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
     """Build the frontmatter from the models listed in the manifest (`base_model` is the upstream of
-    the manifest's models — HF's meaning of "the model it derives from". The provenance of
-    Wan2.2's two text assets (the Wan2.1 checkpoint) is not a model it derives from, so it is
-    left out here and the attribution section states it)."""
+    the manifest's models — HF's meaning of "the model it derives from" — and the upstream of the
+    text encoder, stored here or fetched from `karume-umt5-xxl`: the maintainer's ruling of
+    2026-11-27 lists the upstreams of fetched components too. The provenance of Wan2.2's two text
+    assets (the Wan2.1 checkpoint, whose tokenizer files are this checkpoint's and whose encoder is
+    the umT5-XXL one) is not a model it derives from, so it is left out here and the attribution
+    section states it)."""
     licenses = {_upstream(name, card).license for name in manifest["models"]}
     if len(licenses) != 1:
         raise ValueError(
@@ -271,7 +274,10 @@ def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
         )
     return CardMetadata(
         pipeline_tag=WAN_PIPELINE_TAG,
-        base_model=tuple(_upstream(name, card).repo for name in manifest["models"]),
+        base_model=(
+            *(_upstream(name, card).repo for name in manifest["models"]),
+            WAN_TEXT_ENCODER_UPSTREAM,
+        ),
         # A distribution that lowers the f32 upstream to f16 / i8 (the doc of `CardMetadata` — f16 /
         # i8 distributions are `quantized`).
         base_model_relation="quantized",

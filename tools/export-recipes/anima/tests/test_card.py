@@ -585,11 +585,13 @@ class TestLayeredCard:
     def test_its_house_sentence_names_the_hub_repository_and_its_author(
         self, layered_card: str
     ) -> None:
-        """Its author, not CircleStone — the License section states CircleStone's
-        non-endorsement in the licence's words."""
+        """Its author, and CircleStone for the shared components it fetches (the sentence follows
+        `base_model`) — the License section states CircleStone's non-endorsement in the licence's
+        words besides."""
         assert _house_sentence(layered_card) == (
-            "This is an unofficial conversion of Gazingstars123/Anima-2.9B for Karume. It is not"
-            " affiliated with or endorsed by Gazingstars123."
+            "This is an unofficial conversion of Gazingstars123/Anima-2.9B and"
+            " circlestone-labs/Anima-Base-v1.0-Diffusers for Karume. It is not affiliated with or"
+            " endorsed by Gazingstars123 and CircleStone Labs LLC."
         )
 
     def test_it_introduces_the_model_as_a_layer_expansion(self, layered_card: str) -> None:
@@ -667,16 +669,17 @@ class TestLayeredCard:
     def test_its_front_matter_names_the_hub_repository_and_the_bundled_license(
         self, card: str, layered_card: str
     ) -> None:
-        """The `base_model` is the repository it converts; the license fields are the official
-        card's, the same bundled text."""
+        """The `base_model` is the repository it converts and the base model's Diffusers
+        repository, the source of the shared components it fetches; the license fields are the
+        official card's, the same bundled text."""
         head = layered_card.split("---")[1]
-        assert "base_model: Gazingstars123/Anima-2.9B" in head
+        assert (
+            "base_model:\n  - Gazingstars123/Anima-2.9B\n"
+            "  - circlestone-labs/Anima-Base-v1.0-Diffusers\n"
+        ) in head
         assert "base_model_relation: quantized" in head
         official = card.split("---")[1]
-        assert head == official.replace(
-            "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers",
-            "base_model: Gazingstars123/Anima-2.9B",
-        )
+        assert _license_fields(head) == _license_fields(official)
 
     def test_it_carries_the_same_skeleton(self, layered_card: str) -> None:
         headings = [line for line in layered_card.splitlines() if line.startswith("## ")]
@@ -709,7 +712,10 @@ class TestFrontmatter:
     def test_it_declares_the_fields_hf_reads(self, card: str) -> None:
         head = card.split("---")[1]
         assert "pipeline_tag: text-to-image" in head
-        assert "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers" in head
+        assert (
+            "base_model:\n  - circlestone-labs/Anima\n"
+            "  - circlestone-labs/Anima-Base-v1.0-Diffusers\n"
+        ) in head
         assert "base_model_relation: quantized" in head
         assert "license: other" in head
         assert "license_name: circlestone-labs-non-commercial-license" in head
@@ -727,17 +733,14 @@ class TestFrontmatter:
         (link,) = [line for line in head.splitlines() if line.startswith("license_link: ")]
         assert "/blob/main/" not in link
         assert "/blob/6e0b2da2112573380abfb6a1435a60a994b254f2/" in link
-        assert [line for line in head.splitlines() if line.startswith("  - ")] == [
-            "  - text-to-image",
-            "  - webgpu",
-        ]
+        assert head.split("tags:\n", 1)[1].splitlines() == ["  - text-to-image", "  - webgpu"]
 
     def test_both_repositories_declare_the_same_upstream_license(
         self, card: str, extra_card: str
     ) -> None:
         """Both repositories are Derivatives of the same base — only one upstream license
         applies."""
-        assert card.split("---")[1] == extra_card.split("---")[1]
+        assert _license_fields(card.split("---")[1]) == _license_fields(extra_card.split("---")[1])
 
 
 class TestSections:
@@ -978,6 +981,11 @@ class TestPipelineGate:
             _official(manifest)
 
 
+def _license_fields(front_matter: str) -> list[str]:
+    """The license lines of a card's front matter (`license`, `license_name`, `license_link`)."""
+    return [line for line in front_matter.splitlines() if line.startswith("license")]
+
+
 def _house_sentence(card: str) -> str:
     """The paragraph right under the card's title."""
     lines = card.splitlines()
@@ -990,14 +998,16 @@ class TestTheHouseSentence:
 
     def test_the_official_card_names_its_models_and_circlestone(self, card: str) -> None:
         assert _house_sentence(card) == (
-            "This is an unofficial conversion of Anima Turbo v1.1 and Anima Aesthetic v1.1 for"
-            " Karume. It is not affiliated with or endorsed by CircleStone Labs LLC."
+            "This is an unofficial conversion of circlestone-labs/Anima and"
+            " circlestone-labs/Anima-Base-v1.0-Diffusers for Karume. It is not affiliated with or"
+            " endorsed by CircleStone Labs LLC."
         )
 
     def test_the_extra_card_names_each_fine_tune_and_its_author(self, extra_card: str) -> None:
         assert _house_sentence(extra_card) == (
-            "This is an unofficial conversion of WAI-ANIMA v1.0 (base 1.0) and copycat-anima"
-            " 20260610 for Karume. It is not affiliated with or endorsed by WAI0731 and calculater."
+            "This is an unofficial conversion of WAI-ANIMA v1.0 (base 1.0), copycat-anima"
+            " 20260610 and circlestone-labs/Anima-Base-v1.0-Diffusers for Karume. It is not"
+            " affiliated with or endorsed by WAI0731, calculater and CircleStone Labs LLC."
         )
 
     def test_the_licence_sentence_stays_as_it_is(self, card: str, extra_card: str) -> None:

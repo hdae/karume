@@ -34,16 +34,21 @@ item "The model cards and notices across repositories".
 
 - Drawn by `karume.modelcard.frontmatter`, in this key order: `library_name: karume`, `pipeline_tag`, `base_model`,
   `base_model_relation` (when written), `license`, `license_name` and `license_link` (when written), `tags`.
-- `base_model` holds HF repository IDs: a scalar for one, a sequence for several. Which upstreams are listed differs:
+- `base_model` holds HF repository IDs, a scalar for one and a sequence for several: every upstream whose bytes the
+  repository runs, stored here or fetched from another Karume repository — the checkpoints it converts and the
+  separate upstream repositories of its components (a text backbone or encoder, a codec, a drafter, a VAE's origins,
+  the repository a tokenizer or shared components come from). A work that is not on the Hub (Anima's community
+  fine-tunes on Civitai) has no ID to list. What each repository lists:
 
   | Repositories | `base_model` lists |
   | --- | --- |
-  | `karume-anima`, `karume-anima-extra` (one metadata constant) | `circlestone-labs/Anima-Base-v1.0-Diffusers` only |
-  | `karume-anima-2.9b` | `Gazingstars123/Anima-2.9B` |
-  | `karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`, `karume-irodori-v4-large` | the checkpoint, its text backbone (or encoder) and the codec, whether stored here or fetched from another Karume repository |
-  | `karume-wan2.2` | the checkpoint only (the text encoder is fetched from `karume-umt5-xxl`) |
-  | `karume-moss-image` | the checkpoint, the text encoder's and the VAE decoder's releases; not `black-forest-labs/FLUX.2-klein-4B`, whose latent statistics it stores |
-  | every other repository | the checkpoints it converts and the separate upstream repositories of what it stores (drafters, a text encoder, the base model a tokenizer comes from) |
+  | `karume-anima` | `circlestone-labs/Anima` (the four single-file variants) and `circlestone-labs/Anima-Base-v1.0-Diffusers` (the base and the shared text encoder, VAE and tokenizers) |
+  | `karume-anima-extra` | `circlestone-labs/Anima-Base-v1.0-Diffusers` (the shared components, fetched from `karume-anima`) |
+  | `karume-anima-2.9b` | `Gazingstars123/Anima-2.9B` and `circlestone-labs/Anima-Base-v1.0-Diffusers` (the shared components, fetched) |
+  | the four Irodori repositories | the checkpoint, its text backbone (or encoder) and the codec, whether stored here or fetched |
+  | `karume-wan2.2` | the checkpoint and `google/umt5-xxl` (the text encoder, fetched from `karume-umt5-xxl`); not `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, whose tokenizer files are this checkpoint's and whose encoder is the umT5-XXL one (the attribution names it as the source of the precomputed embeddings and the tokenizer table) |
+  | `karume-moss-image` | the checkpoint, the text encoder's release and both VAE origins, `black-forest-labs/FLUX.2-klein-4B` (the latent statistics) included |
+  | every other repository | the checkpoints it converts and the separate upstream repositories of what it stores |
 
 - `base_model_relation` is `quantized` or left out. birefnet derives it from the default preset (`quantized` when its
   download stores values rounded from the upstream checkpoint), the regular Gemma 4 card from every stored dtype
@@ -71,9 +76,8 @@ item "The model cards and notices across repositories".
   conversion of {upstreams} for Karume. It is not affiliated with or endorsed by {authors}." Each upstream and each
   author is listed once, in order.
 - The upstreams are the `base_model` IDs and each author is the account's publisher as `_shared.upstream.UPSTREAM_AUTHORS`
-  spells it (`hf_upstreams`), except on two cards: `karume-anima` names its five models by their titles
-  (`Anima Turbo v1.1`, …) and `karume-anima-extra` names its two fine-tunes, which are not on the Hub, by their titles
-  and authors.
+  spells it (`hf_upstreams`): the sentence follows the front matter. A redistributed work that is not on the Hub comes
+  first, by its title and author — on `karume-anima-extra`, its two fine-tunes.
 
 ### Sections and their order
 

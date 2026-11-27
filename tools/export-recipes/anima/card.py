@@ -70,12 +70,6 @@ ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 #: Title of the extra repository (karume-anima-extra — third-party fine-tunes).
 ANIMA_EXTRA_TITLE = "Anima Extra — Karume"
 
-#: The front matter of the 2.9B repository (karume-anima-2.9b). The model it converts is on the
-#: Hub, so that repository is its `base_model` (the relation stays `quantized`: re-encoded, an int8
-#: series beside it). The license is the CircleStone one the upstream card states for a derivative
-#: model, linked to the text this repository bundles, as for the other two.
-ANIMA_2_9B_METADATA = replace(ANIMA_METADATA, base_model=("Gazingstars123/Anima-2.9B",))
-
 #: Title of the 2.9B repository.
 ANIMA_2_9B_TITLE = "Anima 2.9B — Karume"
 
@@ -369,7 +363,7 @@ ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
 
 def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
     defaults = default_model(manifest)["pipelineConfig"]["defaults"]
-    base_model = ANIMA_2_9B_METADATA.base_model[0]
+    base_model = _anima_metadata(manifest).base_model[0]
     return [
         "## What is this",
         "",
@@ -647,21 +641,39 @@ ANIMA_2_9B_ORIGINS_INTRO = (
 
 
 def _introduction(manifest: Mapping[str, Any], title: str) -> list[str]:
-    """The title and the house sentence over the models this repository holds (manifest order).
+    """The title and the house sentence: the models whose source is not on the Hub by their titles
+    and authors (the community fine-tunes, manifest order), then the `base_model` repositories with
+    their publishers ({@link _anima_metadata} — the sentence follows the front matter).
 
-    The models are named by their titles — the fine-tunes are not on the Hub. An official model is
-    CircleStone's (the publisher of the base model's account); a community fine-tune (one with
-    permissions listed on its source page, as {@link _base_license} reads them) is its author's.
     The §3(d) non-endorsement sentence of the License section stays as the licence words it; this
     one does not replace it.
     """
-    licensor = hf_upstreams(ANIMA_METADATA.base_model)[0].author
-    upstreams: list[Upstream] = []
-    for name in manifest["models"]:
-        upstream = _upstream_model(name)
-        author = upstream.author if upstream.permissions else licensor
-        upstreams.append(Upstream(upstream.title, author))
-    return introduction(title, upstreams)
+    off_hub = [
+        Upstream(upstream.title, upstream.author)
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    return introduction(title, [*off_hub, *hf_upstreams(_anima_metadata(manifest).base_model)])
+
+
+def _anima_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
+    """The front matter of the repository the manifest describes: `base_model` lists the HF
+    repository each model was converted from (manifest order) and the base model's Diffusers
+    repository, the source of the text encoder, VAE and tokenizers every model runs — stored here
+    or fetched from `karume-anima`. A model whose source is not on the Hub (a community fine-tune)
+    has no repository to list; the house sentence names it by its title ({@link _introduction}).
+
+    The relation stays `quantized` (re-encoded, an int8 series beside the bf16 one), and the
+    license is the CircleStone one, linked to the text the repository bundles.
+    """
+    repos = [
+        upstream.source.removeprefix(_HF_URL)
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if upstream.source.startswith(_HF_URL)
+    ]
+    return replace(
+        ANIMA_METADATA, base_model=tuple(dict.fromkeys([*repos, *ANIMA_METADATA.base_model]))
+    )
 
 
 def render_base_card(
@@ -679,7 +691,7 @@ def render_base_card(
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_METADATA),
+            frontmatter(_anima_metadata(manifest)),
             _introduction(manifest, ANIMA_OFFICIAL_TITLE),
             _official_overview(manifest),
             [""],
@@ -708,7 +720,7 @@ def render_extra_card(
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_METADATA),
+            frontmatter(_anima_metadata(manifest)),
             _introduction(manifest, ANIMA_EXTRA_TITLE),
             _extra_overview(manifest),
             [""],
@@ -735,15 +747,15 @@ def render_2_9b_card(
 ) -> str:
     """The `README.md` body of the 2.9B repository's distribution (Anima-2.9B).
 
-    The house sentence names the repository the card converts, from its `base_model`
-    ({@link ANIMA_2_9B_METADATA}) — its author, not CircleStone, whose non-endorsement the License
-    section states in the licence's words.
+    The house sentence names the repositories of its `base_model` ({@link _anima_metadata}) — the
+    model's author and CircleStone, the source of the shared components; the License section
+    states CircleStone's non-endorsement in the licence's words besides.
     """
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_2_9B_METADATA),
-            introduction(ANIMA_2_9B_TITLE, hf_upstreams(ANIMA_2_9B_METADATA.base_model)),
+            frontmatter(_anima_metadata(manifest)),
+            _introduction(manifest, ANIMA_2_9B_TITLE),
             _2_9b_overview(manifest),
             [""],
             _origins(manifest, ANIMA_2_9B_ORIGINS_INTRO),

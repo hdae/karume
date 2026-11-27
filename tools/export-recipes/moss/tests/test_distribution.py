@@ -376,8 +376,8 @@ class TestTheCard:
             assert f"`{origin.source.revision}`" in card
 
     def test_the_front_matter_lists_every_upstream_whose_weights_it_carries(self) -> None:
-        """The Hub's model tree: the DiT, the text tower and the small decoder are redistributed;
-        FLUX.2 [klein] 4B supplies only the latent statistics and is not a base model."""
+        """The Hub's model tree: the DiT, the text tower and the small decoder are redistributed,
+        and FLUX.2 [klein] 4B supplies the latent statistics — every stored upstream is listed."""
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
         front_matter = card.split("---")[1]
         sequence = front_matter.split("base_model:\n")[1].split("\nbase_model_relation:")[0]
@@ -386,8 +386,8 @@ class TestTheCard:
             sources.SOURCE.repo,
             sources.TEXT_ENCODER_ORIGIN.repo,
             "black-forest-labs/FLUX.2-small-decoder",
+            "black-forest-labs/FLUX.2-klein-4B",
         ]
-        assert "black-forest-labs/FLUX.2-klein-4B" not in front_matter
 
     def test_the_vae_bullet_passes_the_usage_policy_pointer_on_as_information(self) -> None:
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
@@ -420,9 +420,10 @@ class TestTheCard:
         lines = render_moss_model_card(self._manifest(), "hdae/karume-moss-image").splitlines()
         title = lines.index(f"# {MOSS_TITLE}")
         assert lines[title + 2] == (
-            "This is an unofficial conversion of OpenMOSS-Team/MOSS-Image-SFT, Qwen/Qwen3.5-9B and"
-            " black-forest-labs/FLUX.2-small-decoder for Karume. It is not affiliated with or"
-            " endorsed by OpenMOSS, Alibaba Cloud and Black Forest Labs."
+            "This is an unofficial conversion of OpenMOSS-Team/MOSS-Image-SFT, Qwen/Qwen3.5-9B,"
+            " black-forest-labs/FLUX.2-small-decoder and black-forest-labs/FLUX.2-klein-4B for"
+            " Karume. It is not affiliated with or endorsed by OpenMOSS, Alibaba Cloud and Black"
+            " Forest Labs."
         )
 
     def test_the_notice_names_what_was_changed(self) -> None:

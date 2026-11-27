@@ -63,17 +63,18 @@ MOSS_VAE_PARTS: Mapping[str, str] = {
 }
 
 
-#: The VAE origin whose weights the decoder graphs carry (the one that accounts for `decoder.`).
-#: The other origin, FLUX.2 [klein] 4B, supplies only the 256 latent BatchNorm statistics, so it is
-#: not a `base_model`: listing it would show this repository as a quantization of a 4B transformer
-#: in the Hub's model tree.
-MOSS_VAE_DECODER_ORIGIN = next(o.source for o in VAE_ORIGINS if "decoder." in o.prefixes)
-
-
 def _metadata() -> CardMetadata:
+    """The front matter: `base_model` lists every upstream whose bytes the repository stores — the
+    checkpoint, the text encoder's release and both VAE origins, FLUX.2 [klein] 4B included for the
+    latent statistics it supplies (the maintainer's ruling of 2026-11-27: every stored upstream is
+    listed)."""
     return CardMetadata(
         pipeline_tag=MOSS_PIPELINE_TAG,
-        base_model=(SOURCE.repo, TEXT_ENCODER_ORIGIN.repo, MOSS_VAE_DECODER_ORIGIN.repo),
+        base_model=(
+            SOURCE.repo,
+            TEXT_ENCODER_ORIGIN.repo,
+            *(origin.source.repo for origin in VAE_ORIGINS),
+        ),
         license=SOURCE.license,
         tags=(MOSS_PIPELINE_TAG, "webgpu", "moss-image"),
         # The transformer and the text encoder are re-encoded in int8 (the VAE keeps its f32).
