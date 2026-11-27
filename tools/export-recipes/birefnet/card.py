@@ -403,12 +403,12 @@ def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
     )
     # With one preset (HR), write it in the singular — "every quant seat" confuses the reader in a
     # repository with no preset to compare against.
-    seats = "every quant seat stores" if len(dtypes) > 1 else "the quant seat stores"
+    seats = "every quant preset stores" if len(dtypes) > 1 else "the quant preset stores"
     heading = (
         f"**No quantization**: {seats} the source checkpoint's own values"
         f" (the checkpoint itself is stored in {stored}):"
         if lossless
-        else f"**Quantization**: the source checkpoint is stored in {stored}; per quant seat:"
+        else f"**Quantization**: the source checkpoint is stored in {stored}; per quant preset:"
     )
     return [_wrapped(heading, "- "), *(_seat_storage_line(dtype, stored) for dtype in dtypes)]
 
@@ -518,7 +518,7 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
         "  PNG / JPEG is *not* part of this — use `createImageBitmap` in the browser, or any",
         "  decoder in Deno.",
         "- **Compositing is yours.** The pipeline returns the matte, not a cut-out: whether alpha",
-        "  goes into an RGBA buffer, gets composited over a flat colour, or is fed to a colour",
+        "  goes into an RGBA buffer, gets composited over a flat color, or is fed to a color",
         "  decontamination pass is a decision this repository should not make for you.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{BIREFNET_SUPPORTED_PIPELINE}`.",
@@ -544,7 +544,7 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
         *entry.attribution,
         f"- **Architecture**: BiRefNet ([{BIREFNET_PAPER}](https://{BIREFNET_PAPER})).",
         f"{changes_made_here()} conversion into the Karume",
-        "  container format. No retraining and no fine-tuning; the stored values per quant seat",
+        "  container format. No retraining and no fine-tuning; the stored values per quant preset",
         "  are listed below. The graph is the upstream",
         "  `forward` with layout-only rewrites (windowing, the shifted-window roll, spatial",
         "  padding and the patch merges were folded into equivalent operations — bit-exact),",

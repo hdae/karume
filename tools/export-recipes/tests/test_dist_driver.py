@@ -543,6 +543,28 @@ class TestTheFrontMatterOfEveryPublishedCard:
         assert led is (directory not in TAGS_NOT_LED_BY_THE_PIPELINE_TAG), tags
 
 
+#: Words the generated texts do not use: the house word for a preset and British spellings
+#: (docs/spec/distribution-cards.md#files-at-the-repository-root).
+_HOUSE_AND_BRITISH_WORDS = re.compile(
+    r"\b(seats?|licences?|normalis\w*|colour\w*|metres?|labelled)\b", re.IGNORECASE
+)
+
+
+class TestTheWordsOfEveryPublishedRepository:
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_the_card_and_the_notice_use_the_ordinary_terms_and_american_spelling(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        manifest, card = _published_card(pipeline, directory)
+        notice = _root_files(pipeline, list(manifest["models"]))[NOTICE_FILENAME]
+        # The table rows carry the mirror's preset descriptions, which change at its next build
+        # (the recipes' descriptions are checked by the families' tests).
+        prose = _prose("\n".join(line for line in card.split("\n") if not line.startswith("|")))
+
+        assert _HOUSE_AND_BRITISH_WORDS.findall(prose) == []
+        assert _HOUSE_AND_BRITISH_WORDS.findall(notice) == []
+
+
 #: The card whose non-endorsement sentence also names works that are not on the Hub, by title,
 #: before the `base_model` IDs
 #: (docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence).

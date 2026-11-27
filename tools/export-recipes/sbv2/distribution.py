@@ -335,7 +335,7 @@ SBV2_QUANTS: Mapping[str, Any] = {
         "session": {"linearCompute": "a8"},
         "label": "int8 with int8 linear activations",
         "description": "The int8 weights with per-token int8 activations in the linear layers —"
-        " faster on GPUs with dp4a, same download as the plain int8 seat.",
+        " faster on GPUs with dp4a, same download as the plain int8 preset.",
     },
     "i8+bert4": {
         "weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"},

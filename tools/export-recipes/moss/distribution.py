@@ -288,7 +288,7 @@ The following changes were made:
   with the upstream code).
 - **f32 VAE decoder**: the FLUX.2 small decoder and `post_quant_conv` keep the source float32
   values. They are re-expressed as three graphs with a symbolic latent height and width, split
-  around the decoder's middle attention block; the nearest-neighbour ×2 upsampling is written as
+  around the decoder's middle attention block; the nearest-neighbor ×2 upsampling is written as
   a repetition (the same values). The latent batch-normalization statistics the decode path
   restores (the FLUX.2 [klein] 4B VAE's bfloat16 values, which the checkpoint holds widened to
   float32) are stored in the container as a mean and a standard deviation

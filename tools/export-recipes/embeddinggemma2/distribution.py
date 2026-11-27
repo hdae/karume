@@ -1338,7 +1338,7 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 
 - The **text tower, the vision tower and the audio tower** (each tower with its projection into
   the text tower's width) were extracted.
-- The text tower, together with the mean pooling and the L2 normalisation of the
+- The text tower, together with the mean pooling and the L2 normalization of the
   SentenceTransformer pipeline, was re-expressed as one graph in the Karume container format (a
   `.krm` part sequence whose first part carries the graph and model descriptors). The
   sliding-window attention mask was replaced by a band declared on the attention of each sliding

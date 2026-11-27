@@ -458,7 +458,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         *opening,
-        "L2 normalisation, converted into the WebGPU inference runtime **Karume**'s container",
+        "L2 normalization, converted into the WebGPU inference runtime **Karume**'s container",
         "format (a `.krm` part sequence whose first part carries the graph and model descriptors).",
         RUNTIME_SENTENCE,
         runs,
@@ -468,7 +468,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         f"- **Output**: a unit vector of {dimensions[0]} values. The model was trained with",
         "  Matryoshka Representation Learning, so a shorter vector of"
         f" {_spell(dimensions[1:])} values can be asked for:",
-        "  the leading values, re-normalised to unit length.",
+        "  the leading values, re-normalized to unit length.",
         *_input_length(config["maxTokens"]),
         *scope,
         "- Not readable by transformers or sentence-transformers (it's a different container with",
@@ -599,7 +599,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         *_storage_lines(manifest),
         "",
         # A paragraph between the two lists: CommonMark joins two adjacent lists of one marker.
-        "The upstream model, its licence and what was changed:",
+        "The upstream model, its license and what was changed:",
         "",
     ]
     for name in manifest["models"]:
@@ -651,7 +651,7 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
     )
     lines += [
         f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the text",
-        "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
+        "  tower was extracted and re-expressed, with the mean pooling and the L2 normalization,",
         "  as one graph in the Karume container format; the sliding-window attention mask is a",
         "  band declared on the attention, applied from the token positions; the weights keep the",
         *weights_change,

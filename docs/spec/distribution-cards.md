@@ -25,6 +25,8 @@ item "The model cards and notices across repositories".
   drafters differ per model), SigLIP2's (a checkpoint per model) and the Irodori MIT line's, whose three repositories
   (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`) are one pipeline: each
   carries the same `LICENSE.md` and a `NOTICE.md` naming its own checkpoint and the repositories it references.
+- The texts are written in American English with the ordinary terms: a quant preset is a "preset", never a "seat";
+  "license", "normalization", "color", "meter". A quotation of an upstream keeps the upstream's words.
 - Rendering is deterministic: the same manifest gives the same bytes. Sizes, the model list, the quant tables and the
   dtype labels are read from the manifest, never written by hand; what the manifest does not hold (upstream, license,
   provenance) is a constant of the recipe.

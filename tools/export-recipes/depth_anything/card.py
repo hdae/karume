@@ -159,14 +159,14 @@ def _depth_anything_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  as the image you handed over.",
         "- **Relative depth has no unit and no origin** — larger means nearer, and only the",
         "  ordering carries meaning. This is not a metric-depth checkpoint: the numbers are not",
-        "  metres and are not comparable across images.",
+        "  meters and are not comparable across images.",
         "- **Pre- and post-processing are included.** The pipeline resizes to"
         f" {config['imageWidth']} × {config['imageHeight']}, normalizes with the constants below,",
         "  runs the graph, and scales the depth map back to the original resolution. Decoding",
         "  PNG / JPEG is *not* part of this — use `createImageBitmap` in the browser, or any",
         "  decoder in Deno.",
-        "- **Normalization and colouring are yours.** The pipeline returns the raw f32 map, not a",
-        "  `[0, 1]` image: folding it with min/max would throw the scale away, and which colour",
+        "- **Normalization and coloring are yours.** The pipeline returns the raw f32 map, not a",
+        "  `[0, 1]` image: folding it with min/max would throw the scale away, and which color",
         "  map to use is a decision this repository should not make for you.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{DEPTH_ANYTHING_SUPPORTED_PIPELINE}`.",
@@ -195,7 +195,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "- **Only the Small checkpoint is redistributed**: upstream licenses Base and Large"
         " **cc-by-nc-4.0**, so they are not converted or redistributed here.",
         "- **Training data**: see the upstream model card. Depth Anything V2 is distilled from a",
-        "  teacher trained on synthetic data and then trained on pseudo-labelled real images —",
+        "  teacher trained on synthetic data and then trained on pseudo-labeled real images —",
         "  check the upstream sources against your own use case.",
         f"- **Architecture**: DINOv2 backbone + DPT head"
         f" ([{DEPTH_ANYTHING_PAPER}](https://{DEPTH_ANYTHING_PAPER})).",
