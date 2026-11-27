@@ -215,6 +215,13 @@ const CASES_WITHOUT_A_GRAPH: Readonly<Record<string, string>> = {
     "profile still holds this shape's parallel row, and every row of the profile has a case",
   "i8-n262144-k2560":
     "the regular E4B's int8 output head: as E2B's — the default profile still holds its parallel row",
+  // The two entries below go when the mirror holds 26b/drafter (the case then has a graph, and this
+  // list fails until they are removed).
+  "i4g32-n1024-k5632":
+    "26B A4B's QAT MTP drafter's pre_projection: the recipe ships the drafter, and the published " +
+    "karume-gemma4-qat holds 26B without it until its next upload",
+  "i4g32-n2816-k1024":
+    "26B A4B's QAT MTP drafter's post_projection: as its pre_projection, not in the published mirror yet",
 };
 
 /**
