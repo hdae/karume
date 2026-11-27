@@ -323,11 +323,11 @@ const GEMMA4_REGULAR_MIRROR = "karume-gemma4";
 
 /**
  * Pipeline `gemma4` rows of the regular line's mirror (`models/karume-gemma4`, bf16 — its preset
- * `bf16-fast` declares `level: "reorder"`). Derived from the mirror's E2B / E4B `model` and E2B
+ * `bf16-fast` declares `level: "reorder"`). Derived from the mirror's E2B / E4B `model` and
  * `drafter` part 0 with the procedure of the file header, on the parallel rows of the table the
  * development machine's RTX 3080 Ti selects (`nvidia-ampere` as derived 2026-11-21: the default
  * profile's 17 bf16 rows, its own bf16 `1536 × 2048` and `2560 × 256`, and int8 rows on five shapes
- * of the drafter), where the real-GPU runs compare them with the dispatched kernels
+ * of the E2B drafter, four of which the E4B drafter shares), where the real-GPU runs compare them with the dispatched kernels
  * (`e2e_gemma4_bf16_parallel_gemv_plan_test.ts` compares the plan with these rows, and the default
  * profile's plan with that table's).
  *
@@ -353,6 +353,15 @@ const GEMMA4_BF16_E2B_DRAFTER_GEMV = { variant: 65, reference: 3 } as const;
  * default profile `2560 × 256` has no row either (216 / 128).
  */
 const GEMMA4_BF16_E4B_GEMV = { variant: 258, reference: 86 } as const;
+/**
+ * The regular E4B int8 drafter: of its 68 linears, 62 take a parallel GEMV row — the two
+ * `post_projection` 2560×256 of the default profile and the 60 that `nvidia-ampere`'s own rows reach
+ * (`2048 × 256` 27, `256 × 2048` 15, `1024 × 256` 9 and `256 × 1024` 9); the other 6 (the
+ * `pre_projection` 256×5120 3, which that table has no row for where it has one for E2B's 256×3072,
+ * and the output head 262144×256 3) have none. Under the default profile only the two
+ * `post_projection` have a row (2 / 66). RMS→add folds 24 times, as the QAT E4B drafter's.
+ */
+const GEMMA4_BF16_E4B_DRAFTER_GEMV = { variant: 62, reference: 6 } as const;
 
 /**
  * Pipeline `gemma4` rows: the q4_0 QAT line's mirror (`models/karume-gemma4-qat`) — the line that
@@ -548,7 +557,7 @@ const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
  * written — see the file header).
  */
 export const CENSUS_TABLE: readonly BundleCensusRow[] = [
-  // --- gemma4 E2B / E4B (the regular bf16 mirror; E2B with its int8 drafter) -
+  // --- gemma4 E2B / E4B (the regular bf16 mirror, each with its int8 drafter) -
   {
     // The distribution mirror's `bf16-fast` (it declares `level: "reorder"`; ③'s parallel-fused is
     // not derived — file header). RMS→add folds as many pairs as on the q4_0 graphs.
@@ -571,7 +580,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // The distribution mirror's `bf16-fast` (as E2B's; E4B ships no drafter).
+    // The distribution mirror's `bf16-fast` (as E2B's, with its int8 drafter).
     family: "gemma4",
     distribution: GEMMA4_REGULAR_MIRROR,
     models: E4B,
@@ -581,6 +590,12 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
         prefill: { rmsNormAdd: GEMMA4_E4B_RMS_ADD },
         decode: { linearGemvReduce: GEMMA4_BF16_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
         verify: { linearGemvReduce: GEMMA4_BF16_E4B_GEMV, rmsNormAdd: GEMMA4_E4B_RMS_ADD },
+      },
+      drafter: {
+        draft: {
+          linearGemvReduce: GEMMA4_BF16_E4B_DRAFTER_GEMV,
+          rmsNormAdd: GEMMA4_E4B_DRAFTER_RMS_ADD,
+        },
       },
     },
   },

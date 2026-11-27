@@ -174,10 +174,11 @@ const graphLinears = (
  * linear has no entry in {@link SEQUENTIAL_AT_REORDER}, so nothing else would notice its loss).
  */
 const INTEGER_LINEARS: Readonly<Record<string, number>> = {
-  // The regular line is bf16; only its E2B ships a drafter (int8).
+  // The regular line is bf16; its E2B and E4B ship a drafter (int8).
   "karume-gemma4 e2b model bf16": 0,
   "karume-gemma4 e2b drafter i8": 68,
   "karume-gemma4 e4b model bf16": 0,
+  "karume-gemma4 e4b drafter i8": 68,
   "karume-gemma4-qat e2b model i4": 277,
   "karume-gemma4-qat e2b drafter i4": 68,
   "karume-gemma4-qat e4b model i4": 344,
@@ -318,6 +319,14 @@ const sequentialAtReorder = (
 const SEQUENTIAL_AT_REORDER: Readonly<Record<string, readonly string[]>> = {
   "karume-gemma4 e2b drafter i8": [
     "i8 256×3072 ×3",
+    "i8 1024×256 ×9",
+    "i8 256×1024 ×9",
+    "i8 2048×256 ×27",
+    "i8 256×2048 ×15",
+    "i8 262144×256 ×3",
+  ],
+  "karume-gemma4 e4b drafter i8": [
+    "i8 256×5120 ×3",
     "i8 1024×256 ×9",
     "i8 256×1024 ×9",
     "i8 2048×256 ×27",

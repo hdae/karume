@@ -113,7 +113,7 @@ const PRESETS: readonly {
 const choiceOf = (model: Model) => ({ model, quant: PRESET }) as const;
 
 /** Which models ship the int8 drafter (`gemma4.card.GEMMA4_DRAFTER_UPSTREAM`). */
-const HAS_DRAFTER: Record<Model, boolean> = { e2b: true, e4b: false };
+const HAS_DRAFTER: Record<Model, boolean> = { e2b: true, e4b: true };
 
 const VOCAB = 262144;
 /** Bytes of one bf16 value. */

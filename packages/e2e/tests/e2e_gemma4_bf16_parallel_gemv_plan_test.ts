@@ -9,10 +9,9 @@
  * sequential GEMV at one row and the GEMM above it. This pins, on the mirror's actual graphs and
  * with the same predicate as the recipe builder, which linear lands where under the default profile;
  * which lands elsewhere under `nvidia-ampere`, the table of the development machine's RTX 3080 Ti
- * (its rows on bf16 `1536 × 2048` and on the int8 shapes of the E2B drafter, which the default has
- * none for, and other lanes on bf16 `512 × 1536` and `2560 × 256`); and that the totals under that
- * table are the census
- * table's `karume-gemma4` rows (`models/tests/helpers/census-table.ts`), which the real-GPU runs on
+ * (its rows on bf16 `1536 × 2048` and on int8 shapes of the drafters, which the default has none
+ * for, and other lanes on bf16 `512 × 1536` and `2560 × 256`); and that the totals under that table
+ * are the census table's `karume-gemma4` rows (`models/tests/helpers/census-table.ts`), which the real-GPU runs on
  * that machine compare with the dispatched kernels.
  *
  * Where the mirror is missing the cases SKIP explicitly.
@@ -126,8 +125,8 @@ const totals = (counts: Record<string, number>): { variant: number; reference: n
 };
 
 /**
- * Per component: the expected fold. The product graphs' linears are bf16; E2B's drafter is int8
- * throughout (its one-row graph is planned at one row).
+ * Per component: the expected fold. The product graphs' linears are bf16; the drafters are int8
+ * throughout (their one-row graph is planned at one row).
  */
 const EXPECTED = {
   e2b: {
@@ -173,6 +172,15 @@ const EXPECTED = {
       "bf16 2560×256 sequential": 42,
       "bf16 262144×2560 sequential": 1,
     },
+    drafter: {
+      "i8 2560×256 l4": 2,
+      "i8 1024×256 sequential": 9,
+      "i8 2048×256 sequential": 27,
+      "i8 256×1024 sequential": 9,
+      "i8 256×2048 sequential": 15,
+      "i8 256×5120 sequential": 3,
+      "i8 262144×256 sequential": 3,
+    },
   },
 } as const;
 
@@ -192,7 +200,16 @@ const AMPERE_MOVED: Record<keyof typeof EXPECTED, Record<string, Record<string, 
       "i8 256×3072": 32,
     },
   },
-  e4b: { model: { "bf16 2560×256": 8 } },
+  e4b: {
+    model: { "bf16 2560×256": 8 },
+    // nvidia-ampere has no row for the pre_projection 256×5120, which E2B's 256×3072 has.
+    drafter: {
+      "i8 1024×256": 4,
+      "i8 2048×256": 4,
+      "i8 256×1024": 32,
+      "i8 256×2048": 32,
+    },
+  },
 };
 
 /** The default profile's fold with the linears `moved` names on the parallel GEMV at its lanes. */

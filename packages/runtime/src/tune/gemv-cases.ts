@@ -86,6 +86,9 @@ const E4B_BF16 = "Gemma 4 E4B, bf16";
 const G12B = "Gemma 4 12B q4_0 QAT, i4 g32";
 const E2B_DRAFTER = "Gemma 4 E2B q4_0 QAT drafter, i4 g32";
 const E2B_DRAFTER_I8 = "Gemma 4 E2B drafter, i8";
+const E4B_DRAFTER_I8 = "Gemma 4 E4B drafter, i8";
+/** The drafter shapes the regular E2B and E4B drafters share (their inner width is 256). */
+const E_DRAFTERS_I8 = "Gemma 4 E2B / E4B drafter, i8";
 const G12B_DRAFTER = "Gemma 4 12B q4_0 QAT drafter, i4 g32";
 /** The drafter shapes the E2B and the E4B q4_0 QAT drafters share (their inner width is 256). */
 const E_DRAFTERS = "Gemma 4 E2B / E4B q4_0 QAT drafter, i4 g32";
@@ -120,13 +123,15 @@ export const GEMV_CASES: readonly GemvCase[] = [
   shape("i4", 32, 2048, 256, `${E_DRAFTERS}: gate / up, q (full)`),
   shape("i4", 32, 256, 2048, `${E_DRAFTERS}: down, o (full)`),
   shape("i4", 32, 262144, 256, `${E_DRAFTERS}: lm_head`),
-  // The MTP drafter of the regular E2B (i8; post_projection 1536×256 is the QAT case below).
+  // The MTP drafters of the regular E2B and E4B (i8; post_projection 1536×256 and 2560×256 are the
+  // QAT cases below).
   shape("i8", undefined, 256, 3072, `${E2B_DRAFTER_I8}: pre_projection`),
-  shape("i8", undefined, 1024, 256, `${E2B_DRAFTER_I8}: q (sliding)`),
-  shape("i8", undefined, 256, 1024, `${E2B_DRAFTER_I8}: o (sliding)`),
-  shape("i8", undefined, 2048, 256, `${E2B_DRAFTER_I8}: gate / up, q (full)`),
-  shape("i8", undefined, 256, 2048, `${E2B_DRAFTER_I8}: down, o (full)`),
-  shape("i8", undefined, 262144, 256, `${E2B_DRAFTER_I8}: lm_head`),
+  shape("i8", undefined, 256, 5120, `${E4B_DRAFTER_I8}: pre_projection`),
+  shape("i8", undefined, 1024, 256, `${E_DRAFTERS_I8}: q (sliding)`),
+  shape("i8", undefined, 256, 1024, `${E_DRAFTERS_I8}: o (sliding)`),
+  shape("i8", undefined, 2048, 256, `${E_DRAFTERS_I8}: gate / up, q (full)`),
+  shape("i8", undefined, 256, 2048, `${E_DRAFTERS_I8}: down, o (full)`),
+  shape("i8", undefined, 262144, 256, `${E_DRAFTERS_I8}: lm_head`),
   // Gemma 4 E2B QAT.
   shape("i4", 512, 2048, 1536, `${E2B_QAT}, i4 g512: q (sliding)`),
   shape("i4", 512, 256, 1536, `${E2B_QAT}, i4 g512: k / v (sliding)`),
