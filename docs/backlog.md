@@ -324,14 +324,70 @@ maintainer's ruling of 2026-11-06).
     borrowed roles from the mirrors, or retire it with the experiment.
 
 - **The model cards and notices across repositories (filed 2026-11-24, the maintainer's request; after the 0.24.0
-  release)**: check that every distribution's README.md and NOTICE.md are written the same way (section order, how an
-  upstream is named and pinned, what is quoted and what is stated in the recipe's own words, where the reader is sent
-  for the upstream's own description) and write the rules down where the recipes can point at them. The 2.9B card set
-  one precedent: an upstream's statement that the recipe cannot measure is quoted verbatim, and the notice refers to the
-  upstream card for it. The profile of 2026-11-25 (`outputs/misc/card-notice-review-2026-11-25/`, untracked) found
-  wording that differs between families: `license_link` set by the Gemma 4 cards only, "apache-2.0" against
-  "Apache 2.0", fenced against unfenced licence texts, an upstream sentence shared through one constant in some
-  families and written twice in others. Each change is a new upload of that repository.
+  release)**. How a distribution repository's `README.md`, `NOTICE.md` and `LICENSE.md` are written now is the spec
+  [distribution-cards](spec/distribution-cards.md); the rules every published repository satisfies are checked by
+  `tools/export-recipes/tests/test_dist_driver.py`. Each change below is a new upload of the repositories it names.
+  - **Decided (maintainer, 2026-11-27), not built**:
+    - A card names a license by its HF identifier (`**apache-2.0**`); `NOTICE.md` names it by its full title.
+    - A card pins every stored upstream at its full commit.
+    - The Gemma 4 cards keep `license_link` beside `license: apache-2.0` (the cards have it; the doc of
+      `karume.modelcard.CardMetadata` still says an SPDX license carries neither `license_name` nor `license_link`).
+    - The primary license text of `LICENSE.md` is fenced.
+    - Every card sends the reader to the upstream cards for capabilities, limitations, intended use and safety.
+    - `NOTICE.md` names each upstream by its repository ID.
+    - Authors are spelled as `_shared.upstream.UPSTREAM_AUTHORS` spells them, and Anima's origins list follows it.
+    - One re-upload per repository carries every change; the package pins move at the next release.
+  - **Not ruled**: quoting upstream legal statements verbatim; naming Node in the runtime sentence; whether measured
+    speed sentences stay in preset descriptions; whether `base_model` lists the upstreams of components fetched from
+    another Karume repository.
+  - **Open points**, by the spec's headings:
+    - Sections: the Anima cards have `## Models and their origins` and `## License` in place of `## Base weights and
+      attribution`; `karume-gemma4-qat-mobile` has no `## What is this` and no `## Usage`, and heads its model
+      sections `## <name>`.
+    - Front matter: `karume-anima`'s `base_model` lacks `circlestone-labs/Anima`, the source of four of its five
+      models; `karume-moss-image`'s lacks `black-forest-labs/FLUX.2-klein-4B`, whose latent statistics it stores;
+      `karume-gemma4-qat-mobile`'s tags do not begin with its pipeline tag.
+    - Non-endorsement sentence: `karume-anima` names its five Hub models by title; its origins list spells the author
+      `circlestone_labs` where the sentence says `CircleStone Labs LLC`.
+    - Pins (the ruling): twelve cards pin no upstream; "at revision" (`karume-irodori-v4.1-small-mf`,
+      `karume-irodori-v4-large`) and "(revision …)" (`karume-anima-2.9b`) stand where "at commit" is meant;
+      `karume-umt5-xxl` shortens two upstream commits to 8 digits.
+    - Links: the Anima origins write bare URLs; the quant tables' cross-repository note and the `karume-wan2.2` /
+      `karume-umt5-xxl` mentions of each other put the repository ID in code font.
+    - License naming (the ruling): `**Apache 2.0**` on the four Gemma-family cards; `**MIT**` and `**Apache-2.0**` on
+      the four Irodori cards; `**[CC BY-SA 4.0](…)**` for the sbv2 voices; `**CC-BY-4.0**` for Lucida's ToonOut
+      data; the CircleStone license in prose on the Anima cards.
+    - Legal pointers and the changes bullet: `karume-sbv2-jvnv`'s card names neither `LICENSE.md` nor `NOTICE.md`,
+      and its changes bullet has no pointer and no license clause; the Anima cards have no changes bullet; the pointer
+      reads "also listed in" on eleven cards and "listed in full in" on four (which one is not ruled).
+    - Card against notice: `karume-gemma4`'s attribution opens "its weights shipped unchanged (bf16)", while both
+      drafters it ships are int8.
+    - Upstream cards (the ruling): fifteen cards have no upstream-card bullet (`karume-birefnet-hr` and
+      `karume-depth-anything-v2` point to the upstream card for the training data only); `karume-gemma4` and
+      `karume-gemma4-qat` link the default model's card only.
+    - Upstream statements in the recipe's own words: EmbeddingGemma 2's precision bullet; Irodori v4-Large's
+      Gemma-terms statement (card and notice); v4.1-small-mf's MeanFlow description; sbv2's corpus-license carry-over
+      (card and notice); Depth Anything V2's distillation and Base / Large license lines; BiRefNet HR's and Lucida's
+      training-data lines and Lucida's tagline; MOSS-Image's BFL usage-policy line; the mobile QAT card's dated
+      tokenizer claim.
+    - `NOTICE.md`: the Anima notices open with `# Notice`, follow the license's own layout and have no closing
+      paragraph; under the ruling, the eight notices that say "the … checkpoint listed in `README.md`", sbv2's
+      angle-bracket URLs and the Anima prose names (the Irodori MIT line then needs root files per model, as Gemma 4's
+      are).
+    - `LICENSE.md`: under the ruling, the ten unfenced Apache 2.0 and CC BY-SA 4.0 primary texts;
+      `karume-irodori-v4-large`'s Gemma Prohibited Use Policy has no `## … — <scope>` heading and no scope paragraph.
+    - What is this: `karume-moss-image` names Node; `karume-wan2.2` and `karume-umt5-xxl` have no runtime sentence;
+      `karume-umt5-xxl` has no "Not readable by" bullet.
+    - Usage: `karume-umt5-xxl` writes the call by hand (`const` and `dispose()`) instead of `from_pretrained` with
+      `await using`.
+    - Terms: "quant seat" (BiRefNet HR and Lucida, card and notice), "the plain int8 seat" (an sbv2 preset
+      description, so `karume.json` too), "the component swap seat" (`karume-umt5-xxl`); British spellings
+      ("licence", "normalisation", "colour") in EmbeddingGemma 2, BiRefNet HR, Lucida and Depth Anything V2.
+    - Shared wording (code only, no byte changes): the Apache text URL, the Gemma 4 license page, the notices'
+      closing paragraph, the "What is this" sentences and the upstream-card bullet are per-family literals; Anima's
+      non-endorsement sentence is two literals; MOSS-Image's BFL sentence differs between card and notice ("names"
+      against "names and marks"); the Wan notice hard-codes `karume-umt5-xxl`; `base_model_relation` is decided three
+      ways (derived in birefnet, from every dtype in Gemma 4, fixed elsewhere).
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
