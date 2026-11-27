@@ -38,7 +38,7 @@ This is why the public surface is split into **2 Pipelines** (the same shape as 
 fine-tuned): `root_files` (`LICENSE.md` / `NOTICE.md` at the root of the distribution repository)
 is one set fixed per Pipeline, and the MIT copyright lines differ per repository (HR has the
 ZhengPeng line, Lucida the fine-tune's line before it; both end with the Swin Transformer backbone's
-line). Folding them into one would
+two lines). Folding them into one would
 make one of the repositories **claim a copyright that is not its own** or drop the upstream's
 copyright notice — both stay plausible prose, so they pass `verify_dist` and the manifest checks,
 and nobody could notice until after shipping. The card's attribution comes in through the same entry
@@ -719,19 +719,27 @@ def birefnet_dist_plan(series_dir: Path, model: str, checkpoint: str) -> ModelPl
 #: frontmatter), so the text is built from the shared template (`_shared.licenses.mit_license`) and
 #: the holder lines live here.
 #:
-#: MUST: Lucida has 3 lines (the fine-tune's, the upstream's and the backbone's). MIT's "include
-#: the copyright notice and permission notice" means a derivative cannot drop the upstream's notice
-#: either, and the upstream card itself declares "the original copyright notice is preserved".
+#: MUST: Lucida has 4 lines (the fine-tune's, the upstream's and the backbone's two) and HR has 3
+#: (the upstream's and the backbone's two). MIT's "include the copyright notice and permission
+#: notice" means a derivative cannot drop the upstream's notice either, and the upstream card itself
+#: declares "the original copyright notice is preserved".
 #:
 #: The ZhengPeng and egeorcun lines are those of the `LICENSE` of the implementation repository each
 #: HF card links (GitHub `ZhengPeng7/BiRefNet`, `egeorcun/lucida` — checked 2026-11-26).
 #:
-#: MUST: both repositories carry the Swin Transformer line ({@link SWIN_TRANSFORMER_COPYRIGHT}) —
-#: the backbone is Swin Transformer, whose shifted-window mask generation the recipe ports
-#: verbatim (`birefnet.patch._build_attn_mask`), so its notice travels with the distributions
-#: (maintainer ruling of 2026-11-26). Ordered closest to the distribution first, per the convention
-#: of `mit_license`, so the backbone's line comes last.
+#: MUST: both repositories carry the two Swin Transformer lines
+#: ({@link SWIN_TRANSFORMER_HEADER_COPYRIGHT}, then {@link SWIN_TRANSFORMER_COPYRIGHT}) — the
+#: backbone is Swin Transformer, whose shifted-window mask generation the recipe ports verbatim
+#: (`birefnet.patch._build_attn_mask`), so its notice travels with the distributions (maintainer
+#: rulings of 2026-11-26 and, for the header's line, 2026-11-27). Ordered closest to the
+#: distribution first, per the convention of `mit_license`, so the backbone's lines come last: the
+#: one the vendored code carries, then the one of the repository's `LICENSE`.
 SWIN_TRANSFORMER_UPSTREAM = "microsoft/Swin-Transformer"
+
+#: The copyright line of the Swin Transformer section header in the vendored `birefnet.py` (the
+#: `models/backbones/swin_v1.py` section both Hugging Face repositories ship, byte-identical;
+#: verbatim, checked 2026-11-27) — the notice the ported code itself carries.
+SWIN_TRANSFORMER_HEADER_COPYRIGHT = "Copyright (c) 2021 Microsoft"
 
 #: The copyright line of the `LICENSE` of GitHub `microsoft/Swin-Transformer` (verbatim; checked on
 #: `main` at `f82860bf`, 2026-11-26 — the file last changed in `77409a45`, 2021-03-25). Its
@@ -742,11 +750,13 @@ SWIN_TRANSFORMER_COPYRIGHT = "Copyright (c) Microsoft Corporation."
 BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
     BIREFNET_HR_CHECKPOINT: (
         "Copyright (c) 2024 ZhengPeng",
+        SWIN_TRANSFORMER_HEADER_COPYRIGHT,
         SWIN_TRANSFORMER_COPYRIGHT,
     ),
     BIREFNET_LUCIDA_CHECKPOINT: (
         "Copyright (c) 2026 egeorcun",
         "Copyright (c) 2024 ZhengPeng",
+        SWIN_TRANSFORMER_HEADER_COPYRIGHT,
         SWIN_TRANSFORMER_COPYRIGHT,
     ),
 }

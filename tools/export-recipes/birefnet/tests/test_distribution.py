@@ -892,8 +892,10 @@ class TestBirefnetLegalText:
         license_text, notice = self._legal(tmp_path, BIREFNET_HR_CHECKPOINT)
         assert "MIT License" in license_text
         assert (
-            "Copyright (c) 2024 ZhengPeng\nCopyright (c) Microsoft Corporation.\n" in license_text
-        )
+            "Copyright (c) 2024 ZhengPeng\n"
+            "Copyright (c) 2021 Microsoft\n"
+            "Copyright (c) Microsoft Corporation.\n"
+        ) in license_text
         # It claims no copyright that is not its own (the fine-tune side is another repository's
         # fact).
         assert "egeorcun" not in license_text
@@ -907,11 +909,12 @@ class TestBirefnetLegalText:
     def test_the_lucida_repository_carries_every_upstream_copyright(self, tmp_path: Path) -> None:
         """Under MIT a derivative cannot drop the upstream copyright notice (the same direction as
         the upstream card's own statement) — the fine-tune's line first, then BiRefNet's and the
-        Swin Transformer backbone's."""
+        Swin Transformer backbone's two (its vendored section header's, then its `LICENSE`'s)."""
         license_text, notice = self._legal(tmp_path, BIREFNET_LUCIDA_CHECKPOINT)
         assert (
             "Copyright (c) 2026 egeorcun\n"
             "Copyright (c) 2024 ZhengPeng\n"
+            "Copyright (c) 2021 Microsoft\n"
             "Copyright (c) Microsoft Corporation.\n"
         ) in license_text
         assert BIREFNET_UPSTREAM[BIREFNET_LUCIDA_CHECKPOINT] in notice

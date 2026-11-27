@@ -88,7 +88,7 @@ is published, and checked again when its pin moves.
 | Form of copy             | Weights loaded and re-distributed in converted storage form; the bundled `birefnet.py` / `handler.py` are executed via `trust_remote_code` and partially ported verbatim (see above).                                                                                         |
 | Code license             | MIT — the model card front matter of the revision used says `license: mit` (`README.md` of the fetched checkout, checked 2026-09-05); the bundled remote code carries no separate license file and falls under the repository license. Human review 2026-09-04 confirmed MIT. |
 | Weights license          | `card.py` records `mit` (checked on the HF model API, 2026-08-13). Verified against the revision used: the fetched checkout's `README.md` front matter says `license: mit` (checked 2026-09-05; human review 2026-09-04).                                                     |
-| Attribution requirements | MIT: `distribution.py` writes the distribution's `LICENSE.md` (the MIT text from `../_shared/licenses/mit.txt` carrying `Copyright (c) 2024 ZhengPeng` and the Swin Transformer line — see that block) and a `NOTICE.md` listing the container re-expression, the bit-exact layout rewrites, the rewrites equivalent up to rounding (BatchNorm as an affine, the two-stage ASPP pooling, the commuted decoder-tail 1×1 convolution and upsample) and the absence of quantization. |
+| Attribution requirements | MIT: `distribution.py` writes the distribution's `LICENSE.md` (the MIT text from `../_shared/licenses/mit.txt` carrying `Copyright (c) 2024 ZhengPeng` and the two Swin Transformer lines — see that block) and a `NOTICE.md` listing the container re-expression, the bit-exact layout rewrites, the rewrites equivalent up to rounding (BatchNorm as an affine, the two-stage ASPP pooling, the commuted decoder-tail 1×1 convolution and upsample) and the absence of quantization. |
 
 ### egeorcun/lucida
 
@@ -99,7 +99,7 @@ is published, and checked again when its pin moves.
 | Form of copy             | Weights loaded and re-distributed in converted storage form: `f32` as is, `f16` rounded to the nearest f16 (stated as quantization in `NOTICE.md`).                                                                                                                           |
 | Code license             | MIT — the model card front matter of the revision used says `license: mit` (`README.md` of the fetched checkout, checked 2026-09-05); the bundled remote code carries no separate license file and falls under the repository license. Human review 2026-09-04 confirmed MIT. |
 | Weights license          | `card.py` records `mit` (checked on the HF model API, 2026-08-13), on top of BiRefNet_HR's own notice. Verified against the revision used: the fetched checkout's `README.md` front matter says `license: mit` (checked 2026-09-05; human review 2026-09-04).                 |
-| Attribution requirements | MIT: `distribution.py` writes the distribution's `LICENSE.md` carrying **three** copyright lines (the fine-tune author, BiRefNet upstream and the Swin Transformer backbone — see that block) and a `NOTICE.md` listing the changes. `card.py` carries the ToonOut (CC-BY-4.0) and upstream-copyright lines. |
+| Attribution requirements | MIT: `distribution.py` writes the distribution's `LICENSE.md` carrying **four** copyright lines (the fine-tune author, BiRefNet upstream and the Swin Transformer backbone's two — see that block) and a `NOTICE.md` listing the changes. `card.py` carries the ToonOut (CC-BY-4.0) and upstream-copyright lines. |
 
 ### microsoft/Swin-Transformer
 
@@ -108,9 +108,9 @@ is published, and checked again when its pin moves.
 | Upstream repository      | <https://github.com/microsoft/Swin-Transformer> |
 | Revision used            | No checkout: its code reaches this recipe as the `models/backbones/swin_v1.py` section of the `birefnet.py` that both Hugging Face repositories ship at the revisions above (byte-identical in both). The `LICENSE` was read on `main` at `f82860bfb5225915aca09c3227159ee9e1df874d` (2026-11-26; the file last changed in `77409a45`, 2021-03-25). |
 | Form of copy             | The backbone (Swin-v1-L) is executed via `trust_remote_code` and re-expressed in the exported graph, with its weights inside the BiRefNet checkpoints; `patch.py`'s `_build_attn_mask` is a verbatim port of its shifted-window mask generation, whose values the exported graph carries as a table of window kinds. |
-| Code license             | MIT — the repository's `LICENSE` (copyright line `Copyright (c) Microsoft Corporation.`), and the section header in `birefnet.py` ("Licensed under The MIT License"), checked 2026-11-26. |
+| Code license             | MIT — the repository's `LICENSE` (copyright line `Copyright (c) Microsoft Corporation.`), checked 2026-11-26, and the section header in `birefnet.py` (copyright line `Copyright (c) 2021 Microsoft`, "Licensed under The MIT License"), checked 2026-11-26 and the copyright line again 2026-11-27. |
 | Weights license          | n/a — no weights of this repository are loaded; the backbone's weights are part of the BiRefNet checkpoints above. |
-| Attribution requirements | MIT: the notice travels with both distributions (maintainer ruling of 2026-11-26). `distribution.py` appends `Copyright (c) Microsoft Corporation.` to the copyright lines of each `LICENSE.md` (`SWIN_TRANSFORMER_COPYRIGHT`, last, after the BiRefNet lines), above the one MIT permission notice, and each `NOTICE.md` names the backbone and points at that line. In this recipe, `patch.py`'s `_build_attn_mask` carries the in-place notice. |
+| Attribution requirements | MIT: the notice travels with both distributions (maintainer rulings of 2026-11-26 and, for the section header's line, 2026-11-27). `distribution.py` appends two lines to the copyright lines of each `LICENSE.md`, after the BiRefNet lines: `Copyright (c) 2021 Microsoft` (`SWIN_TRANSFORMER_HEADER_COPYRIGHT`, the line of the section header the ported code carries), then `Copyright (c) Microsoft Corporation.` (`SWIN_TRANSFORMER_COPYRIGHT`, the line of the repository's `LICENSE`), above the one MIT permission notice; each `NOTICE.md` names the backbone and points at its copyright notice in `LICENSE.md`. In this recipe, `patch.py`'s `_build_attn_mask` carries the in-place notice. |
 
 ### Copyright lines of the distributions' `LICENSE.md`
 
@@ -119,13 +119,16 @@ GitHub implementation repository whose `LICENSE` states the line (checked 2026-1
 `Copyright (c) 2024 ZhengPeng` (<https://github.com/ZhengPeng7/BiRefNet>) and
 `Copyright (c) 2026 egeorcun` (<https://github.com/egeorcun/lucida>). `BIREFNET_COPYRIGHTS` in
 `distribution.py` writes exactly those lines (lucida's `LICENSE.md` carries both, as its card says
-"the original copyright notice is preserved"); each repository's list then ends with the Swin
-Transformer line, once, after its BiRefNet lines.
+"the original copyright notice is preserved"); each repository's list then ends with the two Swin
+Transformer lines, once each, after its BiRefNet lines: the section header's
+`Copyright (c) 2021 Microsoft`, then the `LICENSE`'s `Copyright (c) Microsoft Corporation.`.
 
 ### The Swin Transformer notice in the distributions
 
 Settled by the maintainer on 2026-11-26: the Swin Transformer MIT notice (its copyright line and
 permission notice, as in the repository's `LICENSE`) travels with `karume-birefnet-hr` and
-`karume-lucida`, not only with this recipe. The backbone is Swin Transformer throughout, and the
+`karume-lucida`, not only with this recipe. Settled on 2026-11-27: the copyright line of the
+section header in the vendored `birefnet.py` (`Copyright (c) 2021 Microsoft`, the notice the
+ported code itself carries) travels with them too, before the `LICENSE`'s line. The backbone is Swin Transformer throughout, and the
 exported graph carries the values of its mask generation, which `patch.py` ports verbatim.
 `distribution.py` writes it as described in the block above.
