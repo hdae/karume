@@ -697,11 +697,35 @@
         "kind": "variable"
       },
       {
+        "name": "GEMV_LOWEST_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_MIN_PASS_MS",
+        "kind": "variable"
+      },
+      {
         "name": "GEMV_MIN_SPEEDUP",
         "kind": "variable"
       },
       {
         "name": "GEMV_SENTINEL_COUNT",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_STEADY_GROUP_SPREAD",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_STEADY_MAX_SHARE",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_STEADY_MIN_GROUPS",
         "kind": "variable"
       },
       {
@@ -734,6 +758,14 @@
       },
       {
         "name": "GemvRowReading",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSteadiness",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSteadinessClass",
         "kind": "typeAlias"
       },
       {
@@ -794,6 +826,10 @@
       },
       {
         "name": "GemvSweepRow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepSession",
         "kind": "typeAlias"
       },
       {
@@ -1001,6 +1037,10 @@
         "kind": "function"
       },
       {
+        "name": "gemvBreakEven",
+        "kind": "function"
+      },
+      {
         "name": "gemvCaseDistance",
         "kind": "function"
       },
@@ -1029,11 +1069,19 @@
         "kind": "function"
       },
       {
+        "name": "gemvRoundsGap",
+        "kind": "function"
+      },
+      {
         "name": "gemvRowReading",
         "kind": "function"
       },
       {
         "name": "gemvSentinels",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSteadiness",
         "kind": "function"
       },
       {
@@ -1050,6 +1098,10 @@
       },
       {
         "name": "gemvSweepQuickLookMargin",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSweepSession",
         "kind": "function"
       },
       {

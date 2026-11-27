@@ -283,8 +283,36 @@ export type {
   GemvSweepPhase,
   GemvSweepPlannedRowCount,
   GemvSweepProgress,
+  GemvSweepSession,
   GemvSweepStep,
 } from "./src/tune/gemv-sweep.ts";
+/**
+ * A sweep's session ({@link gemvSweepSession}): a random id and its start, made once per page load or
+ * process by the app and handed to every sweep (`GemvSweepOptions.session`), so a record says which
+ * session it was taken in.
+ */
+export { gemvSweepSession } from "./src/tune/gemv-sweep.ts";
+/**
+ * The numbers of the GEMV derivation's rule of one steady record and its pure pieces: the default
+ * margin ({@link GEMV_MARGIN}, ×1.065) and the lowest one a derivation is meant to be re-decided at
+ * ({@link GEMV_LOWEST_MARGIN}, ×1.03); a record's class ({@link gemvSteadiness} — steady with at least
+ * {@link GEMV_STEADY_MIN_GROUPS} groups that have a baseline spread, at most
+ * {@link GEMV_STEADY_MAX_SHARE} of them beyond {@link GEMV_STEADY_GROUP_SPREAD}); the shortest pass
+ * that is evidence ({@link GEMV_MIN_PASS_MS}); a row's gap ({@link gemvRoundsGap}: its second-smallest
+ * round ÷ its smallest) and a gain's break-even margin ({@link gemvBreakEven}: gain ÷ the two gaps).
+ */
+export {
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
+  GEMV_MIN_PASS_MS,
+  GEMV_STEADY_GROUP_SPREAD,
+  GEMV_STEADY_MAX_SHARE,
+  GEMV_STEADY_MIN_GROUPS,
+  gemvBreakEven,
+  gemvRoundsGap,
+  gemvSteadiness,
+} from "./src/tune/gemv-rule.ts";
+export type { GemvSteadiness, GemvSteadinessClass } from "./src/tune/gemv-rule.ts";
 /**
  * The `explore` set's exploration: the sentinels of a case table (measured with every candidate,
  * first), the candidates another case measures at M = 1 (the winners of its nearest sentinels of

@@ -43,6 +43,7 @@ import {
   gemvCandidates,
   gemvExploreCarriedFromM1,
   type GemvMeasurementPlan,
+  gemvPlanReferences,
   gemvProfileChoice,
   gemvProgram,
 } from "../src/tune/gemv-candidates.ts";
@@ -107,6 +108,11 @@ const planOf = (
   baseline: gemvBaseline(gemvCase, m),
   candidates,
   profile: {
+    exact: gemvBaseline(gemvCase, m).name,
+    reorder: gemvProfileChoice(gemvCase, m, "reorder").name,
+  },
+  // A device without a table of its own runs the default's choices
+  table: {
     exact: gemvBaseline(gemvCase, m).name,
     reorder: gemvProfileChoice(gemvCase, m, "reorder").name,
   },
@@ -419,12 +425,18 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
     const selection = gemvExploreSelection(other, gemvSweepExploreEvidence(record));
     assert(selection !== undefined, `${sentinelId} predicts nothing for ${otherId}`);
     assertEquals(summaryOf(otherId, 1).narrowedTo, selection);
-    const reorderReference = summaryOf(otherId, 1).profile.reorder;
+    /** The references of a group: the default's choices and the device table's (always measured). */
+    const referencesOf = (caseId: string, m: number): ReadonlySet<string> => {
+      const { profile, table } = summaryOf(caseId, m);
+      assert(table !== undefined, `${caseId} M=${m}: the summary names no table choices`);
+      return gemvPlanReferences({ profile, table });
+    };
     for (const row of rowsOf(otherId, 1)) {
-      if (row.isBaseline || row.candidate === reorderReference) continue;
+      if (row.isBaseline || referencesOf(otherId, 1).has(row.candidate)) continue;
       assert(selection.includes(row.candidate), `${row.candidate} is not in ${selection.join()}`);
     }
-    // M = 4: a reorder candidate is measured exactly when the case's M = 1 group carries it
+    // M = 4: a reorder candidate is measured exactly when it is a reference or the case's M = 1
+    // group carries it
     for (const caseId of [sentinelId, otherId]) {
       const first = { ...summaryOf(caseId, 1), rows: rowsOf(caseId, 1) };
       const references = summaryOf(caseId, 4).profile;
@@ -434,11 +446,20 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
         if (row.isBaseline || candidate === undefined) continue;
         assertEquals(
           row.skipped === true,
-          !gemvExploreCarriedFromM1(4, candidate, references, first),
+          !referencesOf(caseId, 4).has(row.candidate) &&
+            !gemvExploreCarriedFromM1(4, candidate, references, first),
           rowLabel(row),
         );
       }
       assert(summaryOf(caseId, 4).skipped > 0, `${caseId}: nothing skipped at M = 4`);
+    }
+    // Every reference that was timed is timed once more after the rounds, and only a reference
+    for (const summary of record.summaries) {
+      const references = referencesOf(summary.caseId, summary.m);
+      for (const row of rowsOf(summary.caseId, summary.m)) {
+        const timedReference = references.has(row.candidate) && row.perDispatch !== undefined;
+        assertEquals(row.retimedPerDispatch !== undefined, timedReference, rowLabel(row));
+      }
     }
     for (const row of record.rows) {
       assertEquals(row.error, undefined, rowLabel(row));
@@ -465,13 +486,15 @@ describe.skipIf(adapter === null)("the GEMV sweep on a real GPU", () => {
             ?.total;
         const measured = rows.filter((row) => row.skipped !== true).length;
         const timed = rows.filter((row) => row.skipped !== true && row.screened !== true).length;
+        // One round, and one pass more for each reference re-timed after it
+        const passes = timed + rows.filter((row) => row.retimedPerDispatch !== undefined).length;
         assertEquals(
           [totalOf("prepare"), totalOf("quick-look"), totalOf("calibrate"), totalOf("rounds")],
-          [measured, measured, timed, timed],
+          [measured, measured, timed, passes],
           `${plan.caseId} M=${m}`,
         );
         const last = steps.filter((step) => step.caseId === plan.caseId && step.m === m).at(-1);
-        assertEquals([last?.phase, last?.done, last?.total], ["rounds", timed, timed]);
+        assertEquals([last?.phase, last?.done, last?.total], ["rounds", passes, passes]);
       }
     }
   });

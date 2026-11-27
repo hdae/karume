@@ -21,6 +21,13 @@
  * rule of what M = 1 carries (gemv-candidates.ts's `gemvExploreCarriedFromM1`) and its screened rows
  * its own margin, so the plan of missing measurements counts only the rows it timed. A reader that predates the set refuses
  * such a record by its candidate set.
+ *
+ * Four more optional fields came with the rule of one steady record (2026-11-28), each additive, so a
+ * record that has them is still a `/4` record and one without them (written before) reads as it did:
+ * the record's `session` and `steadiness`, a summary's `table` (the device table's choices, which the
+ * sweep times besides the set's candidates) and a reference row's `retimedPerDispatch` (its one pass
+ * more after the rounds). An older reader misreads nothing: it ignores the fields, and the rows of
+ * the table's choices are rows like any other.
  */
 
 import type { LinearGemvParallelLanes, LinearGemvParallelRows } from "../kernels/linear-gemv.ts";
@@ -32,6 +39,7 @@ import {
   isGemmChoice,
 } from "./gemv-candidates.ts";
 import type { GemvCase, GemvSweepStorage } from "./gemv-cases.ts";
+import type { GemvSteadiness } from "./gemv-rule.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 
 export const GEMV_SWEEP_FORMAT = "karume-gemv-sweep/4";
@@ -122,6 +130,13 @@ export type GemvSweepRow = {
   readonly clampedNegativeSamples?: number;
   /** `min(non-negative rounds) / reps`: the time of one dispatch. */
   readonly perDispatch?: number;
+  /**
+   * A reference (the baseline, the default profile's choice at `reorder` and the device table's
+   * choices — the summary's `profile` and `table`) timed once more after the rounds: that one pass ÷
+   * `reps`, in the record's unit. Absent for any other row, for a reference whose rounds did not all
+   * finish or whose extra pass was clamped, and in a record written before the field existed.
+   */
+  readonly retimedPerDispatch?: number;
   readonly wallNsPerDispatch?: number;
   /** The baseline's `perDispatch` ÷ this row's (above 1: faster than the baseline). */
   readonly speedupVsBaseline?: number;
@@ -160,6 +175,14 @@ export type GemvSweepCaseSummary = {
   readonly elapsedMs: number;
   /** The candidates the default profile chooses for the shape at each level (by name). */
   readonly profile: { readonly exact: string; readonly reorder: string };
+  /**
+   * The candidates the device's table (the profile the sweep's device resolved to, the record's
+   * `geometryProfile`) chooses for the shape at each level, by name: timed whatever the set or its
+   * narrowing, as the references are. The names of `profile` where the table holds the default's
+   * choices, or where its choice is a kernel the sweep does not measure (packed activations). Absent
+   * in a record written before the field existed.
+   */
+  readonly table?: { readonly exact: string; readonly reorder: string };
   /**
    * How steady the device was over the rounds: the baseline's largest round ÷ its smallest (rounds
    * clamped to 0 left out; 1 with a single round). Absent when the baseline's row failed or has no
@@ -222,6 +245,20 @@ export type GemvSweepReport = {
   readonly aborted: boolean;
   readonly userAgent: string;
   readonly adapter: ReportAdapter;
+  /**
+   * The page load or process the sweep ran in (`GemvSweepOptions.session`): its random id and the
+   * time from its start to the sweep's start (ms), so two records of one session are told from two
+   * sessions. Absent when the caller gave none, and in a record written before the field existed.
+   */
+  readonly session?: { readonly id: string; readonly elapsedMs: number };
+  /**
+   * The record's class by its own summaries (gemv-rule.ts's `gemvSteadiness`): `steady`, `unsteady`
+   * or `unclassified`, with the groups that have a baseline spread and how many of those spread
+   * beyond ×1.05 — so the page that ran it can say whether one more run is needed. A statement for
+   * the reader of one run: the derivation computes the class from the summaries itself. Absent in a
+   * record written before the field existed.
+   */
+  readonly steadiness?: GemvSteadiness;
   /**
    * The id of the geometry profile the sweep's device resolved to (the embedded table of its
    * adapter, or `default`): the profile a Session on that device runs with. The GEMM that is the

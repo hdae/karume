@@ -10,6 +10,7 @@
  * SPEC: docs/spec/workbench.md#batches
  */
 
+import type { GemvSweepSession } from "@karume/runtime/tune";
 import { errorText, type WorkbenchRecord } from "@karume/sweep-app-support/record";
 
 import {
@@ -137,6 +138,8 @@ export const batchPanel = (options: {
   readonly lock: RunLock;
   /** The backend field, shared by every selection (its value carries over). */
   readonly backend: HTMLInputElement;
+  /** The page load's session, which a sweep's record names. */
+  readonly session: GemvSweepSession;
   /** `undefined` when Run can be offered, else what to say in its place. */
   readonly gpuProblem: Promise<string | undefined>;
   /** Aborted when another entry or batch is selected, which removes this panel's listener on `backend`. */
@@ -206,9 +209,13 @@ export const batchPanel = (options: {
     status.textContent = "Starting…";
     const at = (step: ResolvedStep): string => `step ${step.number} of ${batch.steps.length}`;
     let current: ResolvedStep | undefined;
-    const host = browserHost(backend.value.trim(), (record) => {
-      if (current !== undefined) status.textContent = `${at(current)} · ${endedText(record)}`;
-    });
+    const host = browserHost(
+      backend.value.trim(),
+      (record) => {
+        if (current !== undefined) status.textContent = `${at(current)} · ${endedText(record)}`;
+      },
+      options.session,
+    );
     void (async () => {
       try {
         const ran = await runBatch({

@@ -12,6 +12,7 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gemvSweepSession } from "@karume/runtime/tune";
 import { dawnFlags, installDawn } from "@karume/test-support/dawn";
 import { dawnBackend, readEnvironment } from "@karume/sweep-app-support/environment";
 import { readCheckout, writeRecord } from "@karume/sweep-app-support/node";
@@ -142,7 +143,10 @@ type NodeSession = {
   readonly signal: AbortSignal;
 };
 
-/** Dawn as `navigator.gpu`, the abort signal and the one SIGINT handler that aborts it. */
+/**
+ * Dawn as `navigator.gpu`, the abort signal and the one SIGINT handler that aborts it, and the
+ * process's sweep session (one per command, so the steps of a batch share it).
+ */
 const openSession = (): NodeSession => {
   installDawn();
   const gpu = navigator.gpu;
@@ -150,6 +154,7 @@ const openSession = (): NodeSession => {
   process.once("SIGINT", () => controller.abort());
   return {
     host: {
+      session: gemvSweepSession(),
       readEnvironment: () =>
         readEnvironment(gpu, {
           host: "node",

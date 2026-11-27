@@ -10,6 +10,7 @@ import {
   type GemvSweepOptions,
   type GemvSweepProgress,
   type GemvSweepReport,
+  type GemvSweepSession,
   gemvSweepExploreEvidence,
   type GeometrySweepTimingUnit,
   runGemvSweep,
@@ -34,6 +35,11 @@ export type GemvRunOutcome = PerCaseOutcome<GemvSweepReport>;
 export type GemvRunDeps = {
   /** The WebGPU implementation every call acquires its device from (default `navigator.gpu`). */
   readonly gpu?: GPU;
+  /**
+   * The page load's or process's session (`gemvSweepSession` of `@karume/runtime/tune`, made once
+   * by the app), which every call's record names; absent: the records name none.
+   */
+  readonly session?: GemvSweepSession;
   readonly signal: AbortSignal;
   readonly onEvent: (event: GemvRunEvent) => void;
   /** Default `runGemvSweep`. */
@@ -60,6 +66,7 @@ export const runGemvPlan = (plan: GemvSweepPlan, deps: GemvRunDeps): Promise<Gem
     sweep: async (caseId, signal, onProgress) => {
       const report = await sweep({
         ...(deps.gpu === undefined ? {} : { gpu: deps.gpu }),
+        ...(deps.session === undefined ? {} : { session: deps.session }),
         candidateSet: plan.candidateSet,
         cases: [caseId],
         ...(plan.rows.length === 0 ? {} : { rows: plan.rows }),

@@ -56,6 +56,9 @@ GPU.
   [workbench](workbench.md#the-entries)), each sweep's record made by the shared record code (`recordRun`), with the
   environment read from an adapter the page requests itself when the sweep starts (`host: "browser"`, the user agent,
   `crossOriginIsolated`; no backend is declared) and the checkout baked in at build time.
+- The page makes its session once, when it loads (`gemvSweepSession`: a random id and its start), and hands it to
+  every GEMV sweep call, so the GEMV record of each run names it with the time since the page loaded
+  ([workbench](workbench.md#the-gemv-sweeps-record)): two runs in one page load are told from runs in two.
 - The sweeps' callbacks only store the event (with `performance.now()`); the page folds the stored events and paints
   on `requestAnimationFrame`.
 - Two levels of progress:

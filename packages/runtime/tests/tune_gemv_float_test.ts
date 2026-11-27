@@ -254,11 +254,11 @@ describe("the candidates of a float-stored case carried from M = 1 on to M = 4 a
     );
   });
 
-  it("carries a parallel form ×1.10 or more faster than the sequential GEMV at one row, to be read against the GEMM (fault: ×1.09 is skipped)", () => {
+  it("carries a parallel form ×1.03 (the lowest margin) or more faster than the sequential GEMV at one row, to be read against the GEMM (fault: ×1.02 is skipped)", () => {
     for (const m of [4, 8]) {
       assertEquals(carried(groupOf([held("parallel-l32", 5.2)]), "parallel-l32", m), true);
-      assertEquals(carried(groupOf([held("parallel-l32", 1.1)]), "parallel-l32", m), true);
-      assertEquals(carried(groupOf([held("parallel-l2", 1.09)]), "parallel-l2", m), false);
+      assertEquals(carried(groupOf([held("parallel-l32", 1.03)]), "parallel-l32", m), true);
+      assertEquals(carried(groupOf([held("parallel-l2", 1.02)]), "parallel-l2", m), false);
     }
   });
 

@@ -460,13 +460,21 @@ const planOf = (names: readonly string[]): GemvMeasurementPlan => {
     return found;
   });
   const baseline = gemvBaseline(GEMV_CASE, 1);
-  return {
-    m: 1,
-    baseline,
-    candidates,
-    profile: { exact: baseline.name, reorder: gemvProfileChoice(GEMV_CASE, 1, "reorder").name },
+  const profile = {
+    exact: baseline.name,
+    reorder: gemvProfileChoice(GEMV_CASE, 1, "reorder").name,
   };
+  // A device without a table of its own runs the default's choices
+  return { m: 1, baseline, candidates, profile, table: profile };
 };
+
+/**
+ * The timed passes of a row count's rounds: every timed pass but the re-timing after them, one pass
+ * per reference that finished its rounds (in {@link planOf}'s plans the baseline alone: its
+ * candidates are of the identical class, so the default's choice at `reorder` is not among them).
+ */
+const roundPasses = <T>(timed: readonly T[], kernels: number, rounds: number, retimed = 1): T[] =>
+  timed.slice(-(rounds * kernels + retimed), timed.length - retimed);
 
 /** The pipeline key of a kernel of the plan. */
 const keyOf = (candidate: GemvCandidate): string =>
@@ -507,7 +515,7 @@ describe("the GEMV sweep's row count", () => {
     const plan = planOf(["c16u2", "c64u8", "c16u8"]);
     const { result, passes } = await sweepPlan(steady, plan, 2);
     const keys = [plan.baseline, ...plan.candidates].map(keyOf);
-    const roundsPasses = timedOf(passes).slice(-2 * keys.length);
+    const roundsPasses = roundPasses(timedOf(passes), keys.length, 2);
     // Round 1 starts at kernel 0, round 2 at kernel ⌊1 · 4 / 2⌋ = 2.
     assertEquals(
       roundsPasses.map((pass) => pass.key),
@@ -525,9 +533,7 @@ describe("the GEMV sweep's row count", () => {
     const { passes } = await sweepPlan(steady, plan, 5);
     const [b, c1, c2] = [plan.baseline, ...plan.candidates].map(keyOf);
     assertEquals(
-      timedOf(passes)
-        .slice(-15)
-        .map((pass) => pass.key),
+      roundPasses(timedOf(passes), 3, 5).map((pass) => pass.key),
       [b, c1, c2, c1, c2, b, c2, b, c1, b, c1, c2, c1, c2, b],
     );
   });
@@ -601,6 +607,8 @@ const namedPlan = (
       return found;
     }),
     profile: { exact: baseline.name, reorder: gemvProfileChoice(gemvCase, m, "reorder").name },
+    // A device without a table of its own runs the default's choices
+    table: { exact: baseline.name, reorder: gemvProfileChoice(gemvCase, m, "reorder").name },
   };
 };
 
@@ -828,12 +836,12 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
     return keyAt(PLE_CASE, m, candidate);
   };
   // A parallel kernel's key does not hold M, so these are its times at both row counts: at M = 1
-  // parallel-l8 is ×1.25 the default's choice, staged-l32 ×1.05, and staged-l2 is screened (×2.5 the
-  // fastest of its class)
+  // parallel-l8 is ×1.25 the default's choice, staged-l32 ×1.02 (below the lowest margin, ×1.03),
+  // and staged-l2 is screened (×2.5 the fastest of its class)
   const times = new Map([
     [keyOfName(1, "parallel-l4"), 10_000],
     [keyOfName(1, "parallel-l8"), 8_000],
-    [keyOfName(1, "staged-l32"), 9_500],
+    [keyOfName(1, "staged-l32"), 9_800],
     [keyOfName(1, "staged-l2"), 20_000],
   ]);
   const sweep = (
@@ -1076,6 +1084,106 @@ describe("the GEMV sweep's skipping at M = 4 and 8", () => {
   });
 });
 
+describe("the GEMV sweep's references: the device table's choices and their re-timing", () => {
+  /** A band so wide that the fake device's zero outputs hold it: every check passes, times decide. */
+  const WIDE = { atol: 1e30, rtol: 0 };
+  /** PLE's plan at `m` with the candidates `names`, on a device whose table chooses `reorder`. */
+  const withTable = (
+    m: number,
+    names: readonly string[],
+    reorder: string,
+  ): GemvMeasurementPlan => ({
+    ...namedPlan(PLE_CASE, m, names),
+    table: { exact: gemvBaseline(PLE_CASE, m).name, reorder },
+  });
+  const keyOfName = (plan: GemvMeasurementPlan, name: string): string => {
+    const candidate = [plan.baseline, ...plan.candidates].find((one) => one.name === name);
+    if (candidate === undefined) throw new Error(`M=${plan.m}: no candidate ${name}`);
+    return keyAt(PLE_CASE, plan.m, candidate);
+  };
+  // At M = 1 parallel-l8 is ×1.25 the default's choice parallel-l4 and staged-l2 ×2.5 the fastest
+  // of its class: the quick look screens it out, and M = 1 leaves it unadoptable at M = 4
+  const one = (table: string) => withTable(1, ["parallel-l4", "parallel-l8", "staged-l2"], table);
+  const four = (table: string) => withTable(4, ["parallel-l8", "staged-l2"], table);
+  const times = new Map([
+    [keyOfName(one("parallel-l4"), "parallel-l4"), 10_000],
+    [keyOfName(one("parallel-l4"), "parallel-l8"), 8_000],
+    [keyOfName(one("parallel-l4"), "staged-l2"), 20_000],
+  ]);
+  const sweep = (plans: readonly GemvMeasurementPlan[], gpuNs: FakeTiming["gpuNs"]) =>
+    withContext({ gpuNs }, async (context, passes) => ({
+      result: await sweepGemvCase(context, PLE_CASE, plans, {
+        rounds: 2,
+        tolerance: WIDE,
+        quickLookMargin: QUICK_LOOK_MARGIN,
+      }),
+      passes,
+    }));
+  const rowAt = (rows: readonly GemvSweepRow[], m: number, name: string): GemvSweepRow => {
+    const found = rows.find((row) => row.m === m && row.candidate === name);
+    if (found === undefined) throw new Error(`no row ${name} at M=${m}`);
+    return found;
+  };
+
+  it("times the table's choice whatever the quick look and the M = 1 group say: neither screened nor skipped (control: the same kernel as no choice of the table is both)", async () => {
+    const chosen = await sweep([one("staged-l2"), four("staged-l2")], byKey(times));
+    for (const m of [1, 4]) {
+      const row = rowAt(chosen.result.rows, m, "staged-l2");
+      assertEquals(
+        [row.screened, row.skipped, row.rounds?.length],
+        [undefined, undefined, 2],
+        `M=${m}`,
+      );
+    }
+    assertEquals(
+      chosen.result.summaries.map(({ m, table }) => [m, table?.reorder]),
+      [
+        [1, "staged-l2"],
+        [4, "staged-l2"],
+      ],
+    );
+    // The control: a device whose table holds the default's choices
+    const control = await sweep(
+      [one("parallel-l4"), four(gemvProfileChoice(PLE_CASE, 4, "reorder").name)],
+      byKey(times),
+    );
+    assertEquals(rowAt(control.result.rows, 1, "staged-l2").screened, true);
+    assertEquals(rowAt(control.result.rows, 4, "staged-l2").skipped, true);
+  });
+
+  it("times every reference once more after the rounds, in plan order, and writes that pass ÷ its dispatches on its row alone (fault: each timed pass of the baseline 1 ns slower than the one before)", async () => {
+    const plan = one("staged-l2");
+    const baselineKey = keyOfName(plan, plan.baseline.name);
+    const { result, passes } = await sweep([plan], (pass) =>
+      pass.key === baselineKey ? pass.dispatches * 5_000 + pass.timedIndex : byKey(times)(pass),
+    );
+    const references = [plan.baseline.name, "parallel-l4", "staged-l2"];
+    const timed = timedOf(passes);
+    // The last timed passes are the references' re-timing, after every kernel's rounds
+    assertEquals(
+      timed.slice(-3).map((pass) => pass.key),
+      references.map((name) => keyOfName(plan, name)),
+    );
+    for (const name of references) {
+      const row = rowAt(result.rows, 1, name);
+      const last = timed.filter((pass) => pass.key === keyOfName(plan, name)).at(-1);
+      assert(last?.gpuNs !== undefined && row.reps !== undefined, name);
+      assertEquals(row.retimedPerDispatch, last.gpuNs / last.dispatches, name);
+      // The re-timing is no round: the rounds hold the two rounds alone
+      assertEquals(row.rounds?.length, 2, name);
+    }
+    // The baseline's re-timed pass is its slowest: it came last
+    const baseline = rowAt(result.rows, 1, plan.baseline.name);
+    assert(
+      baseline.retimedPerDispatch !== undefined &&
+        baseline.perDispatch !== undefined &&
+        baseline.retimedPerDispatch > baseline.perDispatch,
+    );
+    // A candidate that is no reference is not re-timed
+    assertEquals(rowAt(result.rows, 1, "parallel-l8").retimedPerDispatch, undefined);
+  });
+});
+
 describe("the GEMV sweep's progress steps", () => {
   /** The steps of one sweep of `plans`, and its result. */
   const stepsOf = (
@@ -1121,7 +1229,7 @@ describe("the GEMV sweep's progress steps", () => {
 
   const upTo = (total: number): number[] => Array.from({ length: total + 1 }, (_, index) => index);
 
-  it("counts each phase of a row count from 0 to its total: the kernels prepared and looked at, the warm start, the kernels that went on, every pass of the rounds (fault: c64u8 screened at ×1.3)", async () => {
+  it("counts each phase of a row count from 0 to its total: the kernels prepared and looked at, the warm start, the kernels that went on, every pass of the rounds and the references' re-timing (fault: c64u8 screened at ×1.3)", async () => {
     const plan = planOf(["c16u2", "c64u8", "c16u8"]);
     const times = new Map([[keyOf(plan.candidates[1]), 6_500]]);
     const { steps, result } = await stepsOf(
@@ -1138,7 +1246,8 @@ describe("the GEMV sweep's progress steps", () => {
       { phase: "warm-start", total: 1, done: upTo(1) },
       { phase: "quick-look", total: 4, done: upTo(4) },
       { phase: "calibrate", total: 3, done: upTo(3) },
-      { phase: "rounds", total: 6, done: upTo(6) },
+      // 2 rounds × 3 kernels, and the baseline (the plan's one reference) once more
+      { phase: "rounds", total: 7, done: upTo(7) },
     ]);
     assert(steps.every((step) => step.caseId === GEMV_CASE.id));
   });
@@ -1152,7 +1261,8 @@ describe("the GEMV sweep's progress steps", () => {
         ["prepare", 3],
         ["warm-start", 1],
         ["calibrate", 3],
-        ["rounds", 6],
+        // 2 rounds × 3 kernels, and the baseline once more
+        ["rounds", 7],
       ],
     );
   });

@@ -204,6 +204,16 @@ describe("runGemvPlan", () => {
     expect(outcome.reports).toHaveLength(2);
   });
 
+  it("hands every call the one session it was given, and none when given none", async () => {
+    const run = harness();
+    const session = { id: "page-load", startedAt: 12 };
+    await runGemvPlan(PLAN, { ...run.deps(new AbortController().signal), session });
+    expect(run.calls.map((call) => call.session)).toEqual([session, session]);
+    const without = harness();
+    await runGemvPlan(PLAN, without.deps(new AbortController().signal));
+    for (const call of without.calls) expect(Object.keys(call)).not.toContain("session");
+  });
+
   it("passes the plan's row counts and candidates to every call", async () => {
     const run = harness();
     const outcome = await runGemvPlan(

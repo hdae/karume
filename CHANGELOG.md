@@ -17,6 +17,16 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/runtime/tune`: the GEMV sweep times the device table's choices too (the profile its device resolves to, at
+  `exact` and at `reorder`), in every candidate set and whatever a narrowing, the quick look or the case's M = 1 group
+  says, and every reference once more after the rounds (a reference row's `retimedPerDispatch`); a summary names the
+  table's choices (`table`), and the record states its class by its summaries (`steadiness`: `steady`, `unsteady` or
+  `unclassified`, from `gemvSteadiness`) and, when the caller gives one, its session (`session`: a random id made once
+  per page load or process with `gemvSweepSession`, and the time since its start). All four fields are optional, so the
+  record stays `karume-gemv-sweep/4` and the records taken before them read as they did. The numbers of the rule they
+  serve are exported with it (`GEMV_MARGIN`, `GEMV_LOWEST_MARGIN`, `GEMV_STEADY_MIN_GROUPS`, `GEMV_STEADY_MAX_SHARE`,
+  `GEMV_STEADY_GROUP_SPREAD`, `GEMV_MIN_PASS_MS`, `gemvRoundsGap`, `gemvBreakEven`). The workbench and the benchmark
+  page make the session when they start.
 - `@karume/runtime/tune`: the GEMV sweep's `explore` candidate set (`runGemvSweep({ candidateSet: "explore" })`), a
   short run of `full`'s row counts. Twelve sentinel cases of the whole case table (`gemvSentinels`,
   `GEMV_SENTINEL_COUNT`: the case nearest to all, then again and again the one farthest from those chosen —
@@ -72,6 +82,9 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
+  the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
+  record — and its re-decision at ×1.03 — reads there.
 - `@karume/runtime/tune`: in every set of the GEMV sweep, the quick look's bar of a class comes only from kernels
   the derivation can adopt — their check, read right after the quick look, held, and no subgroup form (no table row
   holds one). A kernel whose check fails no longer screens out the true best.

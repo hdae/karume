@@ -10,6 +10,7 @@
 
 import "./style.css";
 
+import { gemvSweepSession } from "@karume/runtime/tune";
 import { readEnvironment } from "@karume/sweep-app-support/environment";
 import { type Checkout, errorText, messageText } from "@karume/sweep-app-support/record";
 
@@ -81,6 +82,8 @@ const paintBar = (
 };
 
 const main = async (): Promise<void> => {
+  // The page load's session: every GEMV record of its runs names it
+  const session = gemvSweepSession();
   const app = document.querySelector<HTMLElement>("#app");
   if (app === null) throw new Error("The page has no #app element");
   const checkout = __BENCHMARK_CHECKOUT__;
@@ -359,6 +362,7 @@ const main = async (): Promise<void> => {
       showPlan();
     };
     void runBenchmark(runPlan, {
+      session,
       signal: controller.signal,
       onEvent: (event) => queue.push(event),
       readEnvironment: () =>

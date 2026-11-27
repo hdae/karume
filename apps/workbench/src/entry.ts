@@ -14,6 +14,7 @@ import type { DistributionSource, HubRepoRef } from "@karume/hub";
 import type { SourceKind } from "@karume/local-distributions/browser";
 import type { MountName } from "@karume/local-distributions/mounts";
 import type { AcquireGpuOptions } from "@karume/runtime";
+import type { GemvSweepSession } from "@karume/runtime/tune";
 import type { Parameter, ParameterValues } from "@karume/sweep-app-support/parameters";
 import type { EntryResult } from "@karume/sweep-app-support/record";
 
@@ -92,6 +93,12 @@ export type RunContext = {
   readonly parameters: ParameterValues;
   /** Spread into `acquireGpu`. The entry acquires and releases its own GPU context. */
   readonly gpuOptions: GpuOptions;
+  /**
+   * The page load's (browser) or process's (Node) session: a random id made once and its start,
+   * which a sweep's record names so two records of one session are told from two sessions. Absent
+   * when the host gave none.
+   */
+  readonly session?: GemvSweepSession;
   /**
    * Aborted by Cancel (or SIGINT under Node). An entry MAY resolve after the abort with what it has;
    * the record's outcome is then `cancelled` either way.
