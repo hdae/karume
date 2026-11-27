@@ -151,6 +151,7 @@
 | Attribution section | The card section that names each upstream, its license and the changes made: `## Base weights and attribution` | [distribution-cards](spec/distribution-cards.md#sections-and-their-order) |
 | Legal texts (`NOTICE.md`, `LICENSE.md`) | The only files besides the manifest and the card that a pipeline puts at the repository root (`LEGAL_PATHS`): the notice of attribution and modifications, and the license texts verbatim | [distribution-cards](spec/distribution-cards.md#files-at-the-repository-root) |
 | Primary / further license text | The text `LICENSE.md` begins with, verbatim from its first byte, and a text that follows it after a `---` line with a heading and the components it covers | [distribution-cards](spec/distribution-cards.md#licensemd) |
+| Upstream quotation | An upstream card's statement quoted verbatim on a card: a lead linking the quoted `README.md` at the pinned commit and naming the headings it stands under, then one blockquote (`karume.modelcard.UpstreamQuote`, `quotation`) | [distribution-cards](spec/distribution-cards.md#what-the-upstream-says) |
 
 ## Generation and context
 

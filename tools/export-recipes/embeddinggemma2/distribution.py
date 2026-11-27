@@ -108,7 +108,7 @@ from karume.dist import (
 from .card import (
     EMBEDDINGGEMMA2_LICENSE,
     EMBEDDINGGEMMA2_MODEL_ROLE,
-    EMBEDDINGGEMMA2_USE_POLICY_SENTENCE,
+    EMBEDDINGGEMMA2_UPSTREAM,
     render_embeddinggemma2_model_card,
 )
 
@@ -1372,10 +1372,11 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
 """
     + (
-        # The use policy: upstream's sentence quoted from the one value the card quotes too.
-        '\nThe upstream model card states, under "Ethics & Safety":\n\n'
-        f"> {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}\n\n"
-        "The policy is upstream's document: read it at that link. It is not reproduced here.\n"
+        # The use policy: one line stating it and referring to the upstream card, which the card
+        # quotes (the maintainer's ruling of 2026-11-27).
+        "\nDeployments of the model are subject to the use policy the upstream model card of"
+        f" `{EMBEDDINGGEMMA2_UPSTREAM['text']}` states (`README.md` quotes it); the policy is"
+        " upstream's document and is not reproduced here.\n"
     )
 )
 

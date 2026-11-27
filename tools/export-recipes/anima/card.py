@@ -24,6 +24,7 @@ from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     Upstream,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -34,6 +35,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -111,6 +113,10 @@ ANIMA_SINGLE_FILE_REVISION = "f973fc41ec7545364ac9776c2440285f43ff2a30"
 #: components (text encoder, VAE, tokenizers) were read at (fetched 2026-08-16 into the HF cache —
 #: THIRD_PARTY_NOTICES.md).
 ANIMA_BASE_REVISION = "073c3a9db359c31ad0e8aa268d15775473c2176c"
+
+#: The commit of `Gazingstars123/Anima-2.9B` the layer expansion and its card were read at
+#: (`inputs/anima/anima-2.9b-original/REVISION.txt`, fetched 2026-11-17).
+ANIMA_2_9B_REVISION = "9f9cb502dbae7a616c3cc5a530633427fe735665"
 
 #: Date the permission fields were checked at the source (shown "as of" in the card — the facts
 #: may change later).
@@ -199,7 +205,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         source="https://huggingface.co/Gazingstars123/Anima-2.9B",
         file="Anima-2.9B-preview-v1.safetensors",
         permissions=(),
-        revision="9f9cb502dbae7a616c3cc5a530633427fe735665",
+        revision=ANIMA_2_9B_REVISION,
     ),
 }
 
@@ -352,7 +358,7 @@ ANIMA_2_9B_UPSTREAM_RECOMMENDATION = "28–50 steps at guidance 3.5–5"
 #: "Overview" and "Training/Dataset", read 2026-11-24). What was trained is the author's statement
 #: and cannot be measured from the weights, so the card quotes it rather than rewording it; the
 #: block count is the one part this recipe states itself (read from the checkpoint's header).
-#: `test_card.py` compares the quotes with the local copy of that file when it is present.
+#: The driver's test compares the quotes with the local copy of that file when it is present.
 ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
     "Anima-2.9B is a fine-tune and layer-expansion of"
     " [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima). The base Anima"
@@ -361,6 +367,19 @@ ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
     "As of preview v1, only the new layers have been trained, with roughly 70% of the compute"
     " spent on 1024px",
 )
+
+#: {@link ANIMA_2_9B_UPSTREAM_DESCRIPTION} with its source: the card at the commit the conversion
+#: read.
+ANIMA_2_9B_QUOTE = UpstreamQuote(
+    repo="Gazingstars123/Anima-2.9B",
+    revision=ANIMA_2_9B_REVISION,
+    sections=("Overview", "Training/Dataset"),
+    paragraphs=ANIMA_2_9B_UPSTREAM_DESCRIPTION,
+)
+
+#: Every upstream statement this family's cards quote (the driver's test checks each against the
+#: quoted card at its commit).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (ANIMA_2_9B_QUOTE,)
 
 
 def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
@@ -376,10 +395,8 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "first part carries the graph and model descriptors).",
         RUNTIME_SENTENCE,
         "",
-        'Its card (at the commit listed under "Base weights and attribution" below) describes it',
-        "as follows:",
+        *quotation(ANIMA_2_9B_QUOTE, "Its card"),
         "",
-        *(line for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION for line in (f"> {quote}", "")),
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
         "  what makes the **negative prompt take effect**. The default is inside the upstream",

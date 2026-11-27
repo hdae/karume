@@ -263,7 +263,7 @@ class TestWhatTheCardSays:
 
     def test_it_carries_upstreams_precision_statement(self) -> None:
         card = _render()
-        assert "bfloat16 or float32, never float16" in card
+        assert "  > Run inference in `bfloat16` or `float32`. Do not use `float16`.\n" in card
         assert "computes in f32 over the stored bf16 weights" in card
 
     def test_it_links_the_license_page_its_upstream_card_links(self) -> None:
@@ -288,7 +288,7 @@ class TestWhatTheCardSays:
             "  > Deployments must adhere to the [Gemma Prohibited Use Policy]"
             "(https://ai.google.dev/gemma/prohibited_use_policy).\n"
         ) in card
-        assert "It is not reproduced here." in card
+        assert "upstream's document, not reproduced here" in card
 
     def test_it_advertises_the_familys_entry_point_and_the_repository(self) -> None:
         card = _render()

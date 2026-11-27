@@ -28,6 +28,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -38,6 +39,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -79,6 +81,27 @@ DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
 DEPTH_ANYTHING_REVISIONS: Mapping[str, str] = {
     "small": "5426e4f0f36572d16453bbda7a8389317b1bef99",
 }
+
+#: What the upstream card states of how Depth Anything V2 was trained, quoted verbatim (the
+#: maintainer's ruling of 2026-11-27: an upstream's statement the recipe cannot measure is quoted,
+#: not reworded) — the card at the pinned commit, read 2026-11-27.
+DEPTH_ANYTHING_TRAINING_QUOTE = UpstreamQuote(
+    repo="depth-anything/Depth-Anything-V2-Small-hf",
+    revision=DEPTH_ANYTHING_REVISIONS["small"],
+    sections=("Depth Anything V2 Small – Transformers Version", "Model description"),
+    paragraphs=(
+        "It uses the same architecture as the original Depth Anything release, but uses synthetic"
+        " data and a larger capacity teacher model to achieve much finer and robust depth"
+        " predictions.",
+        "The model is trained on ~600K synthetic labeled images and ~62 million real unlabeled"
+        " images, obtaining state-of-the-art results for both relative and absolute depth"
+        " estimation.",
+    ),
+)
+
+#: Every quotation of an upstream card this card writes (checked against the cached cards by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (DEPTH_ANYTHING_TRAINING_QUOTE,)
 
 #: Checked 2026-08-14 against the HF model API: `license: apache-2.0`. The frontmatter is written
 #: on the premise that **every model in the table has this one value** (the MUST above).
@@ -194,9 +217,11 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     lines += [
         "- **Only the Small checkpoint is redistributed**: upstream licenses Base and Large"
         " **cc-by-nc-4.0**, so they are not converted or redistributed here.",
-        "- **Training data**: see the upstream model card. Depth Anything V2 is distilled from a",
-        "  teacher trained on synthetic data and then trained on pseudo-labeled real images —",
-        "  check the upstream sources against your own use case.",
+        *quotation(
+            DEPTH_ANYTHING_TRAINING_QUOTE,
+            "- **Training data**: the upstream model card",
+            indent="  ",
+        ),
         f"- **Architecture**: DINOv2 backbone + DPT head"
         f" ([{DEPTH_ANYTHING_PAPER}](https://{DEPTH_ANYTHING_PAPER})).",
         changes_made_here(APACHE_MODIFICATION_CLAUSE),

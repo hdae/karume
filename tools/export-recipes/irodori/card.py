@@ -33,6 +33,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -44,6 +45,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -133,11 +135,55 @@ IRODORI_LARGE_TEXT_ENCODER_REVISION = "dd0a2683227859151b1730ca3a63087df5b5f39b"
 #: (`irodori.distribution.assert_irodori_container_licenses`).
 IRODORI_LARGE_LICENSE = "gemma"
 
-#: The two Gemma documents upstream's model card links (its "License" section) — the card links the
-#: same URLs; their verbatim texts are in the repository's `LICENSE.md`.
-GEMMA_TERMS_URL = "https://ai.google.dev/gemma/terms"
-GEMMA_PROHIBITED_USE_POLICY_URL = "https://ai.google.dev/gemma/prohibited_use_policy"
-
+#: What the upstream cards state and the recipe cannot measure, quoted verbatim (the maintainer's
+#: ruling of 2026-11-27 — the cards at the pinned commits, the local snapshots in `inputs/irodori/`
+#: read 2026-11-27): how a MeanFlow student was distilled, the terms of the v4-Large line, and what
+#: the codec derives from (the ground of its Apache 2.0 attribution).
+IRODORI_MEANFLOW_QUOTES: Mapping[str, UpstreamQuote] = {
+    "Aratako/Irodori-TTS-v4.1-Small-MF": UpstreamQuote(
+        repo="Aratako/Irodori-TTS-v4.1-Small-MF",
+        revision="ccc78f5d480b6e51b69b2d5042a14c4da04fea6e",
+        sections=("MeanFlow Distillation",),
+        paragraphs=(
+            "This model was distilled from a frozen v4.1-Small RF teacher. An interval-length"
+            " embedding was added to the student DiT, and the entire student DiT was trained to"
+            " predict the teacher's average velocity. The condition encoders and duration predictor"
+            " were kept frozen.",
+            "Classifier-free guidance (CFG) is incorporated into the teacher targets during"
+            " distillation. MeanFlow inference therefore uses one conditional DiT evaluation per"
+            " sampling step, without separate CFG evaluations.",
+        ),
+    ),
+}
+IRODORI_LARGE_TERMS_QUOTES: Mapping[str, UpstreamQuote] = {
+    "Aratako/Irodori-TTS-v4-Large": UpstreamQuote(
+        repo="Aratako/Irodori-TTS-v4-Large",
+        revision="2e0c55428ce97268a507f1feeb2478f8d9148e8b",
+        sections=("License", "Ethical Restrictions"),
+        paragraphs=(
+            "This model is subject to the **[Gemma Terms of Use](https://ai.google.dev/gemma/terms)**"
+            " because its shared text/caption encoder is derived from"
+            " **[google/t5gemma-2-1b-1b](https://huggingface.co/google/t5gemma-2-1b-1b)**. Use and"
+            " redistribution must comply with those terms, including the **[Gemma Prohibited Use"
+            " Policy](https://ai.google.dev/gemma/prohibited_use_policy)**, as well as the"
+            " additional ethical restrictions below.",
+            "In addition to the license terms, the following ethical restrictions apply:",
+            "1.  **No Impersonation:** Do not use this model to clone or impersonate the voice of"
+            " any individual (e.g., voice actors, celebrities, public figures) without their"
+            " explicit consent.",
+            "2.  **No Misinformation:** Do not use this model to generate deepfakes or synthetic"
+            " speech intended to mislead others or spread misinformation.",
+            "3.  **Voice Generation Disclaimer:** When generating speech purely from text or"
+            " captions without using reference audio, it is possible that the generated voice may"
+            " coincidentally resemble that of a real person. This is strictly a probabilistic"
+            " artifact within the latent space. The model was not trained with the intent of"
+            " reproducing specific individuals.",
+            "4.  **Liability Disclaimer:** The developers assume no liability for any misuse of"
+            " this model. Users are solely responsible for ensuring their use of the generated"
+            " content complies with applicable laws and regulations in their jurisdiction.",
+        ),
+    ),
+}
 #: The `flowParameterization` value of a MeanFlow model in `pipelineConfig` (the spelling of
 #: `irodori.distribution.IRODORI_FLOW_MEANFLOW`, which imports this module — kept as a literal
 #: here to avoid the cycle; `tests/test_card.py` pins that the two agree).
@@ -222,6 +268,26 @@ IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
 #: `license: mit`, the original weights `license: apache-2.0`).
 IRODORI_CODEC_MODEL_LICENSE = "mit"
 IRODORI_CODEC_ORIGIN_LICENSE = "apache-2.0"
+
+#: What the codec's card states it derives from (the ground of its Apache 2.0 attribution).
+IRODORI_CODEC_QUOTE = UpstreamQuote(
+    repo=IRODORI_CODEC_MODEL,
+    revision=IRODORI_CODEC_REVISION,
+    sections=("Overview",),
+    paragraphs=(
+        "**Base Model:** Derived from"
+        " [Semantic-DACVAE-Japanese](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese)"
+        " (originally [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked)).",
+    ),
+)
+
+#: Every quotation of an upstream card the family's cards write (checked against the cached cards
+#: by `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (
+    *IRODORI_MEANFLOW_QUOTES.values(),
+    *IRODORI_LARGE_TERMS_QUOTES.values(),
+    IRODORI_CODEC_QUOTE,
+)
 
 #: The license of upstream's training / inference implementation (GitHub `Aratako/Irodori-TTS` —
 #: its `LICENSE` is the MIT License), named by its HF identifier as the card names every license.
@@ -324,21 +390,36 @@ def _irodori_overview(
 def _irodori_weights_line(upstream: IrodoriUpstream) -> list[str]:
     """The first bullet of the attribution: where the weights come from (with the upstream
     revision and the distillation teacher when the table names them)."""
-    lines = [
+    return [
         f"- **Weights**: {pinned(upstream.repo, upstream.revision)},"
         f" licensed **{IRODORI_LICENSE}**",
+        "  (as of retrieval). The training / inference implementation it comes with",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
+        f" **{IRODORI_IMPLEMENTATION_LICENSE}** as well;",
+        "  Karume's runtime contains none of that code — it is an independent implementation that",
+        "  reads these weights from its own container format.",
+        *(
+            []
+            if upstream.teacher is None
+            else quotation(
+                _meanflow_quote(upstream),
+                f"  Upstream distilled it from {hf_link(upstream.teacher)} with MeanFlow; its card",
+                indent="  ",
+            )
+        ),
     ]
-    if upstream.teacher is not None:
-        lines += [
-            "  (as of retrieval). Upstream distilled it from"
-            f" [{upstream.teacher}](https://huggingface.co/{upstream.teacher}) with MeanFlow:",
-            "  the whole DiT was retrained (with an added interval embedding) to take few, large",
-            "  steps, and the guidance was fused into the teacher's targets, so it runs without",
-            "  classifier-free guidance. Its condition encoders and duration predictor are the",
-            "  teacher's. The training / inference implementation it comes with",
-        ]
-        return lines
-    return [*lines, "  (as of retrieval). The training / inference implementation it comes with"]
+
+
+def _meanflow_quote(upstream: IrodoriUpstream) -> UpstreamQuote:
+    """What a MeanFlow student's card states of its distillation ({@link IRODORI_MEANFLOW_QUOTES};
+    a student without one fails — the card does not reword it)."""
+    quote = IRODORI_MEANFLOW_QUOTES.get(upstream.repo)
+    if quote is None or quote.revision != upstream.revision:
+        raise ValueError(
+            f"{upstream.repo}: no quotation of its card at {upstream.revision} says how it was"
+            " distilled — IRODORI_MEANFLOW_QUOTES"
+        )
+    return quote
 
 
 def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
@@ -395,10 +476,6 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
         *_irodori_weights_line(upstream),
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
-        f" **{IRODORI_IMPLEMENTATION_LICENSE}** as well;",
-        "  Karume's runtime contains none of that code — it is an independent implementation that",
-        "  reads these weights from its own container format.",
         "- **Text backbone**: fine-tuned from"
         f" {pinned(IRODORI_TEXT_BACKBONE_MODEL, IRODORI_TEXT_BACKBONE_REVISION)},",
         *_irodori_backbone_lines(model),
@@ -408,6 +485,7 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
         f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
         "  a verbatim copy of that license is in `LICENSE.md` for the codec components.",
+        *quotation(IRODORI_CODEC_QUOTE, "  Its card", indent="  "),
         f"{changes_made_here()} conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
         "  as `f32` / `f16` / `i8` series, and the DiT (`dit` / `dit_context`) adds an `i4` series",
@@ -616,6 +694,18 @@ IRODORI_CODEC_COMPONENTS: tuple[str, ...] = ("codec_decoder", "codec_encoder")
 IRODORI_DIT_COMPONENTS: tuple[str, ...] = ("dit", "dit_context")
 
 
+def _large_terms_quote(upstream: IrodoriUpstream) -> UpstreamQuote:
+    """What a v4-Large-line card states of its terms ({@link IRODORI_LARGE_TERMS_QUOTES}; a model
+    without one fails — the card does not reword it)."""
+    quote = IRODORI_LARGE_TERMS_QUOTES.get(upstream.repo)
+    if quote is None or quote.revision != upstream.revision:
+        raise ValueError(
+            f"{upstream.repo}: no quotation of its card at {upstream.revision} states its terms —"
+            " IRODORI_LARGE_TERMS_QUOTES"
+        )
+    return quote
+
+
 def _irodori_large_metadata(upstream: IrodoriUpstream) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=IRODORI_PIPELINE_TAG,
@@ -711,22 +801,14 @@ def _irodori_large_base_weights(
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
         f"- **Weights**: {pinned(upstream.repo, upstream.revision)},",
-        f"  licensed **{IRODORI_LARGE_LICENSE}** (as of retrieval). Upstream's model card"
-        " states that the model is",
-        f"  subject to the [Gemma Terms of Use]({GEMMA_TERMS_URL}) because its shared text /"
-        " caption encoder is",
-        "  derived from"
-        f" [{IRODORI_LARGE_TEXT_ENCODER_MODEL}](https://huggingface.co/{IRODORI_LARGE_TEXT_ENCODER_MODEL}),"
-        " and that use and",
-        "  redistribution must comply with those terms, including the"
-        f" [Gemma Prohibited Use Policy]({GEMMA_PROHIBITED_USE_POLICY_URL}),",
-        "  as well as the additional ethical restrictions listed on that model card. Both Gemma",
-        "  texts are included in `LICENSE.md`, and the notice upstream ships with the model is in",
-        "  `NOTICE.md`. The training / inference implementation it comes with",
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
-        f" **{IRODORI_IMPLEMENTATION_LICENSE}**;",
+        f"  licensed **{IRODORI_LARGE_LICENSE}** (as of retrieval). Both Gemma texts (the Gemma",
+        "  Terms of Use and the Gemma Prohibited Use Policy) are included in `LICENSE.md`, and the",
+        "  notice upstream ships with the model is in `NOTICE.md`. The training / inference",
+        "  implementation it comes with ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS))"
+        f" is licensed **{IRODORI_IMPLEMENTATION_LICENSE}**;",
         "  Karume's runtime contains none of that code — it is an independent implementation that",
         "  reads these weights from its own container format.",
+        *quotation(_large_terms_quote(upstream), "  Its card", indent="  "),
         "- **Text encoder**: the `backbone` component is the checkpoint's fine-tuned text encoder",
         "  of"
         f" {pinned(IRODORI_LARGE_TEXT_ENCODER_MODEL, IRODORI_LARGE_TEXT_ENCODER_REVISION)},"
@@ -742,6 +824,7 @@ def _irodori_large_base_weights(
         f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
         f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
         "  verbatim copies of both licenses are in `LICENSE.md` for the codec components.",
+        *quotation(IRODORI_CODEC_QUOTE, "  Its card", indent="  "),
         f"{changes_made_here()} conversion into the Karume",
         f"  container format and **quantization** of the weights — {series}",
         f"  (the quant table below says which storage each quant {selects}).",

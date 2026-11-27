@@ -14,8 +14,10 @@ checked here.
 from __future__ import annotations
 
 import http.client
+import importlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,7 +37,7 @@ from _shared.licenses import (
     MIT_COPYRIGHT_PLACEHOLDER,
     MIT_LICENSE_PATH,
 )
-from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
+from _shared.paths import DIST_ROOT, INPUTS_ROOT, REPO_ROOT, SERIES_ROOT
 from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
 from anima.card import NVIDIA_NOTICE as ANIMA_NVIDIA_NOTICE
 from anima.distribution import ANIMA_2_9B_PIPELINE
@@ -73,6 +75,7 @@ from karume.modelcard import (
     REVISION_PIN_COMMENT,
     RUNTIME_SENTENCE,
     UNOFFICIAL_CONVERSION_NOTICE,
+    UpstreamQuote,
     hf_link,
     introduction,
 )
@@ -608,6 +611,140 @@ class TestTheWordsOfEveryPublishedRepository:
 
         assert _HOUSE_AND_BRITISH_WORDS.findall(prose) == []
         assert _HOUSE_AND_BRITISH_WORDS.findall(notice) == []
+
+
+#: Every quotation of an upstream card the recipes write (each family's `UPSTREAM_QUOTES`).
+UPSTREAM_QUOTES: list[UpstreamQuote] = [
+    quote
+    for family in (
+        "anima",
+        "birefnet",
+        "depth_anything",
+        "embeddinggemma2",
+        "irodori",
+        "moss",
+        "sbv2",
+    )
+    for quote in importlib.import_module(f"{family}.card").UPSTREAM_QUOTES
+]
+
+
+def _local_upstream_card(quote: UpstreamQuote) -> Path | None:
+    """The quoted README at its commit on this machine: the HF cache's snapshot, or an input
+    directory whose download record (`huggingface_hub`'s `local_dir` metadata) or `REVISION.txt`
+    names that commit."""
+    hub = Path(
+        os.environ.get("HF_HUB_CACHE")
+        or Path(os.environ.get("HF_HOME") or Path.home() / ".cache/huggingface") / "hub"
+    )
+    snapshot = hub / f"models--{quote.repo.replace('/', '--')}/snapshots/{quote.revision}/README.md"
+    if snapshot.is_file():
+        return snapshot
+    for readme in sorted(INPUTS_ROOT.glob("*/*/README.md")):
+        records = (
+            readme.parent / ".cache/huggingface/download/README.md.metadata",
+            readme.parent / "REVISION.txt",
+        )
+        if any(
+            record.is_file() and record.read_text().split()[:1] == [quote.revision]
+            for record in records
+        ):
+            return readme
+    return None
+
+
+def _heading_text(heading: str) -> str:
+    """A heading as a quotation names it: without its emphasis and leading emoji."""
+    return re.sub(r"^[^\w]+", "", heading.replace("**", "")).strip()
+
+
+def _sections_of(card: str, titles: frozenset[str]) -> list[tuple[frozenset[str], str]]:
+    """The card's text in parts between headings, each with the headings it stands under and its
+    whitespace folded (a `#` line inside a code fence is code, not a heading). A line standing
+    alone whose text is one of `titles` is a section title too, at the top level: FLUX.2
+    [klein]'s card titles its sections with plain lines."""
+    parts: list[tuple[frozenset[str], str]] = []
+    path: list[tuple[int, str]] = []
+    lines: list[str] = []
+    fenced = False
+    rows = [*card.split("\n"), "# end"]
+    for index, line in enumerate(rows):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        heading = None if fenced else re.match(r"(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        title = (
+            not fenced
+            and _heading_text(line) in titles
+            and 0 < index < len(rows) - 1
+            and rows[index - 1].strip() in ("", "---")
+            and rows[index + 1].strip() == ""
+        )
+        if heading is None and not title:
+            lines.append(line)
+            continue
+        parts.append((frozenset(text for _, text in path), " ".join(" ".join(lines).split())))
+        level, text = (1, line) if heading is None else (len(heading[1]), heading[2])
+        path = [*(entry for entry in path if entry[0] < level), (level, _heading_text(text))]
+        lines = []
+    return parts
+
+
+class TestTheQuotationsOfUpstreamCards:
+    """docs/spec/distribution-cards.md#what-the-upstream-says — a quotation is the upstream card's
+    own words at the commit it links, under the headings it names."""
+
+    @pytest.mark.parametrize(
+        "quote",
+        UPSTREAM_QUOTES,
+        ids=[f"{quote.repo}:{quote.sections}" for quote in UPSTREAM_QUOTES],
+    )
+    def test_every_paragraph_stands_in_the_card_at_its_commit_under_the_headings_named(
+        self, quote: UpstreamQuote
+    ) -> None:
+        readme = _local_upstream_card(quote)
+        if readme is None:
+            pytest.skip(f"{quote.repo} at {quote.revision} is not on this machine")
+        named = frozenset(quote.sections)
+        parts = _sections_of(readme.read_text(encoding="utf-8"), named)
+        found: list[frozenset[str]] = []
+        for paragraph in quote.paragraphs:
+            under = [headings for headings, text in parts if " ".join(paragraph.split()) in text]
+            assert under, f"{quote.repo}: not in the card: {paragraph[:60]!r}"
+            found.extend(under)
+        # Each paragraph stands under a heading named (or before the first heading when none is),
+        # and each heading named holds one of them.
+        assert all(headings & named or (not headings and not named) for headings in found), found
+        assert named <= set().union(*found), (named, found)
+
+    @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
+    def test_every_blockquote_of_a_card_is_a_registered_quotation(
+        self, pipeline: str, models: list[str], directory: str
+    ) -> None:
+        if directory in GEMMA4_REPOSITORIES:
+            pytest.skip("the Gemma 4 cards keep their wording until their stage")
+        _, card = _published_card(pipeline, directory)
+        registered = {paragraph for quote in UPSTREAM_QUOTES for paragraph in quote.paragraphs}
+        quoted = [line.strip()[2:] for line in card.split("\n") if line.strip().startswith("> ")]
+
+        assert [line for line in quoted if line not in registered] == []
+
+    def test_every_quotation_is_written_on_a_card_with_its_source(self) -> None:
+        cards = [
+            _published_card(pipeline, directory)[1]
+            for pipeline, _, _, directory in RELEASE_REPOSITORIES
+            if directory not in GEMMA4_REPOSITORIES
+        ]
+        unwritten = [
+            (quote.repo, quote.sections)
+            for quote in UPSTREAM_QUOTES
+            if not any(
+                f"({quote.source}) states" in card
+                and all(f"> {paragraph}\n" in card for paragraph in quote.paragraphs)
+                for card in cards
+            )
+        ]
+
+        assert unwritten == []
 
 
 #: The card whose non-endorsement sentence also names works that are not on the Hub, by title,

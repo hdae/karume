@@ -1060,10 +1060,13 @@ class TestLegalText:
         out_dir, _ = assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
+        # One line stating the policy and referring to the upstream card, which the card quotes.
+        prose = " ".join(notice.split())
         assert (
-            "\n> Deployments must adhere to the [Gemma Prohibited Use Policy]"
-            "(https://ai.google.dev/gemma/prohibited_use_policy).\n"
-        ) in notice
+            "Deployments of the model are subject to the use policy the upstream model card of"
+            " `google/embeddinggemma-2` states (`README.md` quotes it)" in prose
+        )
+        assert "Deployments must adhere to" not in notice
 
     def test_the_notice_names_exactly_the_storages_the_manifest_ships(self, assembled) -> None:
         """Both directions: a shipped form the notice leaves out, or a form it still describes

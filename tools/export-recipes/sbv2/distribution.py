@@ -1111,8 +1111,8 @@ Attribution-ShareAlike 4.0 International license (the full text is in `LICENSE.m
   (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
   ([{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}); the
   [corpus page]({SBV2_JVNV_CORPUS_PAGE})).
-  The source repository states that the corpus's Creative Commons Attribution-ShareAlike 4.0
-  International license carries over to the models.
+  The voices are licensed under that license because the source repository's model card states
+  that the corpus's license carries over to them (`README.md` quotes it).
 - **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by {_owner(SBV2_TEXT_ENCODER_MODEL)}).
 
 The following changes were made:

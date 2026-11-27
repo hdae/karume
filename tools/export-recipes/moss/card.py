@@ -26,6 +26,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -37,6 +38,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -65,6 +67,45 @@ MOSS_VAE_PARTS: Mapping[str, str] = {
     "black-forest-labs/FLUX.2-small-decoder": "the decoder and `post_quant_conv`",
     "black-forest-labs/FLUX.2-klein-4B": "the latent batch-normalization statistics (`vae/`)",
 }
+
+
+#: What Black Forest Labs' cards of both VAE origins state of their use, quoted verbatim (the cards
+#: at the pinned commits of `moss.sources.VAE_ORIGINS`, read 2026-11-27): both point to its usage
+#: policies without a link, and the FLUX.2 [klein] 4B card says its statements do not modify the
+#: license.
+_VAE_REVISIONS = {origin.source.repo: origin.source.revision for origin in VAE_ORIGINS}
+MOSS_BFL_QUOTES: Mapping[str, UpstreamQuote] = {
+    "black-forest-labs/FLUX.2-small-decoder": UpstreamQuote(
+        repo="black-forest-labs/FLUX.2-small-decoder",
+        revision=_VAE_REVISIONS["black-forest-labs/FLUX.2-small-decoder"],
+        sections=("Out-of-Scope Use",),
+        paragraphs=(
+            "This model and its derivatives may not be used outside the scope of the license,"
+            " including for unlawful, fraudulent, defamatory, abusive, or otherwise violative"
+            " purposes as further explained in our Usage Policies.",
+        ),
+    ),
+    "black-forest-labs/FLUX.2-klein-4B": UpstreamQuote(
+        repo="black-forest-labs/FLUX.2-klein-4B",
+        revision=_VAE_REVISIONS["black-forest-labs/FLUX.2-klein-4B"],
+        sections=("Out-of-Scope Use", "Responsible AI Development"),
+        paragraphs=(
+            "Nothing contained in this Model Card should be interpreted as or deemed a restriction"
+            " or modification to the license the model is released under.",
+            "7. Policies. Acceptable use of our models and access to our API are governed by"
+            " policies set out in applicable documentation, including FLUX Non-Commercial License"
+            " (for our non-commercial open-weight users); Developer Terms of Service, Self-Hosted"
+            " Commercial License Terms, and Usage Policy (for our commercial open-weight model"
+            " users); and Developer Terms of Service, FLUX API Service Terms, and Usage Policy (for"
+            " our API users). These prohibit the generation of unlawful content or the use of"
+            " generated content for unlawful, defamatory, or abusive purposes.",
+        ),
+    ),
+}
+
+#: Every quotation of an upstream card the card writes (checked against the cached cards by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = tuple(MOSS_BFL_QUOTES.values())
 
 
 def _metadata() -> CardMetadata:
@@ -139,17 +180,23 @@ def _base_weights() -> list[str]:
         f" **{origin.source.license}** (as of retrieval)"
         for origin in VAE_ORIGINS
     ]
-    cards = ", ".join(
-        f"[{origin.source.repo}](https://huggingface.co/{origin.source.repo}/blob/"
-        f"{origin.source.revision}/README.md)"
-        for origin in VAE_ORIGINS
-    )
     lines += [
         # Maintainer decision 2026-11-01: passed through as information. Neither card links the
-        # policy at the pinned revisions, so the line points to the cards themselves.
-        f"  - Black Forest Labs' model cards of both origins ({cards}) also point to the BFL Usage"
-        " Policy, without a link of their own. This is informational: it is not a term of the"
-        " Apache License, Version 2.0.",
+        # policy at the pinned revisions, so the cards' own words are quoted (the maintainer's
+        # ruling of 2026-11-27 on upstream statements).
+        "  - Black Forest Labs' model cards of both origins point to its usage policies, without a"
+        " link of their own; this is informational, not a term of their **apache-2.0** license.",
+        *quotation(
+            MOSS_BFL_QUOTES["black-forest-labs/FLUX.2-small-decoder"],
+            "    The FLUX.2 small decoder's card",
+            indent="    ",
+        ),
+        "",
+        *quotation(
+            MOSS_BFL_QUOTES["black-forest-labs/FLUX.2-klein-4B"],
+            "    The FLUX.2 [klein] 4B card",
+            indent="    ",
+        ),
     ]
     lines += [
         f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the",

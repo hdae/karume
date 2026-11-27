@@ -31,6 +31,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -42,6 +43,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -185,6 +187,24 @@ SBV2_JVNV_CORPUS_PAGE = (
     "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus"
 )
 
+#: The source repository's statement that the voices inherit the corpus's license, **verbatim** (it
+#: is written in Japanese — a statement of upstream's, quoted, not reworded: the maintainer's ruling
+#: of 2026-11-27), with its translation, which is Karume's and is labeled so. The card at the pinned
+#: commit, read 2026-11-27. `NOTICE.md` keeps one line stating the basis and refers to the card.
+SBV2_JVNV_LICENSE_QUOTE = UpstreamQuote(
+    repo=SBV2_JVNV_METADATA.base_model[0],
+    revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
+    sections=("Style-Bert-VITS2 JVNVコーパスモデル",),
+    paragraphs=("ライセンスはJVNVコーパスのcc-by-sa-4.0を引き継ぎます。",),
+)
+SBV2_JVNV_LICENSE_QUOTE_IN_ENGLISH = (
+    '"The license carries over the cc-by-sa-4.0 of the JVNV corpus."'
+)
+
+#: Every quotation of an upstream card the card writes (checked against the cached cards by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (SBV2_JVNV_LICENSE_QUOTE,)
+
 SBV2_JVNV_PROFILE = Sbv2CardProfile(
     metadata=SBV2_JVNV_METADATA,
     title="Style-Bert-VITS2 JVNV — Karume",
@@ -193,13 +213,13 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     # main of `litagin/style_bert_vits2_jvnv` at retrieval time (`refs/main` of the HF cache — the
     # value written at 2026-08-09 08:07:52, in the middle of retrieving the 4 voices (08:07:32–
     # 08:08:02, `inputs/sbv2/{F1,F2,M1,M2}`). Checked against the files on 2026-09-25).
-    source_revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
+    source_revision=SBV2_JVNV_LICENSE_QUOTE.revision,
     attribution=(
         f"- **Terms**: licensed **{SBV2_JVNV_METADATA.license}** ([legal code]"
-        f"({SBV2_JVNV_LICENSE_URL}) — a verbatim copy is in `LICENSE.md`), inherited from the JVNV"
+        f"({SBV2_JVNV_LICENSE_URL}) — a verbatim copy is in `LICENSE.md`), the license of the JVNV"
         " corpus the",
-        "  voices were trained on — the source repository states the corpus license carries over",
-        "  to the models. Redistribution here keeps it: credit the authors, name the source and",
+        "  voices were trained on. Redistribution here keeps it: credit the authors, name the"
+        " source and",
         "  the license URL, state that the weights were **converted to another format and"
         " quantized**",
         "  (the next bullet lists every change),",
@@ -207,6 +227,9 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         " no further",
         "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
         "  and modification are both allowed.",
+        *quotation(SBV2_JVNV_LICENSE_QUOTE, "  The source repository's model card", indent="  "),
+        "",
+        f"  In English: {SBV2_JVNV_LICENSE_QUOTE_IN_ENGLISH}",
         f"{changes_made_here(SBV2_MODIFICATION_CLAUSE)} conversion into the Karume container"
         " format, **truncation of the",
         f"  text encoder to its first {SBV2_TEXT_ENCODER_LAYERS} encoder layers** (it now ends at"

@@ -2172,11 +2172,11 @@ IRODORI_LARGE_NOTICE_MARKDOWN = f"""# NOTICE
 {gemma_notice()}
 
 This repository redistributes a modified form of the Irodori-TTS checkpoint
-`{irodori_large_upstream(IRODORI_V4_LARGE_MODEL).repo}`. The checkpoint's model card states that it
-is subject to the Gemma Terms of Use because its shared text / caption encoder is derived from
-`{IRODORI_LARGE_TEXT_ENCODER_MODEL}`. The Gemma Terms of Use
-and the Gemma Prohibited Use Policy are included in `LICENSE.md`; the notice above is the one the
-checkpoint is distributed with.
+`{irodori_large_upstream(IRODORI_V4_LARGE_MODEL).repo}`, which is subject to the Gemma Terms of
+Use because its shared text / caption encoder is derived from
+`{IRODORI_LARGE_TEXT_ENCODER_MODEL}`, as its model card states (`README.md` quotes it). The Gemma
+Terms of Use and the Gemma Prohibited Use Policy are included in `LICENSE.md`; the notice above is
+the one the checkpoint is distributed with.
 
 The codec components ({_IRODORI_CODEC_COMPONENTS}) are the DACVAE codec
 `{IRODORI_CODEC_MODEL}` (which upstream ships as a separate repository), licensed

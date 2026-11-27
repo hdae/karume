@@ -202,6 +202,54 @@ def upstream_cards(links: Sequence[str]) -> list[str]:
 
 
 @dataclass(frozen=True)
+class UpstreamQuote:
+    """A statement of an upstream's model card, quoted verbatim (maintainer's ruling of
+    2026-11-27): what an upstream states and the recipe cannot measure — a legal statement, its
+    training data, its intended use — is quoted with its source, never reworded.
+
+    `paragraphs` are the card's own words at `revision`, each one paragraph or list item of it with
+    its line breaks folded into spaces; `sections` are the headings they stand under, the card's
+    title included, spelled without their emphasis and leading emoji (empty when they precede the
+    first heading).
+    """
+
+    repo: str
+    revision: str
+    sections: tuple[str, ...]
+    paragraphs: tuple[str, ...]
+
+    @property
+    def source(self) -> str:
+        """The quoted card at its commit, as a plain-text link."""
+        if _COMMIT.fullmatch(self.revision) is None:
+            raise ValueError(f"{self.repo}: {self.revision!r} is not a full commit")
+        return f"[{self.repo}](https://huggingface.co/{self.repo}/blob/{self.revision}/README.md)"
+
+
+# SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
+def quotation(quote: UpstreamQuote, lead: str, *, indent: str = "") -> list[str]:
+    """`{lead} ({source}) states, under "<section>":`, a blank line and the paragraphs as one
+    blockquote, its lines indented by `indent` (a list item's continuation).
+
+    `lead` names the card ("the upstream model card", "Its card"); the source is the card's
+    README at the commit quoted.
+    """
+    if not quote.paragraphs:
+        raise ValueError(f"{quote.repo}: a quotation without a paragraph")
+    under = (
+        ""
+        if not quote.sections
+        else ", under " + _spell_list([f'"{section}"' for section in quote.sections])
+    )
+    lines = [f"{lead} ({quote.source}) states{under}:", ""]
+    for index, paragraph in enumerate(quote.paragraphs):
+        if index:
+            lines.append(f"{indent}>")
+        lines.append(f"{indent}> {paragraph}")
+    return lines
+
+
+@dataclass(frozen=True)
 class Upstream:
     """One upstream work a card names in {@link UNOFFICIAL_CONVERSION_NOTICE}: how it is spelled
     (an HF repository ID, or a title for a work that is not on the Hub) and who published it."""

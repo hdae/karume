@@ -392,8 +392,9 @@ class TestTheCard:
     def test_the_vae_bullet_passes_the_usage_policy_pointer_on_as_information(self) -> None:
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
         vae_bullet = card.split("- **VAE decoder**")[1].split("\n- ")[0]
-        assert "BFL Usage Policy" in vae_bullet
-        assert "not a term of the Apache License, Version 2.0" in vae_bullet
+        assert "point to its usage policies, without a link of their own" in vae_bullet
+        assert "not a term of their **apache-2.0** license" in vae_bullet
+        assert "as further explained in our Usage Policies." in vae_bullet
         for origin in sources.VAE_ORIGINS:
             assert (
                 f"https://huggingface.co/{origin.source.repo}/blob/{origin.source.revision}"

@@ -159,11 +159,35 @@ The level-2 sections come in this order:
   `base_model` repositories, preceded on `karume-anima-extra` by the Civitai pages of its fine-tunes. The Gemma 4
   cards write the bullet in their own words: `karume-gemma4` and `karume-gemma4-qat` link the default model's upstream
   card only.
-- `karume-birefnet-hr` and `karume-depth-anything-v2` send the reader to the upstream card for the training data. The
-  other cards link the upstream in the attribution section only.
-- `karume-anima-2.9b` quotes the upstream card's description verbatim, and its `NOTICE.md` refers to the upstream card
-  for it. `karume-embeddinggemma-2` quotes the upstream's use-policy sentence verbatim, in the card and in `NOTICE.md`
-  (one constant). Other upstream statements are written in the recipe's own words.
+- What an upstream states and the recipe cannot measure — a statement of license or use policy, the training data,
+  what the model is and what it is for — is quoted verbatim, never reworded, by `karume.modelcard.quotation`: a lead
+  naming the quoted card, linked to its `README.md` at the commit the recipe pinned (`UpstreamQuote.source`), and the
+  headings the text stands under (the card's title included, without emphasis or a leading emoji; none for a text
+  before the first heading); a blank line; then the paragraphs as one blockquote. A text that follows a quotation is
+  set apart by a blank line. A statement whose source at the pinned commit is not on the Hub card stays in the
+  recipe's words (docs/backlog.md lists them).
+
+  | Repository | Card quoted | What it states |
+  | --- | --- | --- |
+  | `karume-anima-2.9b` | `Gazingstars123/Anima-2.9B` | what the model is and what was trained ("What is this") |
+  | `karume-birefnet-hr` | `ZhengPeng7/BiRefNet_HR` | the training resolution and the training set |
+  | `karume-lucida` | `egeorcun/lucida` | what the model is ("What is this"), its training data, what the variant left out is for |
+  | `karume-depth-anything-v2` | `depth-anything/Depth-Anything-V2-Small-hf` | how Depth Anything V2 was trained |
+  | `karume-embeddinggemma-2` | `google/embeddinggemma-2` | the numerical precision to run it in, the use policy |
+  | `karume-irodori-v4-small`, `karume-irodori-v4.1-small` | `Aratako/Semantic-DACVAE-Japanese-32dim` | where the codec comes from |
+  | `karume-irodori-v4.1-small-mf` | `Aratako/Irodori-TTS-v4.1-Small-MF`, the codec's card | how it was distilled, where the codec comes from |
+  | `karume-irodori-v4-large` | `Aratako/Irodori-TTS-v4-Large`, the codec's card | the Gemma terms and the ethical restrictions, where the codec comes from |
+  | `karume-moss-image` | `black-forest-labs/FLUX.2-small-decoder`, `black-forest-labs/FLUX.2-klein-4B` | the pointers to Black Forest Labs' usage policies |
+  | `karume-sbv2-jvnv` | `litagin/style_bert_vits2_jvnv` | that the corpus's license carries over to the voices (in Japanese, followed by an English translation labeled as Karume's) |
+
+  Unless the table says otherwise, the quotation stands in the attribution section.
+- Each family lists its quotations in `UPSTREAM_QUOTES` of its `card.py`. The driver's test checks each against the
+  upstream card at its commit wherever a copy is on the machine (the HF cache, or an input directory whose download
+  record or `REVISION.txt` names the commit), and checks that every blockquote of a card is one of them.
+- A notice does not repeat a quotation. Where an upstream's statement is the basis of what the notice says, the notice
+  keeps one line stating that basis and refers to the card ("`README.md` quotes it"): the voices' license
+  (`karume-sbv2-jvnv`), the Gemma terms of the checkpoint (`karume-irodori-v4-large`), the use policy
+  (`karume-embeddinggemma-2`). `karume-anima-2.9b`'s notice refers to the upstream card for how the model was made.
 
 ### Presets and the quant tables
 
@@ -196,7 +220,7 @@ The level-2 sections come in this order:
 - Statements a license or an upstream requires in its own words stand before the change list or after the closing
   paragraph, verbatim: the Gemma `NOTICE` line first in `karume-irodori-v4-large`, the Black Forest Labs
   non-endorsement in `karume-moss-image`, the share-alike statement after the closing in `karume-sbv2-jvnv`, the
-  upstream use-policy quotation after the closing in `karume-embeddinggemma-2`.
+  line on the upstream use policy after the closing in `karume-embeddinggemma-2`.
 - The three Anima notices take the same structure, keeping every statement the CircleStone and NVIDIA licenses
   require: after the opening paragraph, the rights-grant statement of CircleStone §3(a) and the Attribution Notice of
   §3(b) verbatim, followed at once by the statement of §3(d)(i) that the model was modified ("As required by the
@@ -237,12 +261,12 @@ The level-2 sections come in this order:
 One constant, imported where it is written:
 
 - In `karume.modelcard`: the non-endorsement sentence, the runtime sentence, the upstream-card bullet, the link and
-  pin of an upstream (`hf_link`, `pinned`), the revision-pin comment, the notes under the quant tables and the
-  cross-repository note.
+  pin of an upstream (`hf_link`, `pinned`), the quotation of an upstream card (`UpstreamQuote`, `quotation`), the
+  revision-pin comment, the notes under the quant tables and the cross-repository note.
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
-- Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; EmbeddingGemma 2's
-  use-policy sentence.
+- Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices. Each quotation
+  is one `UpstreamQuote` of its family's card module.
 
 Everything else above (the Apache text URL, the notices' closing paragraph, the "What is this" sentences) is written
 per family.
