@@ -36,6 +36,7 @@ from ir_fixtures import ir_container
 from safetensors.numpy import load_file, save_file
 
 from _shared.licenses import CC_BY_SA_4_0_PATH
+from _shared.upstream import UPSTREAM_AUTHORS
 from dist import main
 from karume.dist import (
     LEGAL_PATHS,
@@ -392,6 +393,18 @@ def sbv2_assembled(tmp_path: Path) -> tuple[Path, dict]:
 
 def _sbv2_model(manifest: Mapping[str, Any], name: str = SBV2_DEFAULT_MODEL) -> Mapping[str, Any]:
     return manifest["models"][name]
+
+
+class TestSbv2NoticeNames:
+    """The notice names each upstream by its repository ID and its publisher as the cards spell
+    it (`_shared.upstream.UPSTREAM_AUTHORS`)."""
+
+    def test_each_upstream_and_its_publisher_are_named_as_the_cards_name_them(self) -> None:
+        for repo in SBV2_JVNV_PROFILE.metadata.base_model:
+            owner = repo.split("/")[0]
+            assert f"`{repo}` (published by {UPSTREAM_AUTHORS[owner]})" in " ".join(
+                SBV2_JVNV_NOTICE_MARKDOWN.split()
+            )
 
 
 class TestSbv2Layout:

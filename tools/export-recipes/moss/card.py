@@ -124,7 +124,7 @@ def _base_weights() -> list[str]:
         f"({MOSS_TECHNICAL_REPORT})).",
         "- **Text encoder** (`text_encoder`, `tokenizer`): the checkpoint's bundled Qwen3.5 text"
         f" encoder, from {pinned(TEXT_ENCODER_ORIGIN.repo, TEXT_ENCODER_ORIGIN.revision)}"
-        " (the Qwen team, Alibaba Cloud), licensed"
+        f" ({hf_upstreams([TEXT_ENCODER_ORIGIN.repo])[0].author}), licensed"
         f" **{TEXT_ENCODER_ORIGIN.license}** (as of retrieval), and its tokenizer. Only the text"
         " tower is redistributed here; its copyright notice is kept in `NOTICE.md`.",
         "- **VAE decoder** (`vae_decoder_pre` / `vae_decoder_attn` / `vae_decoder_post`): the"

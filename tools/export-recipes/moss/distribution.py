@@ -49,7 +49,7 @@ from _shared.container_read import (
     read_asset_declarations,
 )
 from _shared.licenses import apache_license_2_0, license_markdown
-from _shared.upstream import assert_upstream_provenance
+from _shared.upstream import assert_upstream_provenance, hf_upstreams
 from karume.dist import (
     Artifact,
     DistError,
@@ -66,7 +66,7 @@ from karume.dist import (
     ir_graph,
 )
 from moss.card import MOSS_SUPPORTED_PIPELINE, render_moss_model_card
-from moss.sources import SOURCE
+from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN
 
 #: The pipeline contract (ADR 0041 §2). The TS reader accepts `MOSS_PIPELINE_NAME` /
 #: `MOSS_PIPELINE_MAJOR` (`packages/models/src/moss/config.ts`).
@@ -257,9 +257,9 @@ This repository redistributes a modified form of the MOSS-Image-SFT checkpoint `
 including two parts that the checkpoint bundles from other releases, both licensed under the
 Apache License, Version 2.0 as well:
 
-- Its text encoder is the Qwen3.5 text encoder of `Qwen/Qwen3.5-9B` (the Qwen team, Alibaba
-  Cloud), with its tokenizer. The license file of that release carries the copyright notice
-  "Copyright 2026 Alibaba Cloud".
+- Its text encoder is the Qwen3.5 text encoder of `{TEXT_ENCODER_ORIGIN.repo}`
+  ({hf_upstreams([TEXT_ENCODER_ORIGIN.repo])[0].author}), with its tokenizer. The license file of
+  that release carries the copyright notice "Copyright 2026 Alibaba Cloud".
 - Its VAE is the FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs): the decoder and
   `post_quant_conv` come from `black-forest-labs/FLUX.2-small-decoder`, and the latent
   batch-normalization statistics from the VAE of `black-forest-labs/FLUX.2-klein-4B`. Only the

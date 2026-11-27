@@ -79,6 +79,8 @@ item "The model cards and notices across repositories".
 - The upstreams are the `base_model` IDs and each author is the account's publisher as `_shared.upstream.UPSTREAM_AUTHORS`
   spells it (`hf_upstreams`): the sentence follows the front matter. A redistributed work that is not on the Hub comes
   first, by its title and author — on `karume-anima-extra`, its two fine-tunes.
+- Wherever else a card or a notice names the publisher of an HF upstream (the Anima origins, the MOSS-Image text
+  encoder, the SBV2 notice), it spells it as `UPSTREAM_AUTHORS` does.
 
 ### Sections and their order
 

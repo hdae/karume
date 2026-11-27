@@ -51,6 +51,7 @@ from safetensors import safe_open
 
 from _shared.licenses import cc_by_sa_4_0, license_markdown
 from _shared.paths import INPUTS_ROOT, MISC_ROOT
+from _shared.upstream import hf_upstreams
 from karume.dist import (
     Artifact,
     DistError,
@@ -1071,9 +1072,10 @@ _JVNV_VOICES_REPO = SBV2_JVNV_PROFILE.metadata.base_model[0]
 
 
 def _owner(repo: str) -> str:
-    """The namespace of an HF repository (the only spelling under which upstream names itself as the
-    author)."""
-    return repo.split("/")[0]
+    """The publisher of an HF repository, as every card and notice spells it
+    (`_shared.upstream.UPSTREAM_AUTHORS` — the namespace itself for these two, the only spelling
+    under which upstream names itself as the author)."""
+    return hf_upstreams([repo])[0].author
 
 
 #: The JVNV notice of modifications and attribution (CC BY-SA 4.0 §3(a)(1) and §3(b)). The legal
@@ -1104,12 +1106,12 @@ Attribution-ShareAlike 4.0 International license (the full text is in `LICENSE.m
 <{SBV2_JVNV_LICENSE_URL}>):
 
 - **Voices**: Style-Bert-VITS2 JP-Extra models of JVNV-corpus speakers from
-  `{_JVNV_VOICES_REPO}` (published by `{_owner(_JVNV_VOICES_REPO)}`) — the model card
+  `{_JVNV_VOICES_REPO}` (published by {_owner(_JVNV_VOICES_REPO)}) — the model card
   (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
   (<{SBV2_JVNV_CORPUS_PAPER_URL}>; corpus page: <{SBV2_JVNV_CORPUS_PAGE}>).
   The source repository states that the corpus's Creative Commons Attribution-ShareAlike 4.0
   International license carries over to the models.
-- **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by `{_owner(SBV2_TEXT_ENCODER_MODEL)}`).
+- **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by {_owner(SBV2_TEXT_ENCODER_MODEL)}).
 
 The following changes were made:
 
