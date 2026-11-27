@@ -46,6 +46,10 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   // --routing-outputs`): the cut product graph and, under `routing/`, the same graph with each
   // layer's routing ids as extra outputs.
   "gemma4-26b-cut12": { "": "model", routing: "model" },
+  // 26B A4B's QAT MTP drafter (`gemma4.export_drafter_qat --model 26b`): the one the distribution
+  // ships, and a test-only one whose lender is the cut above (`e2e_gemma4_26b_cut_drafter_test.ts`).
+  "gemma4-26b-cut12-qat-drafter": { "": "drafter" },
+  "gemma4-26b-qat-drafter": { "": "drafter" },
   "gemma4-e2b": { "": "model" },
   "gemma4-e2b-decode": { "": "model" },
   "gemma4-e2b-drafter": { "": "drafter" },
