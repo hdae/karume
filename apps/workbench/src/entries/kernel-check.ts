@@ -7,8 +7,10 @@
 
 import { type CheckProgress, subgroup32Available } from "@karume/kernel-checks";
 import { acquireGpu, type GpuContext } from "@karume/runtime";
+import { choicesValue } from "@karume/sweep-app-support/parameters";
+import { errorText, seconds } from "@karume/sweep-app-support/record";
 
-import { choicesValue, type Entry } from "../entry.ts";
+import type { Entry } from "../entry.ts";
 import { KERNEL_CHECKS, type KernelCheck } from "../kernel-check/checks.ts";
 import { kernelCheckResult } from "../kernel-check/summary.ts";
 import {
@@ -16,7 +18,6 @@ import {
   KERNEL_CHECK_IDS,
   subgroupShortfall,
 } from "../kernel-check/verdict.ts";
-import { errorText, seconds } from "../record.ts";
 
 const unavailableReason = (gpu: GpuContext, adapterFeatures: readonly string[]): string => {
   const missing = subgroupShortfall(new Set(adapterFeatures), gpu.wgslLanguageFeatures);

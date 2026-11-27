@@ -1,11 +1,11 @@
 import type { GemvSweepReport } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import { mergeGemvSweepReports } from "@karume/sweep-app-support/gemv-sweep/record";
+import type { GemvRunOutcome } from "@karume/sweep-app-support/gemv-sweep/run";
+import type { GemvSweepPlan } from "@karume/sweep-app-support/gemv-sweep/settings";
+import { gemvSweepResult, gemvSweepVerdict } from "@karume/sweep-app-support/gemv-sweep/summary";
+import type { PerCaseStop } from "@karume/sweep-app-support/per-case-sweep";
 
-import { mergeGemvSweepReports } from "../src/gemv-sweep/record.ts";
-import type { GemvRunOutcome } from "../src/gemv-sweep/run.ts";
-import type { GemvSweepPlan } from "../src/gemv-sweep/settings.ts";
-import { gemvSweepResult, gemvSweepVerdict } from "../src/gemv-sweep/summary.ts";
-import type { PerCaseStop } from "../src/per-case-sweep.ts";
 import { CASE_A, CASE_B, CASE_C, gemvPerCase, gemvRow } from "./helpers/gemv-sweep-report.ts";
 
 const PLANNED = { plannedCaseIds: [CASE_A, CASE_B], cancelledBetweenCases: false };

@@ -9,14 +9,15 @@
  */
 
 import {
-  type Entry,
-  ENTRY_ID,
   ParameterError,
   parameterText,
   type ParameterValue,
   type ParameterValues,
   parseParameters,
-} from "./entry.ts";
+} from "@karume/sweep-app-support/parameters";
+import { ENTRY_ID } from "@karume/sweep-app-support/record";
+
+import type { Entry } from "./entry.ts";
 
 /** The format of a batch file; a file says it in its `format`. */
 export const BATCH_FORMAT = "karume-workbench-batch/1";

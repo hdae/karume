@@ -9,8 +9,10 @@
 
 import type { Manifest } from "@karume/hub";
 import type { SessionAbJudgement, SessionAbRecord } from "@karume/runtime/tune";
+import { ParameterError } from "@karume/sweep-app-support/parameters";
+import type { EntryResult } from "@karume/sweep-app-support/record";
 
-import { type DistributionFacts, type EntryResult, ParameterError } from "../entry.ts";
+import type { DistributionFacts } from "../entry.ts";
 import { modelPreset } from "../model-preset.ts";
 import { MODELS_VERSION } from "../session-ab/data.ts";
 import { runPositions } from "../session-ab/shared.ts";

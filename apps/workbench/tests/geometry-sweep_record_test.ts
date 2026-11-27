@@ -1,7 +1,10 @@
 import { deriveGeometryProfile, type GeometrySweepReport } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import {
+  caseSummaryRows,
+  mergeSweepReports,
+} from "@karume/sweep-app-support/geometry-sweep/record";
 
-import { caseSummaryRows, mergeSweepReports } from "../src/geometry-sweep/record.ts";
 import {
   ADAPTER,
   CANDIDATE_GEOMETRY,

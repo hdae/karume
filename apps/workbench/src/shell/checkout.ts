@@ -3,7 +3,7 @@
  * between two runs shows), or baked into a production build when its config loaded.
  */
 
-import type { Checkout } from "../record.ts";
+import type { Checkout } from "@karume/sweep-app-support/record";
 
 /** Defined by the results plugin in a production build only. */
 declare const __WORKBENCH_CHECKOUT__: Checkout;

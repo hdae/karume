@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
+import type {
+  Checkout,
+  EntryResult,
+  RecordEnvironment,
+  WorkbenchRecord,
+} from "@karume/sweep-app-support/record";
 
 import { BATCH_FORMAT, type ResolvedBatch, resolveBatch } from "../src/batch.ts";
 import {
@@ -8,9 +14,8 @@ import {
   runBatch,
   type StepState,
 } from "../src/batch-run.ts";
-import type { Entry, EntryResult, RunContext } from "../src/entry.ts";
+import type { Entry, RunContext } from "../src/entry.ts";
 import type { RunHost } from "../src/execute.ts";
-import type { Checkout, RecordEnvironment, WorkbenchRecord } from "../src/record.ts";
 
 const ENVIRONMENT: RecordEnvironment = {
   host: "node",

@@ -13,16 +13,15 @@
 import type { GemmaManifests, GemmaMount } from "@karume/gemma4-app-support/settings";
 import { loadManifest } from "@karume/hub";
 import { MountUnavailableError, type SourceKind } from "@karume/local-distributions/browser";
-
 import {
   choicesValue,
   choiceValue,
   integerValue,
-  type OpenDistribution,
-  type OpenedDistribution,
   ParameterError,
   type ParameterValues,
-} from "../entry.ts";
+} from "@karume/sweep-app-support/parameters";
+
+import type { OpenDistribution, OpenedDistribution } from "../entry.ts";
 import { MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
 import {
   type ArmDraft,

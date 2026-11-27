@@ -15,12 +15,14 @@
  */
 import { acquireGpu, type GpuContext } from "../gpu/device.ts";
 import { selectGeometryProfile } from "../kernels/geometry-profile.ts";
-import { SWEEP_OPS, type SweepCase, sweepCasesFor, type SweepOp } from "./cases.ts";
+import { caseShape, SWEEP_OPS, type SweepCase, sweepCasesFor, type SweepOp } from "./cases.ts";
 import {
-  CANDIDATE_SETS,
-  type CandidateSet,
+  candidateGridOf,
   DEFAULT_CANDIDATE_SET,
-  isCandidateSet,
+  EXPLORE_SET,
+  isSweepSet,
+  SWEEP_SETS,
+  type SweepSet,
 } from "./geometries.ts";
 import { familiesOf } from "./families.ts";
 import {
@@ -28,12 +30,16 @@ import {
   candidateSetDefaultKernelsIds,
   sweepCandidateKernelsId,
 } from "./fingerprint.ts";
+import { geometryExploreDropped, geometryExploreOrder } from "./geometry-explore.ts";
 import {
   createSweepContext,
   destroySweepContext,
+  type GeometrySweepPlannedCase,
+  type GeometrySweepStep,
   runSweep,
   selectedCandidates,
   SWEEP_MAX_REPS,
+  type SweepSettings,
 } from "./harness.ts";
 import {
   quickLookMarginOf,
@@ -64,6 +70,11 @@ const TIMESTAMP_QUERY: GPUFeatureName = "timestamp-query";
  *
  * - `started` — the device is acquired and the measurement context exists (unit, dp4a and case
  *   count are fixed).
+ * - `plan` — a case starts: its place among the planned cases, the geometries it plans (the default
+ *   and the candidates not dropped) and the candidates the `explore` set dropped for its class
+ *   ({@link GeometrySweepPlannedCase}).
+ * - `step` — a unit of the case's measurement: its phase (`prepare`, `warm-start`, `quick-look`,
+ *   `timing`, `repeat`) and how many of its units are done of how many ({@link GeometrySweepStep}).
  * - `status` — what is being measured now ("<case>: <geometry> (i/n)" and the like — one line for
  *   display).
  * - `row` — one (case, geometry) row is final. A case's first row is the default geometry
@@ -81,6 +92,8 @@ export type GeometrySweepProgress =
       readonly dp4a: boolean;
       readonly caseCount: number;
     }
+  | ({ readonly kind: "plan" } & GeometrySweepPlannedCase)
+  | ({ readonly kind: "step" } & GeometrySweepStep)
   | { readonly kind: "status"; readonly message: string }
   | { readonly kind: "row"; readonly row: SweepRow }
   | { readonly kind: "case"; readonly summary: CaseSummary }
@@ -94,9 +107,14 @@ export type GeometrySweepOptions = {
   readonly adapter?: GPURequestAdapterOptions;
   /**
    * The candidate set (default `quick+`). The evaluation set `k88` sweeps its own case table
-   * (`geometrySweepCases("k88")`), and no table is derived from its records.
+   * (`geometrySweepCases("k88")`), and no table is derived from its records. `explore` measures the
+   * candidates of `full` on its case table in fewer rows (geometry-explore.ts): the cases class by
+   * class, the first case of a class with every candidate, and a candidate that a case of the class
+   * screened out, failed, found not identical to the default or timed slower than the default is not
+   * measured in the later cases of the class (a skipped row each). `settings.cases` of its record
+   * lists the cases in that measuring order.
    */
-  readonly candidateSet?: CandidateSet;
+  readonly candidateSet?: SweepSet;
   /** The op families to sweep (default: all families). */
   readonly ops?: readonly SweepOp[];
   /**
@@ -114,8 +132,19 @@ export type GeometrySweepOptions = {
    * derivation input: each row stands for itself, and a candidate it did not measure is "not
    * measured" there, as with narrowed `cases`. Its purpose: a machine that heats within one case
    * measures that case in chunks with a cool-down between calls (ADR 0117 addendum 2026-11-12).
+   * With the `explore` set it throws: that set chooses what it measures of `full` itself.
    */
   readonly geometries?: readonly string[];
+  /**
+   * The `explore` set only: the rows of the cases earlier calls measured (the workbench measures one
+   * case per call, the cases in the set's order — `geometryExploreOrder`). A case drops the
+   * candidates its class's cases among them ruled out, as it drops those of the cases this call
+   * measured before it, so a run of one case per call with the rows passed along holds what one call
+   * over the cases holds. Every row must be of a case of the set's table, with the table's op and
+   * shape, and of no case this call measures; given with another set, it throws — before the GPU is
+   * touched.
+   */
+  readonly exploreEvidence?: readonly SweepRow[];
   /**
    * The number of measurement rounds per geometry (default 5 — the representative value is their
    * min).
@@ -140,42 +169,97 @@ export type GeometrySweepOptions = {
    * far).
    */
   readonly signal?: AbortSignal;
-  /** Progress notifications ({@link GeometrySweepProgress}). */
+  /**
+   * Progress notifications ({@link GeometrySweepProgress}). The `step` callback runs synchronously
+   * between timed passes, so it MUST stay cheap (a page should only store the event and paint on its
+   * own schedule).
+   */
   readonly onProgress?: (progress: GeometrySweepProgress) => void;
 };
 
 /** The sweep settings with options checked and defaults filled in, and the chosen cases. */
-type SweepPlan = {
-  readonly candidateSet: CandidateSet;
+export type SweepPlan = {
+  readonly candidateSet: SweepSet;
   readonly ops: readonly SweepOp[];
+  /**
+   * The `cases` option (empty: every case of `ops`) — for the `explore` set in measuring order, as
+   * the workbench's merged record of the same cases holds them.
+   */
   readonly caseIds: readonly string[];
   /** The `geometries` option (absent when omitted or empty). */
   readonly geometries?: readonly string[];
   readonly rounds: number;
   readonly quickLookMargin: number;
+  /** In measuring order: the table's, class by class for the `explore` set. */
   readonly cases: readonly SweepCase[];
+  /** The `exploreEvidence` option (empty: none). */
+  readonly exploreEvidence: readonly SweepRow[];
 };
 
 const isSweepOp = (value: string): value is SweepOp =>
   (SWEEP_OPS as readonly string[]).includes(value);
 
 /**
+ * Checks the `exploreEvidence` of an `explore` sweep that measures `cases` (before the GPU is
+ * touched): every row is of a case of the set's table `table`, with its op and shape, and of no case
+ * of `cases`.
+ */
+const checkExploreEvidence = (
+  evidence: readonly SweepRow[],
+  table: readonly SweepCase[],
+  cases: readonly SweepCase[],
+): void => {
+  for (const row of evidence) {
+    const sweepCase = table.find(({ id }) => id === row.caseId);
+    if (sweepCase === undefined) {
+      throw new Error(
+        `exploreEvidence holds a row of ${row.caseId}, which is not in the shape table of the explore set`,
+      );
+    }
+    if (row.op !== sweepCase.op || row.shape !== caseShape(sweepCase)) {
+      throw new Error(
+        `exploreEvidence holds a row of ${row.caseId} with another op or shape than the table's (${row.op} ${row.shape})`,
+      );
+    }
+    if (cases.some(({ id }) => id === row.caseId)) {
+      throw new Error(
+        `exploreEvidence holds a row of ${row.caseId}, which this sweep measures itself`,
+      );
+    }
+  }
+};
+
+/**
  * Checks the options and chooses the cases (before touching the GPU — a misspelled set, op or case
  * is never run as the default). The cases are those of the candidate set's case table
- * (`sweepCasesFor`) matching both op and id (every case of the op when no id is given), in the
- * order of that table. Every name of `geometries` must be a candidate of every chosen case.
+ * (`sweepCasesFor`; `full`'s for `explore`) matching both op and id (every case of the op when no
+ * id is given), in the order of that table — class by class for `explore`
+ * (`geometryExploreOrder`). Every name of `geometries` must be a candidate of every chosen case;
+ * `geometries` with `explore`, `exploreEvidence` with another set and evidence that does not fit
+ * ({@link checkExploreEvidence}) throw.
  */
-const planSweep = (options: GeometrySweepOptions): SweepPlan => {
+export const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   const candidateSet = options.candidateSet ?? DEFAULT_CANDIDATE_SET;
-  if (!isCandidateSet(candidateSet)) {
-    throw new Error(`Candidate set ${candidateSet} is none of ${CANDIDATE_SETS.join(" / ")}`);
+  if (!isSweepSet(candidateSet)) {
+    throw new Error(`Candidate set ${candidateSet} is none of ${SWEEP_SETS.join(" / ")}`);
+  }
+  const explore = candidateSet === EXPLORE_SET;
+  if (explore && options.geometries !== undefined && options.geometries.length > 0) {
+    throw new Error(
+      "The explore set measures the candidates of full and drops them itself: geometries cannot narrow it",
+    );
+  }
+  const exploreEvidence = options.exploreEvidence ?? [];
+  if (!explore && exploreEvidence.length > 0) {
+    throw new Error(`exploreEvidence is read by the explore set only, not by ${candidateSet}`);
   }
   const ops = options.ops ?? SWEEP_OPS;
   const unknownOp = ops.find((op) => !isSweepOp(op));
   if (unknownOp !== undefined) {
     throw new Error(`op ${unknownOp} is none of ${SWEEP_OPS.join(" / ")}`);
   }
-  const table = sweepCasesFor(candidateSet);
+  const grid = candidateGridOf(candidateSet);
+  const table = sweepCasesFor(grid);
   const caseIds = options.cases ?? [];
   const unknownCase = caseIds.find((id) => !table.some((sweepCase) => sweepCase.id === id));
   if (unknownCase !== undefined) {
@@ -188,13 +272,15 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
   const quickLookMargin = quickLookMarginOf(options.quickLookMargin);
-  const cases = table.filter(
+  const chosen = table.filter(
     (sweepCase) =>
       ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),
   );
-  if (cases.length === 0) {
+  if (chosen.length === 0) {
     throw new Error(`No case matches op [${ops.join(", ")}] and cases [${caseIds.join(", ")}]`);
   }
+  const cases = explore ? geometryExploreOrder(chosen) : chosen;
+  if (explore) checkExploreEvidence(exploreEvidence, table, cases);
   const names = options.geometries ?? [];
   const twice = names.find((name, index) => names.indexOf(name) !== index);
   if (twice !== undefined) {
@@ -202,17 +288,41 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   }
   const geometries = names.length === 0 ? undefined : names;
   // Throws on a name that is not a candidate of a chosen case (the same selection as the sweep's)
-  for (const sweepCase of cases) selectedCandidates(sweepCase, candidateSet, geometries);
+  for (const sweepCase of cases) selectedCandidates(sweepCase, grid, geometries);
   return {
     candidateSet,
     ops,
-    caseIds,
+    // In measuring order for explore, as the workbench's merged record of the same cases holds them
+    caseIds: explore && caseIds.length > 0 ? cases.map(({ id }) => id) : caseIds,
     ...(geometries === undefined ? {} : { geometries }),
     rounds,
     quickLookMargin,
     cases,
+    exploreEvidence,
   };
 };
+
+/**
+ * The harness's settings of a planned sweep: its rounds, margin and narrowing, the candidates of the
+ * set's grid (`full`'s for `explore`), and for `explore` the drop rule over the evidence and the rows
+ * of the cases the call measured before (geometry-explore.ts's `geometryExploreDropped`).
+ */
+export const sweepSettings = (
+  plan: SweepPlan,
+  timestampUnit: SweepSettings["timestampUnit"],
+): SweepSettings => ({
+  rounds: plan.rounds,
+  candidateSet: candidateGridOf(plan.candidateSet),
+  ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
+  timestampUnit,
+  quickLookMargin: plan.quickLookMargin,
+  ...(plan.candidateSet === EXPLORE_SET
+    ? {
+        droppedFor: (target: SweepCase, earlier: readonly SweepRow[]) =>
+          geometryExploreDropped(target, [...plan.exploreEvidence, ...earlier]),
+      }
+    : {}),
+});
 
 /**
  * The unit of timestamp differences. Deno's WebGPU (wgpu) returns timestamps as raw ticks without
@@ -313,16 +423,12 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       ({ rows, cases, aborted } = await runSweep(
         context,
         plan.cases,
-        {
-          rounds: plan.rounds,
-          candidateSet: plan.candidateSet,
-          ...(plan.geometries === undefined ? {} : { geometries: plan.geometries }),
-          timestampUnit,
-          quickLookMargin: plan.quickLookMargin,
-        },
+        sweepSettings(plan, timestampUnit),
         {
           signal: options.signal,
           onProgress: (message) => notify?.({ kind: "status", message }),
+          onPlan: (planned) => notify?.({ kind: "plan", ...planned }),
+          onStep: (step) => notify?.({ kind: "step", ...step }),
           onRow: (row) => notify?.({ kind: "row", row }),
           onCase: (summary) => notify?.({ kind: "case", summary }),
         },
@@ -341,7 +447,8 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       // default fingerprint over every case takes about 13 ms; the candidate fingerprint about 0.4 s
       // for every row of quick+ and 3 s for every row of full). The case-set versions and the baseline are one value
       // per op family of the planned cases, each over the set's own case table restricted to the
-      // family (ADR 0117 addendum 2026-11-12), so an evaluation set never claims the sweep's
+      // family (ADR 0117 addendum 2026-11-12), so an evaluation set never claims the sweep's (the
+      // explore set's are full's: it sweeps full's case table)
       caseSets: candidateSetCaseSetIds(plan.candidateSet, familiesOf(plan.cases)),
       defaultKernels: candidateSetDefaultKernelsIds(plan.candidateSet, familiesOf(plan.cases)),
       // The embedded table a Session on this adapter selects (no table is injected here) — what a

@@ -22,10 +22,10 @@
 
 import { type StopRecord, stopRecordOf } from "@karume/gemma4-app-support/stop-record";
 import type { ChatMessage, ChatOptions, ChatStream, SamplerSpec } from "@karume/models/gemma";
+import { seconds } from "@karume/sweep-app-support/record";
 
 import type { OpenedDistribution } from "../entry.ts";
 import { nextTask } from "../next-task.ts";
-import { seconds } from "../record.ts";
 import {
   type ChatMeasurement,
   type ChatMarks,

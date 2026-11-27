@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vite-plus/test";
-
 import {
   booleanValue,
   choicesValue,
@@ -11,7 +10,7 @@ import {
   parameterText,
   parseParameters,
   textValue,
-} from "../src/entry.ts";
+} from "@karume/sweep-app-support/parameters";
 
 const DECLARED: readonly Parameter[] = [
   { kind: "boolean", name: "warm", label: "Warm up", default: false },

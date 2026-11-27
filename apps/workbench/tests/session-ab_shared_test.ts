@@ -1,7 +1,7 @@
 import type { SessionAbArm } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
-import { ParameterError, parseParameters } from "../src/entry.ts";
 import {
   type ArmStep,
   MIN_GAIN_PARAMETER,

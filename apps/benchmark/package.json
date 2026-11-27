@@ -1,0 +1,26 @@
+{
+  "name": "@karume/benchmark",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A small browser page an outside collaborator opens to run the GEMV and geometry sweeps' explore sets on their own GPU and send the result back as one file (and the Node command that unpacks that file into workbench records).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "preview": "vp preview",
+    "check": "vp check",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@karume/runtime": "workspace:*",
+    "@karume/sweep-app-support": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@webgpu/types": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

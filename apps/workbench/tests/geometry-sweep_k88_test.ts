@@ -1,8 +1,7 @@
 import { BUILTIN_GEOMETRY_PROFILES, type GemmGeometry } from "@karume/runtime";
 import { type GeometrySweepCase, type GeometrySweepRow } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
-
-import { k88Summary, k88TableGeometry } from "../src/geometry-sweep/k88.ts";
+import { k88Summary, k88TableGeometry } from "@karume/sweep-app-support/geometry-sweep/k88";
 
 /** The default geometry of the linear cases' bucket and of conv2d's 64-row class. */
 const LINEAR_DEFAULT: GemmGeometry = { regM: 8, regN: 8, wgX: 16, wgY: 16 };

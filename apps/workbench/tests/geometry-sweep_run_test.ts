@@ -4,15 +4,15 @@ import type {
   GeometrySweepReport,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
-
 import {
   foldSweepEvent,
   idle,
   INITIAL_LIVE,
   runSweepPlan,
   type SweepRunEvent,
-} from "../src/geometry-sweep/run.ts";
-import type { SweepPlan } from "../src/geometry-sweep/settings.ts";
+} from "@karume/sweep-app-support/geometry-sweep/run";
+import type { SweepPlan } from "@karume/sweep-app-support/geometry-sweep/settings";
+
 import { type PerCaseOptions, perCase, row } from "./helpers/geometry-sweep-report.ts";
 
 const PLAN: SweepPlan = {
@@ -314,5 +314,27 @@ describe("foldSweepEvent (the live view)", () => {
       sweep({ kind: "deviceLost", reason: "unknown", message: "crashed" }),
     );
     expect(live.deviceLost).toEqual({ reason: "unknown", message: "crashed" });
+  });
+});
+
+describe("runSweepPlan with the explore set", () => {
+  it("hands every call the rows of the calls before it, as one call over the cases reads the cases it measured before (fault: no evidence)", async () => {
+    const run = harness(async (options) => reportFor(options));
+    await runSweepPlan(
+      { ...PLAN, candidateSet: "explore", idleSeconds: 0 },
+      run.deps(new AbortController().signal),
+    );
+    expect(run.calls.map((call) => call.exploreEvidence?.map(({ caseId }) => caseId))).toEqual([
+      [],
+      ["a", "a"],
+      ["a", "a", "b", "b"],
+    ]);
+    expect(run.calls.map((call) => call.cases)).toEqual([["a"], ["b"], ["c"]]);
+  });
+
+  it("hands no evidence to a call of another set", async () => {
+    const run = harness(async (options) => reportFor(options));
+    await runSweepPlan(PLAN, run.deps(new AbortController().signal));
+    expect(run.calls.map((call) => "exploreEvidence" in call)).toEqual([false, false, false]);
   });
 });

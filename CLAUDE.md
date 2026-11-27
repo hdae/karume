@@ -66,9 +66,15 @@ ADR that decided it holds it ([docs/decisions/](docs/decisions/)). The current f
 - `packages/gemma4-app-support/` (private) — the Gemma 4 helpers the playground's chat page and the workbench's Gemma
   entries share: the mounts and their entry points, the expert cache's text forms, the stop record and the turn timing;
   only those two apps import it
+- `packages/sweep-app-support/` (private) — what the workbench and the benchmark app share of the two sweeps: the typed
+  parameters, the record envelope and its path rule, the per-case loop with idle time, and the GEMV and geometry
+  sweeps' plans, runs, merged records and summaries; only those two apps import it
 - `apps/workbench/` (private) — the browser app and Node command that run checks and measurements on a GPU: one file is
   one entry, one JSON record per run under `outputs/workbench/` ([docs/spec/workbench.md](docs/spec/workbench.md)).
   `apps/playground/` (private) — the model pages
+- `apps/benchmark/` (private) — the page an outside collaborator opens to run the two sweeps' `explore` sets on their
+  own GPU (a static site, port 8792 in dev) and send back one file, which `node apps/benchmark/unpack.ts` turns into
+  workbench records ([docs/spec/benchmark.md](docs/spec/benchmark.md))
 - `packages/test-support/` (private) — the test harness (Dawn injection, fs helpers, the lane table, the port codemod).
   The porting rules are in the README of the same directory
 - `tools/exporter/` — PyPI `karume` = **the general-purpose core only** (src layout; the boundary is a machine gate —

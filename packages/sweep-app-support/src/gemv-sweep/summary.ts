@@ -16,7 +16,7 @@ import type {
   GeometrySweepTimingUnit,
 } from "@karume/runtime/tune";
 
-import type { EntryResult } from "../entry.ts";
+import type { EntryResult } from "../record.ts";
 import {
   cutShort,
   formatPerDispatch,

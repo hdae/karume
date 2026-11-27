@@ -2,9 +2,9 @@ import {
   type GeometrySweepOptions,
   type GeometrySweepReport,
   geometrySweepCases,
+  sweepCandidateKernelsId,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
-
 import {
   foldSweepEvent,
   INITIAL_LIVE,
@@ -12,10 +12,15 @@ import {
   type SweepLive,
   type SweepRunEvent,
   type SweepRunOutcome,
-} from "../src/geometry-sweep/run.ts";
-import type { SweepPlan } from "../src/geometry-sweep/settings.ts";
-import { geometrySweepResult, progressLine } from "../src/geometry-sweep/summary.ts";
+} from "@karume/sweep-app-support/geometry-sweep/run";
+import type { SweepPlan } from "@karume/sweep-app-support/geometry-sweep/settings";
 import {
+  geometrySweepResult,
+  progressLine,
+} from "@karume/sweep-app-support/geometry-sweep/summary";
+
+import {
+  CANDIDATE_GEOMETRY,
   CASE_A,
   CASE_B,
   type PerCaseOptions,
@@ -395,5 +400,54 @@ describe("progressLine", () => {
     expect(progressLine(plan, lost, 0)).toBe(
       "device lost (unknown): crashed — the sweep stops after case 1 / 3",
     );
+  });
+});
+
+describe("geometrySweepResult for the explore set", () => {
+  const EXPLORE: SweepPlan = { ...PLAN, candidateSet: "explore" };
+  /** The run of the explore plan: the second case skips the candidate the first ruled out. */
+  const exploreRun = (): Promise<SweepRunOutcome> =>
+    runSweepPlan(EXPLORE, {
+      signal: new AbortController().signal,
+      onEvent: () => undefined,
+      sweep: async (options) => {
+        const caseId = options.cases?.[0] ?? "";
+        const later = (options.exploreEvidence ?? []).length > 0;
+        const report = perCase(caseId, {
+          rows: later
+            ? [
+                row(caseId, true),
+                {
+                  caseId,
+                  op: "i8a8-conv3d",
+                  shape: caseId,
+                  censusCount: 1,
+                  geometry: "tile64x64r8x4w16x8k16",
+                  geometryParams: CANDIDATE_GEOMETRY,
+                  isDefault: false,
+                  skipped: true,
+                },
+              ]
+            : [row(caseId, true), row(caseId, false, { speedupVsDefault: 0.9 })],
+        });
+        return { ...report, settings: { ...report.settings, candidateSet: "explore" } };
+      },
+    });
+
+  it("says in the totals how many rows were skipped as dropped for their class (fault: none said)", async () => {
+    const [totals] = geometrySweepResult(EXPLORE, await exploreRun()).summary;
+    expect(totals).toBe(
+      "2 of 2 planned cases finished · 4 rows · 0 screened by the quick look (margin ×1.25) · 1 skipped as dropped for their class · 0 with an error · 0 not identical to the default",
+    );
+  });
+
+  it("merges the records into what one call over the cases holds: the cases in measuring order, the fingerprint over every row", async () => {
+    const record = recordOf(geometrySweepResult(EXPLORE, await exploreRun()).data);
+    expect(record.settings.candidateSet).toBe("explore");
+    expect(record.settings.cases).toEqual(EXPLORE.caseIds);
+    expect(record.rows.filter((one) => one.skipped === true).map(({ caseId }) => caseId)).toEqual([
+      CASE_B,
+    ]);
+    expect(record.candidateKernels).toBe(sweepCandidateKernelsId(record.rows, record.dp4a));
   });
 });

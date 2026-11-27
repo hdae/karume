@@ -7,9 +7,10 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
-import { readEnvironment } from "../environment.ts";
+import { readEnvironment } from "@karume/sweep-app-support/environment";
+import type { WorkbenchRecord } from "@karume/sweep-app-support/record";
+
 import type { RunHost } from "../execute.ts";
-import type { WorkbenchRecord } from "../record.ts";
 import { currentCheckout } from "./checkout.ts";
 import { browserDistributions } from "./distributions.ts";
 import { browserInputs } from "./inputs.ts";

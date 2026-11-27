@@ -22,8 +22,10 @@ import {
   parseSweepReport,
   verdictLines,
 } from "../src/tune/derive.ts";
-import { timestampUnitFor } from "../src/tune/sweep.ts";
-import { sweepCaseEntries } from "../src/tune/cases.ts";
+import { planSweep, timestampUnitFor } from "../src/tune/sweep.ts";
+import { caseShape, SWEEP_CASES, sweepCaseEntries } from "../src/tune/cases.ts";
+import { geometryExploreDropped } from "../src/tune/geometry-explore.ts";
+import { casePlan } from "../src/tune/harness.ts";
 import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { gemmGeometryForRows } from "../src/kernels/gemm-geometry.ts";
 import { gemmCandidate, i8a8Candidate, i8a8LinearCandidates } from "../src/tune/geometries.ts";
@@ -286,7 +288,10 @@ describe("runGeometrySweep: real GPU", () => {
         // screened, so none is left without its check whatever the device's timing does.
         quickLookMargin: 0,
         onProgress: (progress) => {
-          if (progress.kind !== "status") kinds.push(progress.kind);
+          // The plan and step events of a case are pinned by the explore set's GPU test below
+          if (progress.kind !== "status" && progress.kind !== "plan" && progress.kind !== "step") {
+            kinds.push(progress.kind);
+          }
           if (progress.kind === "row") notified.push(progress.row);
           if (progress.kind === "case") summaries.push(progress.summary);
         },
@@ -450,4 +455,177 @@ describe("runGeometrySweep: the evaluation set k88 sweeps its own case table (op
       "No case matches",
     );
   });
+});
+
+describe("runGeometrySweep: the explore set (options validation, before touching the GPU)", () => {
+  const caseOf = (id: string) => {
+    const found = SWEEP_CASES.find((sweepCase) => sweepCase.id === id);
+    if (found === undefined) throw new Error(`no case ${id}`);
+    return found;
+  };
+  /** A row of the default geometry of `id` as an earlier call's record holds it. */
+  const evidenceRow = (id: string): GeometrySweepRow => {
+    const sweepCase = caseOf(id);
+    const { defaultCandidate } = casePlan(sweepCase, 65535, false);
+    return {
+      caseId: id,
+      op: sweepCase.op,
+      shape: caseShape(sweepCase),
+      censusCount: sweepCase.censusCount,
+      geometry: defaultCandidate.name,
+      geometryParams: defaultCandidate.geometry,
+      isDefault: true,
+    };
+  };
+  const measured = "linear-m4096-n2048-k2048";
+  const earlier = "linear-m1024-n2048-k2048";
+
+  it("throws on geometries with the set, which chooses what it measures of full itself", async () => {
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          candidateSet: "explore",
+          cases: [measured],
+          geometries: [gemmCandidate({ regM: 4, regN: 4, wgX: 8, wgY: 8 }).name],
+        }),
+      Error,
+      "The explore set measures the candidates of full and drops them itself: geometries cannot narrow it",
+    );
+  });
+
+  it("throws on exploreEvidence with another set", async () => {
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          candidateSet: "full",
+          cases: [measured],
+          exploreEvidence: [evidenceRow(earlier)],
+        }),
+      Error,
+      "exploreEvidence is read by the explore set only, not by full",
+    );
+  });
+
+  it("throws on evidence of a case outside the set's table, of a case the call measures, or of another shape than the table's", async () => {
+    const explore = { candidateSet: "explore", cases: [measured] } as const;
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          ...explore,
+          exploreEvidence: [{ ...evidenceRow(earlier), caseId: "k88-matmul-m4096-n4096-k4096" }],
+        }),
+      Error,
+      "exploreEvidence holds a row of k88-matmul-m4096-n4096-k4096, which is not in the shape table of the explore set",
+    );
+    await assertRejects(
+      () => runGeometrySweep({ ...explore, exploreEvidence: [evidenceRow(measured)] }),
+      Error,
+      `exploreEvidence holds a row of ${measured}, which this sweep measures itself`,
+    );
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          ...explore,
+          exploreEvidence: [{ ...evidenceRow(earlier), shape: "M1 N1 K1" }],
+        }),
+      Error,
+      `exploreEvidence holds a row of ${earlier} with another op or shape than the table's`,
+    );
+  });
+
+  it("lists the cases in measuring order, class by class — what settings.cases of its record holds (fault: the order given)", () => {
+    const plan = planSweep({
+      candidateSet: "explore",
+      cases: ["linear-m16-n3072-k1024", "linear-m1024-n2048-k2048", "matmul-m16-n3072-k1024"],
+    });
+    // The table's order is m1024, m16 (linear), m16 (matmul): gemmRows > 512, then ≤ 16
+    assertEquals(plan.caseIds, [
+      "linear-m1024-n2048-k2048",
+      "linear-m16-n3072-k1024",
+      "matmul-m16-n3072-k1024",
+    ]);
+    assertEquals(
+      plan.cases.map(({ id }) => id),
+      plan.caseIds,
+    );
+  });
+});
+
+describe("runGeometrySweep: real GPU — the explore set", () => {
+  // Two small cases of one class (i8a8.attentionQk), in the table's order
+  const ids = ["i8a8-attention-qk-self-m1024-n1024", "i8a8-attention-qk-cross-m1024-n512"];
+
+  it.skipIf(adapter === null)(
+    "measures every candidate in the first case, skips in the second exactly what the first ruled out, and its plan and step events and rows agree with the record",
+    async () => {
+      const plans: Extract<GeometrySweepProgress, { kind: "plan" }>[] = [];
+      const steps: Extract<GeometrySweepProgress, { kind: "step" }>[] = [];
+      const notified: GeometrySweepRow[] = [];
+      const swept = await runGeometrySweep({
+        candidateSet: "explore",
+        cases: ids,
+        rounds: 1,
+        onProgress: (progress) => {
+          if (progress.kind === "plan") plans.push(progress);
+          if (progress.kind === "step") steps.push(progress);
+          if (progress.kind === "row") notified.push(progress.row);
+        },
+      });
+      assertEquals([swept.settings.candidateSet, swept.settings.cases], ["explore", ids]);
+      assertRecordFields(swept);
+      assertEquals(notified, swept.rows);
+      for (const row of swept.rows) assertEquals(row.error, undefined, row.error);
+      for (const row of swept.rows.filter(({ rounds }) => rounds !== undefined)) {
+        if (!row.isDefault) assertEquals(row.identicalToDefault, true, row.geometry);
+      }
+      const [first, second] = ids.map((id) => swept.rows.filter((row) => row.caseId === id));
+      assertEquals(
+        first.filter((row) => row.skipped === true),
+        [],
+      );
+      const secondCase = SWEEP_CASES.find(({ id }) => id === ids[1]);
+      assert(secondCase !== undefined);
+      const dropped = geometryExploreDropped(secondCase, first);
+      const skipped = second.filter((row) => row.skipped === true);
+      assertEquals(new Set(skipped.map(({ geometry }) => geometry)), new Set(dropped));
+      assertEquals(second.length, first.length);
+      assertEquals(
+        plans.map(({ caseId, index, geometries, skipped: count }) => [
+          caseId,
+          index,
+          geometries,
+          count,
+        ]),
+        [
+          [ids[0], 0, first.length, 0],
+          [ids[1], 1, second.length - skipped.length, skipped.length],
+        ],
+      );
+      for (const [index, caseId] of ids.entries()) {
+        const rows = swept.rows.filter((row) => row.caseId === caseId);
+        const totals = new Map(
+          steps.filter((step) => step.caseId === caseId).map((step) => [step.phase, step.total]),
+        );
+        assertEquals(
+          Object.fromEntries(totals),
+          {
+            prepare: plans[index].geometries,
+            "warm-start": 1,
+            "quick-look": plans[index].geometries,
+            timing: rows.filter(({ rounds }) => rounds !== undefined).length,
+            repeat: 1,
+          },
+          caseId,
+        );
+      }
+      // A derivation input like a full record of part of the candidates
+      if (timestampQuery) {
+        const { profile } = deriveGeometryProfile(
+          [{ report: swept, path: "explore.json", sha256: "explore" }],
+          { id: "explore", optIn: true },
+        );
+        assert(profile.i8a8.attentionQk !== undefined);
+      }
+    },
+  );
 });

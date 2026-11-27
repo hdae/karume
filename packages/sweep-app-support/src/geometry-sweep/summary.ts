@@ -10,7 +10,7 @@ import {
   geometrySweepCases,
 } from "@karume/runtime/tune";
 
-import type { EntryResult } from "../entry.ts";
+import type { EntryResult } from "../record.ts";
 import {
   cutShort,
   formatPerDispatch,
@@ -41,7 +41,8 @@ export const progressLine = (plan: SweepPlan, live: SweepLive, now: number): str
 /**
  * Cases planned and finished, a case cut short (Cancel or a device loss stopped it midway: its rows so
  * far are in the record, and it is not a finished case), rows, the rows the quick look screened out
- * (with its margin), failed rows, rows whose output differed, and why the run stopped.
+ * (with its margin), for the `explore` set the rows skipped because an earlier case of their class
+ * dropped the geometry, failed rows, rows whose output differed, and why the run stopped.
  */
 const totalsLine = (
   plan: SweepPlan,
@@ -58,6 +59,9 @@ const totalsLine = (
     plan.quickLookMargin === 0
       ? "quick look off"
       : `${rows.filter((row) => row.screened === true).length} screened by the quick look (margin ×${plan.quickLookMargin})`,
+    plan.candidateSet === "explore"
+      ? `${rows.filter((row) => row.skipped === true).length} skipped as dropped for their class`
+      : undefined,
     `${rows.filter((row) => row.error !== undefined).length} with an error`,
     `${rows.filter((row) => row.identicalToDefault === false).length} not identical to the default`,
     stopText(stop),

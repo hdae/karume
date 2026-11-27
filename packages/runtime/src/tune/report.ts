@@ -12,7 +12,7 @@ import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import type { SweepOp } from "./cases.ts";
 import type { GeometryProfileFamilyIds } from "./families.ts";
-import type { CandidateSet } from "./geometries.ts";
+import type { SweepSet } from "./geometries.ts";
 
 /**
  * The record format. /2 = /1 with `nsPerDispatch` renamed to the unit-neutral `perDispatch`, plus
@@ -21,6 +21,12 @@ import type { CandidateSet } from "./geometries.ts";
  * per op family, `caseSets` and `defaultKernels` (ADR 0117 addendum 2026-11-12). /4 = /3 with the
  * quick look (harness.ts's protocol rule 4): `settings.quickLookMargin`, a row's `quickPerDispatch`
  * and `screened`, a case's `screened`; the generator reads /4 only.
+ *
+ * A record of the `explore` set (geometries.ts's `EXPLORE_SET`) is a /4 record: its rows of a
+ * candidate the set no longer measured in a case carry `skipped`, which a reader takes as no
+ * observation, as it takes a screened row. A reader that predates the set refuses such a record: by
+ * `candidateKernels` when it has skipped rows (that reader's fingerprint counts their kernels, the
+ * writer's does not), by its candidate set otherwise.
  */
 export const REPORT_FORMAT = "karume-geometry-sweep/4";
 
@@ -88,6 +94,13 @@ export type SweepRow = {
    * no derivation reads it as evidence.
    */
   readonly screened?: true;
+  /**
+   * The `explore` set did not measure this geometry in this case: an earlier case of its class ruled
+   * it out there (geometry-explore.ts). The row has only the geometry's identity fields — no launch,
+   * no quick time, no rounds, no digest, no comparison with the default — it is never the default,
+   * and no derivation reads it as evidence.
+   */
+  readonly skipped?: true;
   /** The number of dispatches stacked in one pass. */
   readonly reps?: number;
   /** The whole pass's time per measurement round (unit: the report's `gpuTiming.unit`). */
@@ -241,10 +254,10 @@ export type Report = {
   readonly dp4a: boolean;
   readonly settings: {
     /**
-     * The candidate set (`quick` / `quick+` / `full`). JSON from before this field has only
-     * `quick`.
+     * The candidate set (`quick` / `quick+` / `full`, the evaluation set `k88`, or `explore` —
+     * `full`'s candidates class by class). JSON from before this field has only `quick`.
      */
-    readonly candidateSet: CandidateSet;
+    readonly candidateSet: SweepSet;
     /** Compatibility field: true only when `candidateSet === "quick"` (false for `quick+`). */
     readonly quick: boolean;
     readonly ops: readonly SweepOp[];

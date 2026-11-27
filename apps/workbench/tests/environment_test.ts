@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
+import { dawnBackend, readEnvironment } from "@karume/sweep-app-support/environment";
 
-import { dawnBackend, readEnvironment } from "../src/environment.ts";
 import { fakeWebGpu } from "./helpers/fake-webgpu.ts";
 
 const INFO = {

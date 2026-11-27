@@ -1,16 +1,16 @@
 /**
- * What the sweep entries (`geometry-sweep`, `gemv-sweep`) share: one sweep call per planned case with
- * idle time before every case but the first (cooling — heat moves the re-measured default or
- * baseline a record's ratios rest on), the cancel and device-loss rules of that loop, the live view
- * folded from its events, the checks and fields of merging the per-case records into one, the verdict
- * order, and the summary's text helpers. Each entry supplies its sweep call and its record's own
- * fields; the loop is tested without a GPU through the injected sweep and idle wait.
+ * What the sweep entries (`geometry-sweep`, `gemv-sweep`) share, in the workbench and in the
+ * benchmark app: one sweep call per planned case with idle time before every case but the first
+ * (cooling — heat moves the re-measured default or baseline a record's ratios rest on), the cancel
+ * and device-loss rules of that loop, the live view folded from its events, the checks and fields of
+ * merging the per-case records into one, the verdict order, and the summary's text helpers. Each
+ * entry supplies its sweep call and its record's own fields; the loop is tested without a GPU
+ * through the injected sweep and idle wait.
  */
 
 import type { GeometrySweepTimingUnit } from "@karume/runtime/tune";
 
-import type { Verdict } from "./entry.ts";
-import { messageText } from "./record.ts";
+import { messageText, type Verdict } from "./record.ts";
 
 /** What the loop reports while it goes. */
 export type PerCaseEvent<P> =
@@ -136,8 +136,8 @@ export const runPerCase = async <R extends PerCaseRecord, P>(
 };
 
 /**
- * The progress both sweeps report; the payload of `started` is each sweep's own. The GEMV sweep's
- * `plan` and `step` events (a case's row counts, a unit of a row count) leave the live line as it is.
+ * The progress both sweeps report; the payload of `started` is each sweep's own. The `plan` and
+ * `step` events (what a case plans, a unit of its measurement) leave the live line as it is.
  */
 export type PerCaseProgress =
   | { readonly kind: "started" }
@@ -325,6 +325,15 @@ export type MergeOptions = {
   /** Cancel stopped the sweep before every planned case had a record. */
   readonly cancelledBetweenCases: boolean;
 };
+
+/**
+ * The merged record's `gpuTiming.quantized`: true when any per-case record's rounds looked quantized
+ * (the safe side — the larger rounding step for the error bound, never the smaller). Each call
+ * judges its own rows; the runtime does not export the judgement over all of them.
+ */
+export const mergedQuantized = (
+  reports: readonly { readonly gpuTiming: { readonly quantized: boolean } }[],
+): boolean => reports.some((report) => report.gpuTiming.quantized);
 
 /** What the merge checks and reads of a per-case record besides its rows. */
 export type MergeableRecord = PerCaseRecord & {

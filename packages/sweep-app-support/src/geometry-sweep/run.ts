@@ -9,6 +9,7 @@ import {
   type GeometrySweepOptions,
   type GeometrySweepProgress,
   type GeometrySweepReport,
+  type GeometrySweepRow,
   type GeometrySweepTimingUnit,
   runGeometrySweep,
 } from "@karume/runtime/tune";
@@ -52,25 +53,32 @@ export type SweepRunDeps = {
 /**
  * Sweeps the plan's cases one `runGeometrySweep` call each with the plan's candidate set, op
  * families, geometries, quick-look margin and rounds, idling before every case but the first (`runPerCase` — its cancel and
- * device-loss rules). Never rejects: the records so far come back with the reason the run ended.
+ * device-loss rules). An `explore` call takes the rows the calls before it measured
+ * (`exploreEvidence`), as one call over the cases drops a candidate by the cases it measured before.
+ * Never rejects: the records so far come back with the reason the run ended.
  */
 export const runSweepPlan = (plan: SweepPlan, deps: SweepRunDeps): Promise<SweepRunOutcome> => {
   const sweep = deps.sweep ?? runGeometrySweep;
+  const evidence: GeometrySweepRow[] = [];
   return runPerCase<GeometrySweepReport, GeometrySweepProgress>(plan.caseIds, plan.idleSeconds, {
     signal: deps.signal,
     onEvent: deps.onEvent,
-    sweep: (caseId, signal, onProgress) =>
-      sweep({
+    sweep: async (caseId, signal, onProgress) => {
+      const report = await sweep({
         gpu: deps.gpu,
         candidateSet: plan.candidateSet,
         ops: plan.ops,
         cases: [caseId],
         ...(plan.geometries.length === 0 ? {} : { geometries: plan.geometries }),
+        ...(plan.candidateSet === "explore" ? { exploreEvidence: [...evidence] } : {}),
         quickLookMargin: plan.quickLookMargin,
         rounds: plan.rounds,
         signal,
         onProgress,
-      }),
+      });
+      evidence.push(...report.rows);
+      return report;
+    },
     ...(deps.wait === undefined ? {} : { wait: deps.wait }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
   });

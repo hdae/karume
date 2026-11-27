@@ -52,6 +52,10 @@
  * 6. Never compare absolute values with another machine — only ratios within one machine (speed
  *    relative to the default geometry) are valid.
  *
+ * The `explore` set (sweep.ts, geometry-explore.ts) runs `full`'s candidates class by class: a
+ * candidate an earlier case of its class ruled out takes none of these steps in the later cases of
+ * the class, and its row there is a skipped row.
+ *
  * NOTE: unlike opbench, the input of the `reps` estimate is the **wall clock** (stack `reps` by
  * doubling until the pass's wall clock reaches half the target, then take the slope of the last two
  * points = the increment of one dispatch). Deno does not convert timestamps to ns (1 tick = 52.08
@@ -242,7 +246,10 @@ const FILL_CHUNK_BYTES = 16 * 1024 * 1024;
 export type SweepSettings = {
   /** The number of measurement rounds (default: measurement.ts's `ROUNDS`). */
   readonly rounds: number;
-  /** The candidate set ({@link CandidateSet} in geometries.ts). */
+  /**
+   * The candidate set ({@link CandidateSet} in geometries.ts — `full` for a sweep of the `explore`
+   * set, which measures `full`'s candidates).
+   */
   readonly candidateSet: CandidateSet;
   /**
    * The candidate geometries to measure, by name, in this order ({@link selectedCandidates} —
@@ -256,11 +263,60 @@ export type SweepSettings = {
    * the entry point; 0 turns the quick look off and every geometry is timed).
    */
   readonly quickLookMargin: number;
+  /**
+   * The candidates of a case that are not measured, by name, given the rows of the cases the call
+   * measured before it, in their order (the `explore` set's rule — sweep.ts, geometry-explore.ts):
+   * each gets a skipped row and takes none of the case's steps. Absent: every candidate is measured.
+   */
+  readonly droppedFor?: (target: SweepCase, earlier: readonly SweepRow[]) => ReadonlySet<string>;
+};
+
+/** The phases of a case's measurement ({@link sweepCase}'s steps), in their order. */
+export type GeometrySweepPhase = "prepare" | "warm-start" | "quick-look" | "timing" | "repeat";
+
+/**
+ * Where a case's measurement stands: `done` of the `total` units of a phase — a geometry's pipeline
+ * (`prepare`), the warm start (one unit), a geometry's quick look (`quick-look`), a geometry's
+ * timing: its calibration, idle runs and rounds (`timing`, the geometries that go on), the default
+ * geometry's re-measurement (`repeat`, one unit). A phase reports 0 of its total when it begins and
+ * each unit when it ends (a unit that failed counts as done). The quick look is absent at a margin of
+ * 0, and a phase with nothing to do reports nothing.
+ */
+export type GeometrySweepStep = {
+  readonly caseId: string;
+  readonly phase: GeometrySweepPhase;
+  readonly done: number;
+  readonly total: number;
+};
+
+/** A case as its `plan` event states it, before it is measured. */
+export type GeometrySweepPlannedCase = {
+  readonly caseId: string;
+  /** The case's place among the planned cases of the call, from 0. */
+  readonly index: number;
+  /**
+   * The geometries planned: the default geometry and the candidates that are not dropped. The
+   * `prepare` step says how many are prepared (none when the case cannot be planned).
+   */
+  readonly geometries: number;
+  /**
+   * The candidates the `explore` set dropped for the case's class (0 for another set): a skipped row
+   * each, nothing prepared.
+   */
+  readonly skipped: number;
 };
 
 export type SweepHooks = {
   /** One progress line (the page's status line, the CLI's standard error). */
   readonly onProgress?: (message: string) => void;
+  /** Called when a case starts, with what it plans ({@link runSweep}). */
+  readonly onPlan?: (plan: GeometrySweepPlannedCase) => void;
+  /**
+   * Called for each unit of a case's measurement ({@link GeometrySweepStep}). It runs between timed
+   * passes, so it MUST stay cheap (a page should only store the event and paint on its own
+   * schedule).
+   */
+  readonly onStep?: (step: GeometrySweepStep) => void;
   /** Called each time a row is final (the default geometry's row comes first). */
   readonly onRow?: (row: SweepRow) => void;
   /**
@@ -912,6 +968,14 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
 };
 
 /**
+ * The name of a case's default geometry, read from the case plan the sweep runs, which builds no GPU
+ * object: the workgroup limit and dp4a do not enter any plan's default candidate, so it needs no
+ * device.
+ */
+const defaultGeometryName = (sweepCase: SweepCase): string =>
+  casePlan(sweepCase, Number.POSITIVE_INFINITY, false).defaultCandidate.name;
+
+/**
  * The candidates one case measures: every candidate of `set` ({@link candidatesFor}) when
  * `geometries` is absent, else those geometries by name, in the order given (ADR 0117 addendum
  * 2026-11-12, "the `geometries` option"). A name that is not a candidate of the case throws, and
@@ -928,10 +992,8 @@ export const selectedCandidates = (
   if (geometries === undefined) return candidates;
   // MUST: refuse the default's name. It is measured only as the default row (sweepCase drops it
   // from the candidates), so `settings.geometries` would list as a measured candidate a geometry
-  // that has no candidate row. The name is read from the case plan the sweep runs, which builds no
-  // GPU object; the workgroup limit and dp4a do not enter any plan's default candidate, so the
-  // check needs no device
-  const defaultName = casePlan(sweepCase, Number.POSITIVE_INFINITY, false).defaultCandidate.name;
+  // that has no candidate row
+  const defaultName = defaultGeometryName(sweepCase);
   if (geometries.includes(defaultName)) {
     throw new Error(
       `Geometry ${defaultName} is the default geometry of case ${sweepCase.id}: its row is always measured, so do not list it in geometries`,
@@ -1938,6 +2000,15 @@ const screenedRow = (
 });
 
 /**
+ * The row of a candidate the `explore` set dropped for the case's class: its identity only — it was
+ * not prepared, so it has no launch either.
+ */
+const skippedRow = (sweepCase: SweepCase, candidate: GeometryCandidate): SweepRow => ({
+  ...rowHead(sweepCase, candidate, false),
+  skipped: true,
+});
+
+/**
  * Measures one prepared geometry (protocol rules 1–3, its calibration going on from its quick
  * look's reps when it had one) and reads its output's digest.
  */
@@ -1985,6 +2056,8 @@ const measureGeometry = async (
 
 /** Where one geometry of a case stands before its row is made. */
 type GeometryState =
+  /** Dropped for the case's class (the `explore` set): its skipped row, no step. */
+  | { readonly kind: "skipped" }
   | { readonly kind: "planned" }
   | { readonly kind: "prepared"; readonly ready: ReadyLaunch; readonly quick?: QuickLook }
   | { readonly kind: "failed"; readonly cause: unknown };
@@ -2012,22 +2085,44 @@ export type CaseResult = {
  * rest become failure rows; if aborted, no rows are made for the rest (and no re-measurement — an
  * abort before the timing makes no row of the case). The case's wall clock (`elapsedMs`) covers every
  * step from planning to the re-measurement.
+ *
+ * A candidate named in `settings.dropped` (the `explore` set: ruled out by an earlier case of the
+ * class) takes none of these steps and gets a skipped row in its place, also where every other
+ * geometry gets a failure row. Each step is reported as it goes (`hooks.onStep`,
+ * {@link GeometrySweepStep}).
  */
 export const sweepCase = async (
   context: SweepContext,
   target: SweepCase,
   candidates: readonly GeometryCandidate[],
-  settings: Pick<SweepSettings, "rounds" | "quickLookMargin">,
+  settings: Pick<SweepSettings, "rounds" | "quickLookMargin"> & {
+    readonly dropped?: ReadonlySet<string>;
+  },
   hooks: SweepHooks = {},
 ): Promise<CaseResult> => {
   const { gpu } = context;
   const started = performance.now();
   const rows: SweepRow[] = [];
+  const dropped = settings.dropped ?? new Set<string>();
   let aborted = false;
   const emit = (row: SweepRow): void => {
     rows.push(row);
     hooks.onRow?.(row);
   };
+  const step = (phase: GeometrySweepPhase, done: number, total: number): void =>
+    hooks.onStep?.({ caseId: target.id, phase, done, total });
+  /**
+   * The row a geometry gets when the case cannot be measured: a failure row, or the skipped row of a
+   * dropped candidate (it was not going to be measured).
+   */
+  const unmeasuredRow = (
+    candidate: GeometryCandidate,
+    isDefault: boolean,
+    cause: unknown,
+  ): SweepRow =>
+    !isDefault && dropped.has(candidate.name)
+      ? skippedRow(target, candidate)
+      : errorRow(target, candidate, isDefault, cause);
   const finish = (summary: Omit<CaseSummary, "elapsedMs" | "screened">): CaseResult => {
     const timed: CaseSummary = {
       ...summary,
@@ -2043,7 +2138,7 @@ export const sweepCase = async (
   } catch (cause) {
     // The default geometry was not resolved either, so only the candidates' rows are kept as
     // failures
-    candidates.forEach((candidate) => emit(errorRow(target, candidate, false, cause)));
+    candidates.forEach((candidate) => emit(unmeasuredRow(candidate, false, cause)));
     return finish({ caseId: target.id });
   }
   const ordered = [
@@ -2061,7 +2156,7 @@ export const sweepCase = async (
   try {
     resources = await createResources(context, plan.resources);
   } catch (cause) {
-    ordered.forEach((candidate, index) => emit(errorRow(target, candidate, index === 0, cause)));
+    ordered.forEach((candidate, index) => emit(unmeasuredRow(candidate, index === 0, cause)));
     return finish({ caseId: target.id });
   }
   try {
@@ -2075,23 +2170,32 @@ export const sweepCase = async (
         }
       }
     } catch (cause) {
-      ordered.forEach((candidate, index) => emit(errorRow(target, candidate, index === 0, cause)));
+      ordered.forEach((candidate, index) => emit(unmeasuredRow(candidate, index === 0, cause)));
       return finish({ caseId: target.id });
     }
     const output = resources.get(plan.output);
     if (output === undefined) throw new Error(`${target.id}: output ${plan.output} is missing`);
-    const states: GeometryState[] = ordered.map(() => ({ kind: "planned" }));
+    const states: GeometryState[] = ordered.map((candidate, index) =>
+      index > 0 && dropped.has(candidate.name) ? { kind: "skipped" } : { kind: "planned" },
+    );
+    /** The geometries in `kind` now. */
+    const countIn = (kind: GeometryState["kind"]): number =>
+      states.filter((state) => state.kind === kind).length;
     const prepared: ReadyLaunch[] = [];
     const abortRequested = (): boolean => hooks.signal?.aborted === true;
     let reference: DefaultReference = {};
     try {
-      // 1. Every pipeline first (a compile idles the device)
+      // 1. Every pipeline first (a compile idles the device); a dropped candidate is not prepared
+      const toPrepare = countIn("planned");
+      if (toPrepare > 0) step("prepare", 0, toPrepare);
+      let preparedCount = 0;
       for (const [index, candidate] of ordered.entries()) {
         if (abortRequested()) {
           aborted = true;
           return finish({ caseId: target.id });
         }
         if (gpu.lost !== undefined) break;
+        if (states[index].kind !== "planned") continue;
         try {
           const ready = await prepareLaunch(context, plan.launch(candidate), resources);
           prepared.push(ready);
@@ -2099,8 +2203,12 @@ export const sweepCase = async (
         } catch (cause) {
           states[index] = { kind: "failed", cause };
         }
+        preparedCount += 1;
+        step("prepare", preparedCount, toPrepare);
       }
       // 2. The warm start, on the default geometry unless it failed (then on the next that did not)
+      const warming = countIn("prepared") > 0 && gpu.lost === undefined;
+      if (warming) step("warm-start", 0, 1);
       for (const [index, state] of states.entries()) {
         if (abortRequested()) {
           aborted = true;
@@ -2116,9 +2224,14 @@ export const sweepCase = async (
           states[index] = { kind: "failed", cause };
         }
       }
-      // 3. The quick looks, in an order that does not follow the candidates'
+      if (warming) step("warm-start", 1, 1);
+      // 3. The quick looks, in an order that does not follow the candidates' (the order of a case
+      // is the same whatever is dropped: its dropped candidates keep their places in it)
       if (settings.quickLookMargin > 0) {
         const order = quickLookOrder([...states.keys()], target.id);
+        const toLook = countIn("prepared");
+        if (toLook > 0 && gpu.lost === undefined) step("quick-look", 0, toLook);
+        let lookedCount = 0;
         for (const [position, index] of order.entries()) {
           if (abortRequested()) {
             aborted = true;
@@ -2133,6 +2246,8 @@ export const sweepCase = async (
           } catch (cause) {
             states[index] = { kind: "failed", cause };
           }
+          lookedCount += 1;
+          step("quick-look", lookedCount, toLook);
         }
       }
       // A geometry is judged against the default in every case of its class: the default's quick
@@ -2152,6 +2267,11 @@ export const sweepCase = async (
         () => ({ against: "reference", reference: plan.defaultCandidate.name }),
       );
       // 4. The default geometry and the candidates that go on, in candidate order
+      const goingOn = (index: number): boolean =>
+        states[index].kind === "prepared" && goesOn[index] === true;
+      const toTime = ordered.filter((_, index) => goingOn(index)).length;
+      if (toTime > 0 && gpu.lost === undefined) step("timing", 0, toTime);
+      let timedCount = 0;
       for (const [index, candidate] of ordered.entries()) {
         if (abortRequested()) {
           aborted = true;
@@ -2159,15 +2279,20 @@ export const sweepCase = async (
         }
         const isDefault = index === 0;
         const state = states[index];
+        if (state.kind === "skipped") {
+          emit(skippedRow(target, candidate));
+          continue;
+        }
         if (gpu.lost !== undefined || state.kind === "planned") {
           const lost = new Error(`device lost: ${gpu.lost?.message ?? "no loss reported"}`);
           emit(errorRow(target, candidate, isDefault, lost));
           continue;
         }
         let row: SweepRow;
+        const timed = goingOn(index);
         if (state.kind === "failed") {
           row = errorRow(target, candidate, isDefault, state.cause);
-        } else if (goesOn[index] !== true) {
+        } else if (!timed) {
           row = screenedRow(target, candidate, state.ready, state.quick);
         } else {
           hooks.onProgress?.(`${target.id}: ${candidate.name} (${index + 1}/${ordered.length})`);
@@ -2190,6 +2315,10 @@ export const sweepCase = async (
           reference = { perDispatch: row.perDispatch, outputSha256: row.outputSha256 };
         }
         emit(compareToDefault(row, reference));
+        if (timed) {
+          timedCount += 1;
+          step("timing", timedCount, toTime);
+        }
       }
     } finally {
       for (const ready of prepared) ready.params.destroy();
@@ -2206,6 +2335,7 @@ export const sweepCase = async (
       return finish({ caseId: target.id });
     }
     hooks.onProgress?.(`${target.id}: re-measuring the default geometry`);
+    step("repeat", 0, 1);
     let repeat: Pick<CaseSummary, "defaultRepeat" | "defaultRepeatError">;
     try {
       const { timing } = await timeCandidate(
@@ -2233,6 +2363,7 @@ export const sweepCase = async (
     } catch (cause) {
       repeat = { defaultRepeatError: describeCause(cause) };
     }
+    step("repeat", 1, 1);
     // onCase is outside the re-measurement's try (the MUST at the top of the function — a user
     // exception does not turn into a re-measurement failure, and nothing is notified twice)
     return finish({ caseId: target.id, ...repeat });
@@ -2254,8 +2385,28 @@ export type SweepResult = {
 };
 
 /**
+ * The geometries {@link sweepCase} plans for a case: its default geometry and every candidate that is
+ * neither the default nor dropped; none when the case cannot be planned (its rows are then failure
+ * rows, and nothing is prepared).
+ */
+const plannedGeometries = (
+  target: SweepCase,
+  candidates: readonly GeometryCandidate[],
+  dropped: ReadonlySet<string>,
+): number => {
+  let defaultName: string;
+  try {
+    defaultName = defaultGeometryName(target);
+  } catch {
+    return 0;
+  }
+  return 1 + candidates.filter(({ name }) => name !== defaultName && !dropped.has(name)).length;
+};
+
+/**
  * Sweeps the cases in order (if the device is lost or the sweep aborted, the remaining cases are
- * not run).
+ * not run). Each case starts with its `plan` event (`hooks.onPlan`); with `settings.droppedFor`, a
+ * case does not measure the candidates it names from the rows of the cases before it.
  */
 export const runSweep = async (
   context: SweepContext,
@@ -2266,17 +2417,25 @@ export const runSweep = async (
   const rows: SweepRow[] = [];
   const summaries: CaseSummary[] = [];
   let aborted = false;
-  for (const target of cases) {
+  for (const [index, target] of cases.entries()) {
     if (context.gpu.lost !== undefined) break;
     if (hooks.signal?.aborted === true) {
       aborted = true;
       break;
     }
+    const candidates = selectedCandidates(target, settings.candidateSet, settings.geometries);
+    const dropped = settings.droppedFor?.(target, rows) ?? new Set<string>();
+    hooks.onPlan?.({
+      caseId: target.id,
+      index,
+      geometries: plannedGeometries(target, candidates, dropped),
+      skipped: candidates.filter(({ name }) => dropped.has(name)).length,
+    });
     const result = await sweepCase(
       context,
       target,
-      selectedCandidates(target, settings.candidateSet, settings.geometries),
-      settings,
+      candidates,
+      { rounds: settings.rounds, quickLookMargin: settings.quickLookMargin, dropped },
       hooks,
     );
     rows.push(...result.rows);

@@ -6,8 +6,9 @@
 
 import type { SourceKind } from "@karume/local-distributions/browser";
 import { acquireGpu, type AcquireGpuOptions, type GpuContext } from "@karume/runtime";
+import type { BooleanParameter, ChoiceParameter } from "@karume/sweep-app-support/parameters";
 
-import type { BooleanParameter, ChoiceParameter, GpuOptions } from "./entry.ts";
+import type { GpuOptions } from "./entry.ts";
 
 /**
  * How a browser reads the distribution (`openDistribution`'s `source`): `cached` first, the default —

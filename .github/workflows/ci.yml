@@ -55,6 +55,11 @@ jobs:
         # setup file and touches no GPU: the entries' pure parts and the write-back run on fakes and
         # a temporary directory, so it needs no GPU flag.
         run: pnpm --filter @karume/workbench test
+      - name: Test (benchmark)
+        # The benchmark app's suite is outside the lanes too (its own vite.config.ts). It loads no
+        # Dawn setup file and touches no GPU: the run, the progress and the file run on fake sweeps
+        # and a temporary directory, so it needs no GPU flag.
+        run: pnpm --filter @karume/benchmark test
 
   publish-dry-run:
     # `vp check` type-checks with the DOM lib and cannot see where Deno's lib differs (Deno's

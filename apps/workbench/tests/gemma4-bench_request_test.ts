@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
 import gemmaBench from "../src/entries/local/gemma4-bench.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 import { benchSettingsOf, openBenchArms, parseArmsText } from "../src/gemma4-bench/request.ts";
 
 import { MOBILE, QAT, REGULAR } from "./helpers/gemma4-bench-manifests.ts";

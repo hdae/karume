@@ -16,8 +16,14 @@
 import { loadManifest } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
+import {
+  choiceValue,
+  integerValue,
+  numberValue,
+  textValue,
+} from "@karume/sweep-app-support/parameters";
 
-import { choiceValue, type Entry, integerValue, numberValue, textValue } from "../../entry.ts";
+import type { Entry } from "../../entry.ts";
 import { SOURCE_KINDS, sourceParameter } from "../../local-parameters.ts";
 import {
   COMPONENT_TARGETS,

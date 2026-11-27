@@ -6,7 +6,9 @@
  * lists them.
  */
 
-import { type Entry, ENTRY_ID } from "./entry.ts";
+import { ENTRY_ID } from "@karume/sweep-app-support/record";
+
+import type { Entry } from "./entry.ts";
 import { LOCAL_MODULES } from "./local-entries.ts";
 
 const MODULES = import.meta.glob<Entry>("./entries/*.ts", { eager: true, import: "default" });

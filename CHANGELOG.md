@@ -15,6 +15,58 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/runtime/tune`: the GEMV sweep's `explore` candidate set (`runGemvSweep({ candidateSet: "explore" })`), a
+  short run of `full`'s row counts. Twelve sentinel cases of the whole case table (`gemvSentinels`,
+  `GEMV_SENTINEL_COUNT`: the case nearest to all, then again and again the one farthest from those chosen —
+  `gemvCaseDistance`) are measured first with every candidate; every other case measures at M = 1 the references, the
+  winners of its nearest sentinel of the same storage and their grid neighbours (`gemvExploreSelection`,
+  `gemvGridNeighbours`; every candidate when no sentinel of its storage has a winner), and at 4 and 8 rows the three
+  fastest adoptable rows of its own M = 1 group. Its quick-look margin is ×1.10 (`EXPLORE_QUICK_LOOK_MARGIN`;
+  `gemvSweepQuickLookMargin` gives a set's margin). A caller that sweeps one case per call measures in
+  `gemvExploreOrder` and hands the sentinels earlier calls measured in as `GemvSweepOptions.sentinelEvidence`
+  (`gemvSweepExploreEvidence` reads them from a record; types `GemvExploreEvidence`, `GemvExploreRow`). Replayed on
+  recorded sweeps it halves the time in the groups and leaves the derivation's decisions unchanged on an RTX 5070 Ti
+  and nearly unchanged on an Apple M2. Its record is a `karume-gemv-sweep/4` record with rows only of the kernels it
+  measured, which `deriveLinearGemvChoices` reads by its usual rules; `planGemvMeasurements` counts only its timed
+  rows.
+- `@karume/runtime/tune`: the geometry sweep's `explore` candidate set (`runGeometrySweep({ candidateSet: "explore"
+  })`): `full`'s candidates on its case table, measured class by class (`geometryExploreOrder`; the class of a case is
+  `geometryCaseClass`, type `GeometryCaseClass` — the profile field the derivation reads it in). A candidate that a
+  case of the class screened out, failed, found not identical to the default or timed below ×1 the default
+  (`EXPLORE_KEEP_SPEEDUP`) is not measured in the later cases of the class: its row there is a skipped row
+  (`skipped: true`, the geometry's identity only). A caller that sweeps one case per call hands the earlier calls' rows
+  in as `GeometrySweepOptions.exploreEvidence`. On two `full` records of an RTX 5070 Ti it would have timed 1,439 and
+  1,443 candidate rows where `full` timed 3,278 and 3,279 (about 58 % less time in the cases), and the derivation
+  adopts the same eleven fields from them. The record is `karume-geometry-sweep/4` with `full`'s case-set versions
+  and default fingerprints; its `candidateKernels` leaves the skipped rows out.
+- `@karume/runtime/tune`: both sweeps report, besides their status lines, a `plan` event when a case starts and a
+  `step` event per unit of its measurement (a phase and its done / total), for a two-level progress display (types
+  `GemvSweepPhase`, `GemvSweepPlannedRowCount`, `GemvSweepStep`, `GeometrySweepPhase`, `GeometrySweepPlannedCase`,
+  `GeometrySweepStep`).
+- `@karume/runtime/tune`: what the derivations read in one record, for a reader that wants to know what a record could
+  bring before a table is derived. GEMV: `GEMV_MIN_SPEEDUP` (×1.10), `gemvGroupRole` (type `GemvGroupRole`: what a
+  class's kernels at a row count are read for), `gemvTableCandidate` (a row a table can hold), `gemvClassReference`
+  (the kernel a class is read against — the current default profile's choice), `gemvReferenceRefusal` (type
+  `GemvReferenceRefusal`: why a group's row of it is no reference) and `gemvRowReading` (type `GemvRowReading`: how a
+  row reads against the reference's time). Geometry: `GEOMETRY_MIN_SPEEDUP` (×1.05, the default of `minSpeedup`),
+  `geometryCaseExclusion` and `geometryRowExclusion` (why a case, or one candidate's observation of it, is dropped from
+  a record's ratio material) and `geometryTimestampQuantum` (the record's rounding step). The derivations use these
+  same functions, so the results of `deriveLinearGemvChoices` and `deriveGeometryProfile` do not change.
+- The benchmark app (`apps/benchmark`, private): a small static page an outside collaborator opens to run the two
+  sweeps' `explore` sets on their own GPU — one case per call with idle time between cases, two progress bars, the
+  time left and the patterns found so far — and that leaves one file (`karume-benchmark/1`) to send back;
+  `node apps/benchmark/unpack.ts` writes its records where the workbench would have. The workbench and the app share
+  the sweeps' plans, runs and merged records through the private package `@karume/sweep-app-support`; the workbench's
+  `gemv-sweep` and `geometry-sweep` entries take `candidateSet=explore`.
+
+### Changed
+
+- `@karume/runtime/tune`: in every set of the GEMV sweep, the quick look's bar of a class comes only from kernels
+  the derivation can adopt — their check, read right after the quick look, held, and no subgroup form (no table row
+  holds one). A kernel whose check fails no longer screens out the true best.
+
 ## [0.24.0] - 2026-11-25
 
 ### Breaking

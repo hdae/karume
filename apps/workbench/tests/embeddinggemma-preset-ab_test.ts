@@ -1,6 +1,7 @@
 import type { SessionDiagnostics } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
 import {
   EMBEDDING_OUTPUT,
@@ -41,7 +42,6 @@ import {
   sourceCase,
 } from "../src/embeddinggemma-preset-ab/text.ts";
 import presetAb from "../src/entries/local/embeddinggemma-preset-ab.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 
 import {
   hex,

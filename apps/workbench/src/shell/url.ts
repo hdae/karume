@@ -6,7 +6,9 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
-import { type Entry, parameterText, type ParameterValues } from "../entry.ts";
+import { parameterText, type ParameterValues } from "@karume/sweep-app-support/parameters";
+
+import type { Entry } from "../entry.ts";
 
 /** The query key of the selected entry. */
 export const ENTRY_KEY = "entry";

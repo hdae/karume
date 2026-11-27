@@ -1,113 +1,23 @@
 /**
- * Where a record lands and how it is written — `outputs/workbench/<host>-<adapter name>/<entry
- * id>_<UTC stamp>.json` under the repository root, created exclusively — and the dev server's
- * `POST /workbench/results`, which writes the record a page sends. Node only: the dev server's
- * plugin and the Node run both write through {@link writeRecord}.
+ * The dev server's `POST /workbench/results`, which writes the record a page sends through the
+ * shared record writer (`writeRecord` of `@karume/sweep-app-support/node`: `outputs/workbench/<host>-
+ * <adapter name>/<entry id>_<UTC stamp>.json` under the repository root, created exclusively). Node
+ * only.
  *
- * Nothing the client sends becomes a path segment except through two rules: the entry id must be
- * kebab-case, and the adapter directory keeps only `[a-z0-9-]`. The stamp is the server's clock.
+ * Nothing the client sends becomes a path segment except through the writer's two rules: the entry
+ * id must be kebab-case, and the adapter directory keeps only `[a-z0-9-]`. The stamp is the
+ * server's clock.
  *
  * SPEC: docs/spec/workbench.md#where-records-go
  * SPEC: docs/spec/workbench.md#the-dev-server
  */
 
-import { type FileHandle, mkdir, open } from "node:fs/promises";
-import { join } from "node:path";
-
-import { ENTRY_ID } from "./entry.ts";
-import { type Host, RECORD_FORMAT, utcStamp } from "./record.ts";
-
-/** The results directory, relative to the repository root (outside git: `outputs/` is ignored). */
-export const RESULTS_DIRECTORY = "outputs/workbench";
+import { writeRecord } from "@karume/sweep-app-support/node";
+import { ENTRY_ID, RECORD_FORMAT } from "@karume/sweep-app-support/record";
+import type { RecordTarget } from "@karume/sweep-app-support/record-path";
 
 /** The largest record the dev server takes. */
 export const MAX_RECORD_BYTES = 64 * 1024 * 1024;
-
-const MAX_SLUG_LENGTH = 80;
-
-/** The adapter strings of a record, as far as they are strings. */
-export type AdapterNames = {
-  readonly vendor?: unknown;
-  readonly architecture?: unknown;
-  readonly device?: unknown;
-  readonly description?: unknown;
-};
-
-const slugOf = (text: string): string =>
-  text
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "")
-    .slice(0, MAX_SLUG_LENGTH)
-    .replaceAll(/-+$/g, "");
-
-const textOf = (value: unknown): string => (typeof value === "string" ? value : "");
-
-/**
- * The directory name of a host's adapter, `<host>-<adapter name>`, by the rule of the tests'
- * environment key: the name is the `description` in a browser and the `device` under Node — Dawn
- * puts the driver version in `description`, and a directory MUST NOT change with a driver update —
- * else `vendor-architecture` (Chrome may leave the description empty), else `unknown-adapter`
- * (a candidate whose slug is empty counts as absent).
- */
-export const adapterDirectory = (host: Host, adapter: AdapterNames): string => {
-  const name =
-    [
-      textOf(host === "node" ? adapter.device : adapter.description),
-      `${textOf(adapter.vendor)}-${textOf(adapter.architecture)}`,
-    ]
-      .map(slugOf)
-      .find((slug) => slug !== "") ?? "unknown-adapter";
-  return `${host}-${name}`;
-};
-
-/** What decides a record's path. */
-export type RecordTarget = {
-  readonly entryId: string;
-  readonly host: Host;
-  readonly adapter: AdapterNames;
-};
-
-/** A new file at `path`, or `undefined` when one exists. */
-const createExclusive = async (path: string): Promise<FileHandle | undefined> => {
-  try {
-    return await open(path, "wx");
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "EEXIST") return undefined;
-    throw error;
-  }
-};
-
-/**
- * Writes `bytes` to a new file for `target` at `now` and returns its path relative to
- * `repositoryRoot` (with `/`). A name that is taken gets `-1`, `-2`, … after the stamp; an existing
- * file is never replaced.
- */
-export const writeRecord = async (
-  repositoryRoot: string,
-  target: RecordTarget,
-  bytes: Uint8Array,
-  now: Date,
-): Promise<string> => {
-  if (!ENTRY_ID.test(target.entryId)) {
-    throw new Error(`The entry id ${JSON.stringify(target.entryId)} is not kebab-case`);
-  }
-  const directory = `${RESULTS_DIRECTORY}/${adapterDirectory(target.host, target.adapter)}`;
-  await mkdir(join(repositoryRoot, directory), { recursive: true });
-  const stamp = utcStamp(now);
-  for (let attempt = 0; ; attempt += 1) {
-    const name = `${target.entryId}_${stamp}${attempt === 0 ? "" : `-${attempt}`}.json`;
-    const path = `${directory}/${name}`;
-    const file = await createExclusive(join(repositoryRoot, path));
-    if (file === undefined) continue;
-    try {
-      await file.writeFile(bytes);
-    } finally {
-      await file.close();
-    }
-    return path;
-  }
-};
 
 export type RecordPostRequest = {
   readonly method: string;

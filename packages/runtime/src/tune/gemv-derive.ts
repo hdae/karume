@@ -134,6 +134,7 @@ import {
   GEMV_SWEEP_FORMAT,
   type GemvSweepChoice,
   type GemvSweepFamilyChoice,
+  type GemvSweepRow,
 } from "./gemv-report.ts";
 
 /** The fewest different records whose groups must be evidence: one record is not evidence. */
@@ -532,6 +533,113 @@ const levelOf = (candidateClass: GemvCandidateClass): ReferenceLevel =>
 const referenceName = (gemvCase: GemvCase, m: number, level: ReferenceLevel): string =>
   gemvProfileChoice(gemvCase, m, level).name;
 
+/**
+ * The kernel a class's candidates are read against at a case and row count, by candidate name
+ * (the module doc's "reference"): the current default profile's choice at `exact` (identical class)
+ * or at `reorder` (reorder class), whatever a record's summary names.
+ */
+const classReference = (
+  gemvCase: GemvCase,
+  m: number,
+  candidateClass: GemvCandidateClass,
+): string => referenceName(gemvCase, m, levelOf(candidateClass));
+
+/** {@link classReference} by case id; undefined for an id the case table does not hold. */
+export const gemvClassReference = (
+  caseId: string,
+  m: number,
+  candidateClass: GemvCandidateClass,
+): string | undefined => {
+  const gemvCase = gemvCaseOf(caseId);
+  return gemvCase === undefined ? undefined : classReference(gemvCase, m, candidateClass);
+};
+
+/**
+ * Why a group's row of its class's reference is no reference, as far as the row itself says
+ * ({@link gemvReferenceRefusal}): it failed, it has no time, or — for the identical class, where it
+ * is not the record's own baseline — its words were not shown equal to the baseline's.
+ */
+export type GemvReferenceRefusal = "failed" | "untimed" | "unshown";
+
+/**
+ * Why a group's row of the reference ({@link gemvClassReference}) is no reference for
+ * `candidateClass`, from the row alone (undefined: it is one). The derivation also refuses a row
+ * that is not of the current runtime (its kernel fingerprint against the table it derives for),
+ * which this does not read.
+ */
+export const gemvReferenceRefusal = (
+  row: Pick<GemvSweepRow, "error" | "perDispatch" | "isBaseline" | "identicalToBaseline">,
+  candidateClass: GemvCandidateClass,
+): GemvReferenceRefusal | undefined => {
+  if (row.error !== undefined) return "failed";
+  if (row.perDispatch === undefined) return "untimed";
+  // A candidate of the identical class shows its words equal to the record's baseline. Against
+  // another kernel that says something only when that kernel's own words equal the baseline's
+  if (candidateClass === "identical" && !row.isBaseline && row.identicalToBaseline !== true) {
+    return "unshown";
+  }
+  return undefined;
+};
+
+/**
+ * What one group's row says of its candidate against the reference's time there
+ * ({@link gemvRowReading}): evidence with its gain (the reference's time ÷ its own); ruled out by a
+ * failure or a failed check (its words not shown equal to the baseline's; outside the band — with
+ * the gain when there is one); or no evidence (screened out by the quick look, skipped, no
+ * reference time, no time of its own).
+ */
+export type GemvRowReading =
+  | { readonly kind: "evidence"; readonly gain: number }
+  | { readonly kind: "failed" }
+  | { readonly kind: "unshown"; readonly gain?: number }
+  | { readonly kind: "outside-band"; readonly gain?: number }
+  | { readonly kind: "screened" }
+  | { readonly kind: "skipped" }
+  | { readonly kind: "no-reference" }
+  | { readonly kind: "untimed" };
+
+/**
+ * How the derivation reads a current row of a group as a candidate of `candidateClass` against
+ * `referenceTime` (the reference's time there; undefined when there is none). Correctness does not
+ * depend on the reference: a failure or a failed check rules the candidate out whatever the time.
+ * The derivation's reference time is the reference's fastest time over the records, repeated by a
+ * second record; a reader of one record has its own group's time only.
+ */
+export const gemvRowReading = (
+  row: Pick<
+    GemvSweepRow,
+    | "error"
+    | "screened"
+    | "skipped"
+    | "perDispatch"
+    | "isBaseline"
+    | "identicalToBaseline"
+    | "withinBand"
+  >,
+  candidateClass: GemvCandidateClass,
+  referenceTime: number | undefined,
+): GemvRowReading => {
+  if (row.error !== undefined) return { kind: "failed" };
+  if (row.screened === true) return { kind: "screened" };
+  if (row.skipped === true) return { kind: "skipped" };
+  // A failed check keeps its gain: the reader sees how fast the candidate was
+  const gain =
+    referenceTime === undefined || row.perDispatch === undefined
+      ? undefined
+      : referenceTime / row.perDispatch;
+  const withGain = gain === undefined ? {} : { gain };
+  // The record's baseline writes its own words: it is a candidate where the default moved off it
+  if (candidateClass === "identical" && !row.isBaseline && row.identicalToBaseline !== true) {
+    return { kind: "unshown", ...withGain };
+  }
+  if (candidateClass === "reorder" && row.withinBand !== true) {
+    return { kind: "outside-band", ...withGain };
+  }
+  if (referenceTime === undefined) return { kind: "no-reference" };
+  if (gain === undefined) return { kind: "untimed" };
+  return { kind: "evidence", gain };
+};
+
 /** What a current group reads a class's candidates against (the module doc's "reference"). */
 type GroupReference =
   /** Usable in the group, and its fastest time over the records is repeated: that time. */
@@ -599,15 +707,16 @@ const referenceRefusal = (
   source: GemvSweepSource,
   group: GroupObservation,
   kernels: ReadonlyMap<string, string>,
-  reference: { readonly name: string; readonly level: ReferenceLevel },
+  reference: { readonly name: string; readonly candidateClass: GemvCandidateClass },
   where: string,
   tableId: string,
 ): string | undefined => {
-  const { name, level } = reference;
+  const { name, candidateClass } = reference;
   const row = group.rows.get(name);
   if (row === undefined) return `the reference ${name} is not measured ${where}`;
-  if (row.error !== undefined) return `the reference ${name} failed ${where} (${row.error})`;
-  if (row.perDispatch === undefined) return `the reference ${name} has no time ${where}`;
+  const refusal = gemvReferenceRefusal(row, candidateClass);
+  if (refusal === "failed") return `the reference ${name} failed ${where} (${row.error})`;
+  if (refusal === "untimed") return `the reference ${name} has no time ${where}`;
   const staleness = rowStaleness(row, kernels);
   if (staleness !== undefined) {
     // The GEMM takes its tile geometry from the profile the sweep's device resolved to: a reading
@@ -621,9 +730,7 @@ const referenceRefusal = (
     }
     return `the reference ${name} is not current ${where} (${staleness})`;
   }
-  // A candidate of the identical class shows its words equal to the record's baseline. Against
-  // another kernel that says something only when that kernel's own words equal the baseline's
-  if (level === "exact" && !row.isBaseline && row.identicalToBaseline !== true) {
+  if (refusal === "unshown") {
     return `the reference ${name} is not the baseline ${where}, and its words were not shown equal to the baseline's`;
   }
   return undefined;
@@ -698,16 +805,23 @@ const labelled = (
         if (reading.kind === "stale")
           return [key, { kind: "stale", group, reason: reading.reason }];
         const { gemvCase, kernels } = reading;
-        const referenceAt = (level: ReferenceLevel): GroupReference => {
-          const name = referenceName(gemvCase, group.m, level);
+        const referenceAt = (candidateClass: GemvCandidateClass): GroupReference => {
+          const name = classReference(gemvCase, group.m, candidateClass);
           if (!kernels.has(name)) {
             return {
               kind: "unmeasured",
-              reason: `the default's choice at ${level} (${name}) is a kernel the sweep does not measure`,
+              reason: `the default's choice at ${levelOf(candidateClass)} (${name}) is a kernel the sweep does not measure`,
             };
           }
           const where = `in ${label} at M=${group.m}`;
-          const refusal = referenceRefusal(source, group, kernels, { name, level }, where, tableId);
+          const refusal = referenceRefusal(
+            source,
+            group,
+            kernels,
+            { name, candidateClass },
+            where,
+            tableId,
+          );
           if (refusal !== undefined) return { kind: "unusable", reason: refusal };
           // The group's own row is current and timed, so the times hold at least it
           return referenceTime(times.get(`${key} ${name}`) ?? [], name, group.m);
@@ -719,7 +833,7 @@ const labelled = (
             group,
             gemvCase,
             kernels,
-            references: { exact: referenceAt("exact"), reorder: referenceAt("reorder") },
+            references: { exact: referenceAt("identical"), reorder: referenceAt("reorder") },
           },
         ];
       }),
@@ -753,40 +867,46 @@ const readGroup = (
   if (staleness !== undefined) {
     return { kind: "none", reason: `not current in ${label} at M=${m} (${staleness})` };
   }
-  if (row.error !== undefined) {
-    return { kind: "ruled-out", reason: `failed in ${label} at M=${m} (${row.error})` };
-  }
-  if (row.screened === true) {
-    return { kind: "none", reason: `screened out by the quick look in ${label} at M=${m}` };
-  }
-  if (row.skipped === true) {
-    return {
-      kind: "none",
-      reason: `skipped in ${label} at M=${m} (its M=1 group there left it unadoptable)`,
-    };
-  }
   const reference = state.references[levelOf(candidateClass)];
-  // A failed check keeps its gain: the reader sees how fast the candidate was
-  const gain =
-    reference.kind !== "timed" || row.perDispatch === undefined
-      ? undefined
-      : reference.time / row.perDispatch;
-  const withGain = gain === undefined ? {} : { gain };
-  // Correctness does not depend on the reference: a failed check rules out in any current group.
-  // The record's baseline writes its own words: it is a candidate where the default moved off it
-  if (candidateClass === "identical" && !row.isBaseline && row.identicalToBaseline !== true) {
-    return {
-      kind: "ruled-out",
-      reason: `its words differ from the baseline's in ${label} at M=${m}`,
-      ...withGain,
-    };
+  const reading = gemvRowReading(
+    row,
+    candidateClass,
+    reference.kind === "timed" ? reference.time : undefined,
+  );
+  const withGain = (gain: number | undefined) => (gain === undefined ? {} : { gain });
+  switch (reading.kind) {
+    case "evidence":
+      return reading;
+    case "failed":
+      return { kind: "ruled-out", reason: `failed in ${label} at M=${m} (${row.error})` };
+    case "screened":
+      return { kind: "none", reason: `screened out by the quick look in ${label} at M=${m}` };
+    case "skipped":
+      return {
+        kind: "none",
+        reason: `skipped in ${label} at M=${m} (its M=1 group there left it unadoptable)`,
+      };
+    case "unshown":
+      return {
+        kind: "ruled-out",
+        reason: `its words differ from the baseline's in ${label} at M=${m}`,
+        ...withGain(reading.gain),
+      };
+    case "outside-band":
+      return {
+        kind: "ruled-out",
+        reason: `outside the band in ${label} at M=${m}`,
+        ...withGain(reading.gain),
+      };
+    case "untimed":
+      return { kind: "none", reason: `has no time in ${label} at M=${m}` };
+    case "no-reference":
+      // gemvRowReading says so only when it was given no reference time: the reference is not timed
+      return {
+        kind: "none",
+        reason: reference.kind === "timed" ? `has no time in ${label} at M=${m}` : reference.reason,
+      };
   }
-  if (candidateClass === "reorder" && row.withinBand !== true) {
-    return { kind: "ruled-out", reason: `outside the band in ${label} at M=${m}`, ...withGain };
-  }
-  if (reference.kind !== "timed") return { kind: "none", reason: reference.reason };
-  if (gain === undefined) return { kind: "none", reason: `has no time in ${label} at M=${m}` };
-  return { kind: "evidence", gain };
 };
 
 /**
@@ -1381,14 +1501,45 @@ const sameParallelShape = (row: LinearGemvParallelShape, gemvCase: GemvCase): bo
 const sameSequentialShape = (row: LinearGemvShapeVariant, gemvCase: GemvCase): boolean =>
   row.storage === gemvCase.storage && row.n === gemvCase.n && row.k === gemvCase.k;
 
+/**
+ * The members of the GEMV family whose M = 1 rows a table holds, per class: the sequential variant
+ * (`sequential.shapes`) and the plain and staged parallel GEMV (`parallelShapes`). The subgroup form
+ * is a Session option, not a row (only a decision's notes name it).
+ */
+const TABLE_CHOICES = {
+  identical: ["gemv-m1"],
+  reorder: ["gemv-parallel", "gemv-parallel-staged"],
+} as const satisfies Readonly<Record<GemvCandidateClass, readonly GemvSweepChoice["id"][]>>;
+
+/**
+ * The rows of `candidateClass` a judgement takes at M = 1: those of the members `ids`, without a row
+ * block (a row-blocked kernel is a row's form at M ≥ 2, no candidate at M = 1).
+ */
+const takesMembers =
+  (candidateClass: GemvCandidateClass, ids: readonly GemvSweepChoice["id"][]) =>
+  (row: Pick<RowObservation, "class" | "choice">): boolean =>
+    row.class === candidateClass &&
+    ids.includes(row.choice.id) &&
+    familyOf(row.choice)?.parallelRows === undefined;
+
+/**
+ * Whether the derivation takes a row of an M = 1 group (`gemvGroupRole`'s `winner`) as a candidate
+ * that a table can hold: a sequential variant of the identical class, or a plain or staged parallel
+ * row of the reorder class. Such a candidate replaces the default's choice for its shape when it is
+ * at least `GEMV_MIN_SPEEDUP` faster than that choice, with its check held, in the groups of two or
+ * more records. Pure.
+ */
+export const gemvTableCandidate = (row: Pick<GemvSweepRow, "class" | "choice">): boolean =>
+  takesMembers(row.class, TABLE_CHOICES[row.class])(row);
+
 /** The identical class of one case at M = 1: the column form's variants against the baseline. */
 const identicalJudgement = (gemvCase: GemvCase): CaseJudgement => {
-  const baseline = referenceName(gemvCase, 1, levelOf("identical"));
+  const baseline = classReference(gemvCase, 1, "identical");
   return {
     gemvCase,
     class: "identical",
     reference: () => baseline,
-    takes: (row) => row.class === "identical" && row.choice.id === "gemv-m1",
+    takes: takesMembers("identical", TABLE_CHOICES.identical),
     others: [],
     rowBlocks: false,
   };
@@ -1406,11 +1557,8 @@ const reorderJudgement = (
 ): CaseJudgement => ({
   gemvCase,
   class: "reorder",
-  reference: (m) => referenceName(gemvCase, m, levelOf("reorder")),
-  takes: (row) =>
-    row.class === "reorder" &&
-    ids.includes(row.choice.id) &&
-    familyOf(row.choice)?.parallelRows === undefined,
+  reference: (m) => classReference(gemvCase, m, "reorder"),
+  takes: takesMembers("reorder", ids),
   others: noRegressionRows(gemvCase),
   rowBlocks,
 });
@@ -1551,7 +1699,7 @@ const parallelDecision = (
       },
     };
   }
-  const judgement = reorderJudgement(gemvCase, ["gemv-parallel", "gemv-parallel-staged"], true);
+  const judgement = reorderJudgement(gemvCase, TABLE_CHOICES.reorder, true);
   const outcome = judgeCase(records, judgement, kernelsOf);
   if (outcome.kind === "kept") {
     // M = 1 keeps the default's row: its lanes stay, and another row block may still replace its
@@ -1967,7 +2115,7 @@ export const planGemvMeasurements = (
         (candidate) =>
           candidate.name !== reorder &&
           gemvGroupRole(m, candidate.class) !== "unread" &&
-          kernels.has(referenceName(gemvCase, m, levelOf(candidate.class))),
+          kernels.has(classReference(gemvCase, m, candidate.class)),
       );
       const covered = ({ name, class: candidateClass }: (typeof read)[number]): number =>
         records.filter(({ source, states }) => {

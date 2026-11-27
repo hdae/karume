@@ -38,7 +38,10 @@
  *   full — a geometry that mismatched or failed even once is not taken).
  * - A row the quick look screened out (`screened`, harness.ts's protocol rule 4) is no observation:
  *   it has no ratio and no output match, so a geometry screened out in a case that no other sweep
- *   timed it in is not taken (its verdict says so).
+ *   timed it in is not taken (its verdict says so). So is a row the `explore` set skipped
+ *   (`skipped` — an earlier case of the class ruled the geometry out in that sweep,
+ *   geometry-explore.ts): a record of that set is read by these rules alone, as a record that holds
+ *   part of the candidates.
  * - A skeleton form of the f32 GEMM and conv2d's counter decode (perf-ledger K-88) are part of a
  *   geometry: a tile with a form is a candidate of its own, judged by the same rule, and an adopted
  *   one is written into the field with it (`gemmRows` the form, `conv2d` the form and the decode).
@@ -143,9 +146,11 @@ import {
 import { ATTENTION_BENCH_FORMAT, onlineDispatchRows } from "./attention-bench.ts";
 import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
 import {
+  caseShape,
   I8A8_LINEAR_ROWS_BOUNDS,
   PROFILE_GEMM_ROWS_BOUNDS,
   SWEEP_CASES,
+  type SweepCase,
   SWEEP_OPS,
   type SweepOp,
 } from "./cases.ts";
@@ -166,14 +171,16 @@ import {
 } from "./fingerprint.ts";
 import {
   CANDIDATE_SETS,
-  type CandidateSet,
   conv2dCandidate,
   EVALUATION_SETS,
   evaluationSetLedgerId,
+  EXPLORE_SET,
   gemmCandidate,
   i8a8Candidate,
-  isCandidateSet,
+  isSweepSet,
+  type SweepSet,
 } from "./geometries.ts";
+import { casePlan } from "./harness.ts";
 import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
 /**
@@ -243,6 +250,11 @@ type SweepObservation = {
    */
   readonly screened?: true;
   /**
+   * The `explore` set did not measure the geometry in this case (report.ts): no ratio, no output
+   * match, never ratio material — read as a screened row is.
+   */
+  readonly skipped?: true;
+  /**
    * The pass time per measurement round (unit: `gpuTiming.unit`; negative rounds stay clamped to 0
    * — report.ts). Only the rounding-error bound ({@link roundingBound}) reads it.
    */
@@ -251,14 +263,14 @@ type SweepObservation = {
 
 /**
  * The default re-measurement at the end of a case (the fields of `cases[]` that generation reads —
- * report.ts's `CaseSummary`).
+ * report.ts's `CaseSummary`, by its field names, so a record's case summary is one as it is).
  */
 type SweepCaseRepeat = {
   readonly caseId: string;
-  /** Re-measurement ÷ first (`defaultRepeat.driftRatio`). */
-  readonly driftRatio?: number;
-  /** The re-measurement failure (`defaultRepeatError`). */
-  readonly error?: string;
+  /** The re-measurement; only its ratio, re-measurement ÷ first, is read. */
+  readonly defaultRepeat?: { readonly driftRatio?: number };
+  /** The re-measurement failure. */
+  readonly defaultRepeatError?: string;
 };
 
 /** One sweep record (checked at the `unknown` boundary). */
@@ -272,9 +284,9 @@ export type SweepSource = {
   readonly adapter: SweepAdapter;
   /**
    * The candidate set (`settings.candidateSet` — old records without the field give `quick` /
-   * `full` from `settings.quick`).
+   * `full` from `settings.quick`), or the `explore` set.
    */
-  readonly candidateSet: CandidateSet;
+  readonly candidateSet: SweepSet;
   /**
    * The browser that ran the sweep (the record's `userAgent` turned into a string by
    * {@link userAgentText} — material for the `userAgent` of the table's family entries). undefined
@@ -439,6 +451,17 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
   if (screened === true && isDefault) {
     throw new Error(`${where}: the default row is screened (the default geometry always goes on)`);
   }
+  const skipped = optional(value, "skipped", isTrue, where);
+  if (skipped === true && isDefault) {
+    throw new Error(
+      `${where}: the default row is skipped (the default geometry is always measured)`,
+    );
+  }
+  if (skipped === true && screened === true) {
+    throw new Error(
+      `${where}: the row is both skipped and screened (a skipped row had no quick look)`,
+    );
+  }
   // reps is only checked: the rounding-error bound e = q ÷ min(round) bounds the relative error of
   // perDispatch (= min ÷ reps) because reps is an integer and carries no error (ADR 0117 decision
   // 3). The value itself does not affect the bound
@@ -455,6 +478,7 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
     ...(error === undefined ? {} : { error }),
     ...(rounds === undefined ? {} : { rounds }),
     ...(screened === undefined ? {} : { screened }),
+    ...(skipped === undefined ? {} : { skipped }),
   };
 };
 
@@ -471,26 +495,27 @@ const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
   const error = optional(value, "defaultRepeatError", isString, where);
   return {
     caseId: requireString(value, "caseId", where),
-    ...(driftRatio === undefined ? {} : { driftRatio }),
-    ...(error === undefined ? {} : { error }),
+    ...(driftRatio === undefined ? {} : { defaultRepeat: { driftRatio } }),
+    ...(error === undefined ? {} : { defaultRepeatError: error }),
   };
 };
 
 /**
  * The record's candidate set (goes into the table's `provenance.candidateSet` — ADR 0117 decision
  * 4). `settings.candidateSet` is the source of truth; old records without the field (before quick+
- * was introduced) read `quick` / `full` from `settings.quick`.
+ * was introduced) read `quick` / `full` from `settings.quick`. A candidate set or the `explore` set,
+ * which sweeps `full`'s candidates (geometries.ts's `EXPLORE_SET`).
  */
-const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
+const parseCandidateSet = (settings: unknown, where: string): SweepSet => {
   if (!isRecord(settings))
     throw new Error(`${where}: settings is missing (the candidate set cannot be read)`);
   const { candidateSet, quick } = settings;
   if (candidateSet !== undefined) {
-    if (typeof candidateSet !== "string" || !isCandidateSet(candidateSet)) {
+    if (typeof candidateSet !== "string" || !isSweepSet(candidateSet)) {
       throw new Error(
         `${where}: settings.candidateSet is none of ${CANDIDATE_SETS.join(" / ")} (${JSON.stringify(
           candidateSet,
-        )})`,
+        )}) nor ${EXPLORE_SET}`,
       );
     }
     return candidateSet;
@@ -752,7 +777,7 @@ export const parseSweepReport = (
     },
     candidateSet: parseCandidateSet(parsed.settings, where),
     ...(userAgent === undefined ? {} : { userAgent }),
-    timestampQuantum: quantized ? CHROME_TIMESTAMP_QUANTUM_NS : 0,
+    timestampQuantum: geometryTimestampQuantum(quantized),
     cases,
     rows,
   };
@@ -1000,7 +1025,10 @@ const BMM_SHAPE = /^B\d+ M(\d+) N\d+ K\d+$/;
 /** The stage of fused attention (`{qk|pv} BH…` of `caseShape`). */
 const ATTENTION_SHAPE = /^(qk|pv) BH\d+ M\d+ N\d+ D\d+$/;
 
-const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
+/** What {@link slotOf} reads of a row or a case: its id, op and shape (`caseShape`'s spelling). */
+type SlotEntry = Pick<SweepObservation, "caseId" | "op" | "shape">;
+
+const attentionStage = (row: SlotEntry, where: string): "qk" | "pv" => {
   const matched = ATTENTION_SHAPE.exec(row.shape);
   if (matched === null) {
     throw new Error(`${where}: cannot read the shape of ${row.caseId} (${row.shape})`);
@@ -1014,7 +1042,7 @@ const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
  * (checked by {@link rowsSegments}), so some bucket always matches.
  */
 const segmentOf = <Slot extends ProfileSlot, G extends Geometry>(
-  row: SweepObservation,
+  row: SlotEntry,
   pattern: RegExp,
   segments: readonly RowsSegment<Slot, G>[],
   where: string,
@@ -1034,14 +1062,21 @@ const segmentOf = <Slot extends ProfileSlot, G extends Geometry>(
  * src/runtime/recipe-builders/linear.ts,
  * gemmRowsGeometry in geometry-profile.ts); for the i8a8 linear, the i8a8.linear bucket of its M
  * (`i8a8LinearGeometry`); for attention, the shape's stage; for conv2d, **the tileM of the case's
- * default row** (the side chosen by the production m-tile selection `conv2dIgemmMTile` — the
- * geometry the sweep measured as the default is the source of truth).
+ * default geometry** (`conv2dDefaultTileM` — the side chosen by the production m-tile selection
+ * `conv2dIgemmMTile`: the derivation reads it from the case's default row, the geometry the sweep
+ * measured as the default being the source of truth; {@link sweepCaseSlot} from the case plan that
+ * row comes from).
+ *
+ * MUST: the one mapping of a case to its class. The derivation judges a class over these cases, and
+ * the sweep's `explore` set drops a candidate for the rest of the cases of the same class
+ * (geometry-explore.ts, through {@link sweepCaseSlot}); two mappings could drop a candidate for a
+ * case the derivation reads in another class.
  */
 const slotOf = (
-  row: SweepObservation,
+  row: SlotEntry,
   segments: readonly RowsSegment[],
   i8a8Segments: readonly RowsSegment<I8a8LinearSlot, I8a8Geometry>[],
-  conv2dDefaultTileM: ReadonlyMap<string, number>,
+  conv2dDefaultTileM: number | undefined,
   where: string,
 ): ProfileSlot => {
   switch (row.op) {
@@ -1052,10 +1087,11 @@ const slotOf = (
     case "attention":
       return attentionStage(row, where) === "qk" ? "attention.qk" : "attention.pv";
     case "conv2d": {
-      const tileM = conv2dDefaultTileM.get(row.caseId);
-      if (tileM === 64) return "conv2d.rows64";
-      if (tileM === 32) return "conv2d.rows32";
-      throw new Error(`${where}: the default m tile of ${row.caseId} is not 64 / 32 (${tileM})`);
+      if (conv2dDefaultTileM === 64) return "conv2d.rows64";
+      if (conv2dDefaultTileM === 32) return "conv2d.rows32";
+      throw new Error(
+        `${where}: the default m tile of ${row.caseId} is not 64 / 32 (${conv2dDefaultTileM})`,
+      );
     }
     case "i8a8-linear":
       return segmentOf(row, LINEAR_SHAPE, i8a8Segments, where);
@@ -1065,6 +1101,23 @@ const slotOf = (
       return "i8a8.conv3d";
   }
 };
+
+/**
+ * The profile field (= class) of a sweep case: {@link slotOf} of its shape, with the buckets the
+ * derivation reads by ({@link deriveProfile}'s) and, for conv2d, the tileM of the default geometry
+ * its case plan measures — the geometry its default row carries. The sweep's `explore` set measures
+ * class by class through this (geometry-explore.ts). Pure (the case plan builds no GPU object).
+ */
+export const sweepCaseSlot = (sweepCase: SweepCase): ProfileSlot =>
+  slotOf(
+    { caseId: sweepCase.id, op: sweepCase.op, shape: caseShape(sweepCase) },
+    profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS),
+    i8a8LinearSegments(I8A8_LINEAR_ROWS_BOUNDS),
+    sweepCase.op === "conv2d"
+      ? gemmTileM(casePlan(sweepCase, Number.POSITIVE_INFINITY, false).defaultCandidate.geometry)
+      : undefined,
+    sweepCase.id,
+  );
 
 /**
  * The identity of a geometry (an i8a8 geometry with the vec4 skeleton, and an f32 geometry with a
@@ -1181,13 +1234,19 @@ export const excludedCaseLine = (excluded: ExcludedCase): string =>
  * cannot be trusted for any geometry. A case whose re-measurement failed or is missing cannot be
  * checked for drift, so it is treated the same.
  */
-const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefined => {
-  if (repeat?.error !== undefined) return `failed default re-measurement (${repeat.error})`;
-  if (repeat?.driftRatio === undefined) return "no default re-measurement";
-  return driftOutOfRange(repeat.driftRatio)
-    ? `default re-measurement ratio ${formatRatio(repeat.driftRatio)} out of range`
+const exclusionReason = (repeat: CaseRepeatFields | undefined): string | undefined => {
+  if (repeat?.defaultRepeatError !== undefined) {
+    return `failed default re-measurement (${repeat.defaultRepeatError})`;
+  }
+  const driftRatio = repeat?.defaultRepeat?.driftRatio;
+  if (driftRatio === undefined) return "no default re-measurement";
+  return driftOutOfRange(driftRatio)
+    ? `default re-measurement ratio ${formatRatio(driftRatio)} out of range`
     : undefined;
 };
+
+/** The fields of a record's case summary that the case's exclusion reads. */
+type CaseRepeatFields = Pick<SweepCaseRepeat, "defaultRepeat" | "defaultRepeatError">;
 
 /** The rounding-error bound (`bound` = relative error), or why no bound can be given. */
 type RoundingBound = { readonly bound: number } | { readonly unknown: string };
@@ -1204,7 +1263,7 @@ type RoundingBound = { readonly bound: number } | { readonly unknown: string };
  * ratio to the default and there is no default re-measurement either (the comparison in report.ts
  * and the re-measurement in harness.ts — neither writes the 0 side).
  */
-const roundingBound = (row: SweepObservation, quantum: number): RoundingBound => {
+const roundingBound = (row: Pick<SweepObservation, "rounds">, quantum: number): RoundingBound => {
   // No rounding means no error — old records without rounds pass here too
   if (quantum === 0) return { bound: 0 };
   if (row.rounds === undefined) return { unknown: "no rounds" };
@@ -1241,6 +1300,51 @@ const rowRoundingReason = (bound: RoundingBound, defaultBound: number): string |
   return total > ROUNDING_ERROR_LIMIT
     ? `rounding-error bound E ${formatPercent(total)} (> ${LIMIT_LABEL})`
     : undefined;
+};
+
+/**
+ * The rounding step q of a record's timestamps ({@link roundingBound}): Chrome's 100 µs when the
+ * record's `gpuTiming.quantized` is true, 0 (no rounding) when it is false.
+ */
+export const geometryTimestampQuantum = (quantized: boolean): number =>
+  quantized ? CHROME_TIMESTAMP_QUANTUM_NS : 0;
+
+/**
+ * Why the derivation drops a case of one record from that record's ratio material (undefined: it
+ * is kept): the default re-measurement failed, is missing or its ratio is out of range
+ * ({@link exclusionReason}), or — when the default row did not fail — the default row's
+ * rounding-error bound exceeds 1% or cannot be given ({@link defaultRoundingReason}). `repeat` is the
+ * record's summary of the case (`cases[]`), `defaultRow` the case's default row and
+ * `timestampQuantum` the record's step ({@link geometryTimestampQuantum}). A dropped case leaves no
+ * ratio for any geometry of the record there; its output matches and failures are still read.
+ */
+export const geometryCaseExclusion = (
+  repeat: CaseRepeatFields | undefined,
+  defaultRow: Pick<SweepObservation, "error" | "rounds">,
+  timestampQuantum: number,
+): string | undefined =>
+  exclusionReason(repeat) ??
+  (defaultRow.error === undefined
+    ? defaultRoundingReason(roundingBound(defaultRow, timestampQuantum))
+    : undefined);
+
+/**
+ * Why the derivation drops one row's observation from its record's ratio material, its case kept
+ * (undefined: it is kept, or the row is no ratio material — the default row and a row without a
+ * ratio to the default, a failure and the like, are not checked): the ratio's rounding-error bound
+ * E = e(r) + e(d) exceeds 1% or cannot be given ({@link rowRoundingReason}). Without a bound of the
+ * default row the case itself is dropped ({@link geometryCaseExclusion}).
+ */
+export const geometryRowExclusion = (
+  row: Pick<SweepObservation, "isDefault" | "speedupVsDefault" | "rounds">,
+  defaultRow: Pick<SweepObservation, "rounds">,
+  timestampQuantum: number,
+): string | undefined => {
+  if (row.isDefault || row.speedupVsDefault === undefined) return undefined;
+  const base = roundingBound(defaultRow, timestampQuantum);
+  return "unknown" in base
+    ? undefined
+    : rowRoundingReason(roundingBound(row, timestampQuantum), base.bound);
 };
 
 /** A row assigned to a class (`included` = kept as material). */
@@ -1292,7 +1396,9 @@ const judgeCandidate = (
           ? `not measured in ${caseId} (dropped from the ratio material in every sweep)`
           : all.length > 0 && all.every((row) => row.screened === true)
             ? `screened out by the quick look in ${caseId} (no timing to compare)`
-            : `not measured in ${caseId}`,
+            : all.length > 0 && all.every((row) => row.skipped === true)
+              ? `not measured in ${caseId} (the explore set dropped it for the class)`
+              : `not measured in ${caseId}`,
       };
     }
     const speedups: number[] = [];
@@ -1602,33 +1708,37 @@ const slotRowsOf = (
         .map((row) => [row.caseId, gemmTileM(row.geometryParams)] as const),
     );
     const repeats = new Map(source.cases.map((repeat) => [repeat.caseId, repeat] as const));
-    const defaultBounds = new Map(
-      source.rows
-        .filter((row) => row.isDefault)
-        .map((row) => [row.caseId, { row, bound: roundingBound(row, source.timestampQuantum) }]),
+    const defaultRows = new Map(
+      source.rows.filter((row) => row.isDefault).map((row) => [row.caseId, row] as const),
     );
     const excludedHere: { readonly slot: ProfileSlot; readonly excluded: ExcludedCase }[] = [];
     const excludedCases = new Set<string>();
     for (const row of source.rows) {
-      const slot = slotOf(row, segments, i8a8Segments, conv2dDefaultTileM, source.path);
-      const base = defaultBounds.get(row.caseId);
+      const slot = slotOf(
+        row,
+        segments,
+        i8a8Segments,
+        conv2dDefaultTileM.get(row.caseId),
+        source.path,
+      );
+      const defaultRow = defaultRows.get(row.caseId);
       // parseSweepReport has checked one default row per case
-      if (base === undefined) throw new Error(`${source.path}: ${row.caseId} has no default row`);
+      if (defaultRow === undefined) {
+        throw new Error(`${source.path}: ${row.caseId} has no default row`);
+      }
       // The reason to drop the whole case (re-measurement ratio → the default row's rounding). A
       // case whose default row failed has no ratios, so rounding is not checked (no ratio material
       // — judgeCandidate looks at the failure)
-      const caseReason =
-        exclusionReason(repeats.get(row.caseId)) ??
-        (base.row.error === undefined ? defaultRoundingReason(base.bound) : undefined);
-      // The reason to drop an observation (E = e(r) + e(d)). Rows without a ratio to the default
-      // (failures and the like) are no ratio material, so they are not checked
+      const caseReason = geometryCaseExclusion(
+        repeats.get(row.caseId),
+        defaultRow,
+        source.timestampQuantum,
+      );
+      // The reason to drop an observation (E = e(r) + e(d)), named only in a case that is kept
       const rowReason =
-        caseReason !== undefined ||
-        row.isDefault ||
-        row.speedupVsDefault === undefined ||
-        "unknown" in base.bound
-          ? undefined
-          : rowRoundingReason(roundingBound(row, source.timestampQuantum), base.bound.bound);
+        caseReason === undefined
+          ? geometryRowExclusion(row, defaultRow, source.timestampQuantum)
+          : undefined;
       if (caseReason !== undefined && !excludedCases.has(row.caseId)) {
         excludedCases.add(row.caseId);
         excludedHere.push({
@@ -1647,13 +1757,17 @@ const slotRowsOf = (
           },
         });
       }
-      // A screened row is no ratio material (it has no ratio) and no exclusion either: the quick
-      // look left it out, and judgeCandidate names it
+      // A screened or skipped row is no ratio material (it has no ratio) and no exclusion either:
+      // the quick look or the explore set left it out, and judgeCandidate names it
       bySlot.set(slot, [
         ...(bySlot.get(slot) ?? []),
         {
           row,
-          included: caseReason === undefined && rowReason === undefined && row.screened !== true,
+          included:
+            caseReason === undefined &&
+            rowReason === undefined &&
+            row.screened !== true &&
+            row.skipped !== true,
         },
       ]);
     }

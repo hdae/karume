@@ -2,9 +2,9 @@ import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import { judgeSessionAb, type SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
 import sessionAb from "../src/entries/local/session-ab.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 import {
   COMPONENT_TARGETS,
   componentArmOptions,

@@ -24,8 +24,9 @@
 
 import { chatPrompt } from "@karume/models/gemma";
 import type { GpuContext } from "@karume/runtime";
+import { booleanValue, choiceValue, textValue } from "@karume/sweep-app-support/parameters";
 
-import { booleanValue, choiceValue, type Entry, textValue } from "../../entry.ts";
+import type { Entry } from "../../entry.ts";
 import { buildGemmaPipeline, type GemmaPipeline } from "../../gemma4/pipeline.ts";
 import {
   BENCH_PROMPT_IDS,

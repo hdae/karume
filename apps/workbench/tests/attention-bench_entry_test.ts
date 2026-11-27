@@ -5,11 +5,11 @@ import {
   WAN22_ATTENTION_SHAPES,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
 import { benchShapes, SHAPE_IDS } from "../src/attention-bench/shapes.ts";
 import { attentionBenchSummary, benchProgressText } from "../src/attention-bench/summary.ts";
 import attentionBench from "../src/entries/attention-bench.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 
 const [SELF_33F] = WAN22_ATTENTION_SHAPES;
 if (SELF_33F === undefined) throw new Error("no Wan2.2 shape");

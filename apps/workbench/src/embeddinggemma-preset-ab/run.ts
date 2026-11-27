@@ -16,17 +16,15 @@ import {
   type SessionAbAdapter,
   type SessionAbRecord,
 } from "@karume/runtime/tune";
-
 import {
   choiceValue,
-  type EntryResult,
-  type GpuOptions,
   integerValue,
   numberValue,
-  type OpenedDistribution,
-  type RunContext,
   textValue,
-} from "../entry.ts";
+} from "@karume/sweep-app-support/parameters";
+import type { EntryResult } from "@karume/sweep-app-support/record";
+
+import type { GpuOptions, OpenedDistribution, RunContext } from "../entry.ts";
 import { SOURCE_KINDS } from "../local-parameters.ts";
 import { armStepper } from "../session-ab/progress.ts";
 import { runnerEnvironment, runPositions, steppedArm } from "../session-ab/shared.ts";

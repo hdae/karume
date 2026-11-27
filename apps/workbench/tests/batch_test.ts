@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
+import { parseParameters } from "@karume/sweep-app-support/parameters";
+import { buildRecord, recordText } from "@karume/sweep-app-support/record";
 
 import {
   BATCH_FORMAT,
@@ -8,8 +10,7 @@ import {
   type ResolvedBatch,
   resolveBatch,
 } from "../src/batch.ts";
-import { type Entry, parseParameters } from "../src/entry.ts";
-import { buildRecord, recordText } from "../src/record.ts";
+import type { Entry } from "../src/entry.ts";
 
 const PROBE: Entry = {
   id: "probe",

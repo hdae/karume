@@ -9,12 +9,12 @@
  */
 
 import "./style.css";
+import { errorText } from "@karume/sweep-app-support/record";
 
 import { type BatchFile, type ListedBatch, listBatches } from "./batch.ts";
 import { trackedBatchFiles } from "./batches.ts";
 import { registeredEntries } from "./entries.ts";
 import type { Entry } from "./entry.ts";
-import { errorText } from "./record.ts";
 import { batchPanel } from "./shell/batch-panel.ts";
 import { element } from "./shell/dom.ts";
 import { entryPanel } from "./shell/entry-panel.ts";

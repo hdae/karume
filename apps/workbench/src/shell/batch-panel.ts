@@ -10,6 +10,8 @@
  * SPEC: docs/spec/workbench.md#batches
  */
 
+import { errorText, type WorkbenchRecord } from "@karume/sweep-app-support/record";
+
 import {
   type ListedBatch,
   type ResolvedStep,
@@ -17,7 +19,6 @@ import {
   UNTRACKED_BATCHES_DIRECTORY,
 } from "../batch.ts";
 import { batchSummary, runBatch, type StepState } from "../batch-run.ts";
-import { errorText, type WorkbenchRecord } from "../record.ts";
 import { browserHost } from "./browser-host.ts";
 import { element } from "./dom.ts";
 import { endedText, resultView } from "./result-view.ts";

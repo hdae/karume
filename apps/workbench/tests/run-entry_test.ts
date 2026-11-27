@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
-
-import type { Entry, GpuOptions, OpenDistribution, OpenInput, RunContext } from "../src/entry.ts";
-import { type RunHost, runEntry } from "../src/execute.ts";
 import {
   type Checkout,
   type RecordEnvironment,
   recordText,
   type WorkbenchRecord,
-} from "../src/record.ts";
+} from "@karume/sweep-app-support/record";
+
+import type { Entry, GpuOptions, OpenDistribution, OpenInput, RunContext } from "../src/entry.ts";
+import { type RunHost, runEntry } from "../src/execute.ts";
 
 const ENVIRONMENT: RecordEnvironment = {
   host: "node",

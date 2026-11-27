@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
+import { parseParameters } from "@karume/sweep-app-support/parameters";
 
 import kernelCheck from "../src/entries/kernel-check.ts";
-import { parseParameters } from "../src/entry.ts";
 import { entryVerdict, kernelCheckResult, summaryLines } from "../src/kernel-check/summary.ts";
 import {
   type CheckOutcome,

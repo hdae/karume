@@ -13,17 +13,16 @@ import {
 } from "@karume/gemma4-app-support/settings";
 import { loadManifest, type Manifest } from "@karume/hub";
 import type { SourceKind } from "@karume/local-distributions/browser";
-
 import {
   booleanValue,
   integerValue,
   numberValue,
-  type OpenDistribution,
-  type OpenedDistribution,
   ParameterError,
   type ParameterValues,
   textValue,
-} from "../entry.ts";
+} from "@karume/sweep-app-support/parameters";
+
+import type { OpenDistribution, OpenedDistribution } from "../entry.ts";
 import { modelRefusal, MOUNT_LIST, parseModelKey, presentMounts } from "../gemma4/open.ts";
 import { type SessionAbModel, type SessionAbRequest, sessionAbRequest } from "./gemma-request.ts";
 import { presetOf } from "./shared.ts";

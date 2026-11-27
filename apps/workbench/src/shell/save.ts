@@ -10,7 +10,7 @@
  * SPEC: docs/spec/workbench.md#where-records-go
  */
 
-import { utcStamp, type WorkbenchRecord } from "../record.ts";
+import { utcStamp, type WorkbenchRecord } from "@karume/sweep-app-support/record";
 
 export type SaveResult =
   | { readonly kind: "saved"; readonly path: string }

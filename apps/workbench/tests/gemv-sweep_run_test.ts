@@ -7,16 +7,13 @@ import {
   QUICK_LOOK_MARGIN,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
-
-import { parseParameters } from "../src/entry.ts";
-import entry from "../src/entries/gemv-sweep.ts";
 import {
   foldGemvEvent,
-  type GemvRunEvent,
   type GemvLive,
+  type GemvRunEvent,
   INITIAL_GEMV_LIVE,
   runGemvPlan,
-} from "../src/gemv-sweep/run.ts";
+} from "@karume/sweep-app-support/gemv-sweep/run";
 import {
   GEMV_CANDIDATE_NAMES,
   GEMV_CASE_IDS,
@@ -24,9 +21,12 @@ import {
   type GemvSweepPlan,
   gemvSweepSelection,
   planGemvSweep,
-} from "../src/gemv-sweep/settings.ts";
-import { gemvProgressLine } from "../src/gemv-sweep/summary.ts";
-import { idle } from "../src/per-case-sweep.ts";
+} from "@karume/sweep-app-support/gemv-sweep/settings";
+import { gemvProgressLine } from "@karume/sweep-app-support/gemv-sweep/summary";
+import { parseParameters } from "@karume/sweep-app-support/parameters";
+import { idle } from "@karume/sweep-app-support/per-case-sweep";
+
+import entry from "../src/entries/gemv-sweep.ts";
 import { CASE_A, CASE_B, CASE_C, gemvPerCase, gemvRow } from "./helpers/gemv-sweep-report.ts";
 
 const PLAN: GemvSweepPlan = {

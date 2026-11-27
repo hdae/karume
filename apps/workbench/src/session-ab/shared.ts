@@ -11,8 +11,12 @@
 
 import type { Manifest } from "@karume/hub";
 import type { SessionAbAdapter, SessionAbArm, SessionAbEnvironment } from "@karume/runtime/tune";
+import {
+  type IntegerParameter,
+  type NumberParameter,
+  ParameterError,
+} from "@karume/sweep-app-support/parameters";
 
-import { type IntegerParameter, type NumberParameter, ParameterError } from "../entry.ts";
 import { type FoundPreset, modelPreset } from "../model-preset.ts";
 
 /** The timed rounds: at least the runner's minimum of 3, at most a generous 1000. */

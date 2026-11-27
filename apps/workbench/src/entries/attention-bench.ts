@@ -8,10 +8,16 @@
 
 import { acquireGpu } from "@karume/runtime";
 import { runAttentionRouteBench } from "@karume/runtime/tune";
+import {
+  booleanValue,
+  choicesValue,
+  integerValue,
+  ParameterError,
+} from "@karume/sweep-app-support/parameters";
 
 import { benchShapes, SHAPE_IDS } from "../attention-bench/shapes.ts";
 import { attentionBenchSummary, benchProgressText } from "../attention-bench/summary.ts";
-import { booleanValue, choicesValue, type Entry, integerValue, ParameterError } from "../entry.ts";
+import type { Entry } from "../entry.ts";
 
 const entry: Entry = {
   id: "attention-bench",

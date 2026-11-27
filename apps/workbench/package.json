@@ -21,7 +21,8 @@
     "@karume/local-distributions": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",
-    "@karume/safetensors": "workspace:*"
+    "@karume/safetensors": "workspace:*",
+    "@karume/sweep-app-support": "workspace:*"
   },
   "devDependencies": {
     "@karume/test-support": "workspace:*",

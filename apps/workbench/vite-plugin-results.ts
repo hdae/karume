@@ -16,9 +16,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type { Connect, Plugin } from "vite-plus";
+import { readCheckout } from "@karume/sweep-app-support/node";
 
 import { handleBatchesGet, MAX_BATCH_BYTES } from "./src/batch-files.ts";
-import { readCheckout } from "./src/checkout.ts";
 import { handleRecordPost, MAX_RECORD_BYTES, type RecordPostResponse } from "./src/results.ts";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));

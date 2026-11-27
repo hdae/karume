@@ -1,19 +1,20 @@
 import {
+  geometryExploreOrder,
   type GeometrySweepCase,
   geometrySweepCases,
   QUICK_LOOK_MARGIN,
 } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
-
-import geometrySweep from "../src/entries/geometry-sweep.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 import {
   planSweep,
   SWEEP_CASE_IDS,
   SWEEP_OPS,
   type SweepSelection,
   sweepSelection,
-} from "../src/geometry-sweep/settings.ts";
+} from "@karume/sweep-app-support/geometry-sweep/settings";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
+
+import geometrySweep from "../src/entries/geometry-sweep.ts";
 
 const CASES: readonly GeometrySweepCase[] = [
   { id: "linear-a", op: "linear" },
@@ -163,5 +164,44 @@ describe("the evaluation set k88", () => {
     const plan = planSweep(selectionOf({ candidateSet: "k88" }), k88Cases);
     expect(plan.caseIds).toEqual(k88Cases.map(({ id }) => id));
     expect(plan.ops).toEqual(["linear", "matmul", "conv2d"]);
+  });
+});
+
+describe("the explore set", () => {
+  // In the table's order: linear M 1024 (gemmRows > 512) and 16 (≤ 16), then matmul M 4096 (> 512)
+  // and 16 (≤ 16)
+  const chosen = [
+    "linear-m1024-n2048-k2048",
+    "linear-m16-n3072-k1024",
+    "matmul-m4096-n2048-k2048",
+    "matmul-m16-n3072-k1024",
+  ];
+
+  it("plans the chosen cases of full's table class by class, as one runGeometrySweep call over them measures them (fault: the table's order)", () => {
+    const plan = planSweep(
+      selectionOf({ candidateSet: "explore", cases: chosen.join(",") }),
+      geometrySweepCases("explore"),
+    );
+    expect(plan.candidateSet).toBe("explore");
+    expect(plan.caseIds).toEqual([
+      "linear-m1024-n2048-k2048",
+      "matmul-m4096-n2048-k2048",
+      "linear-m16-n3072-k1024",
+      "matmul-m16-n3072-k1024",
+    ]);
+    expect(plan.caseIds).toEqual(
+      geometryExploreOrder(chosen.map((id) => ({ id }))).map(({ id }) => id),
+    );
+  });
+
+  it("refuses geometries, as the set chooses what it measures of full itself", () => {
+    expect(() =>
+      selectionOf({ candidateSet: "explore", geometries: "tile64x64r8x4w16x8k16" }),
+    ).toThrow(
+      new ParameterError(
+        "geometries",
+        "the explore set measures the candidates of full and drops them itself: leave geometries empty",
+      ),
+    );
   });
 });

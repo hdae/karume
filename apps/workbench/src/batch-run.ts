@@ -13,9 +13,10 @@
  * SPEC: docs/spec/workbench.md#batches
  */
 
+import type { Outcome } from "@karume/sweep-app-support/record";
+
 import type { ResolvedBatch, ResolvedStep } from "./batch.ts";
 import { type RunHost, runEntry, type SingleRun } from "./execute.ts";
-import type { Outcome } from "./record.ts";
 
 /** How a step of a batch run settled. */
 export type StepState<Saved> =

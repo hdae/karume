@@ -7,7 +7,7 @@
 
 import type { GemvSweepReport } from "@karume/runtime/tune";
 
-import { type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
+import { mergedQuantized, type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
 
 /** The fields every per-case record of one sweep shares (anything else is a different sweep). */
 const sharedFields = (report: GemvSweepReport) => {
@@ -50,7 +50,7 @@ export const mergeGemvSweepReports = (
     ...envelope,
     gpuTiming: {
       ...first.gpuTiming,
-      quantized: reports.some((report) => report.gpuTiming.quantized),
+      quantized: mergedQuantized(reports),
     },
     settings: { ...first.settings, cases: [...options.plannedCaseIds] },
     cases: reports.flatMap((report) => report.cases),

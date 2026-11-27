@@ -23,7 +23,9 @@
  * (perf-ledger K-88 — {@link gemmFieldCandidatesIn}, {@link conv2dFieldCandidatesIn}; the sweep adds
  * them only to a case whose kernel takes the fields, harness.ts's `candidatesFor`). One more set,
  * `k88`, is an evaluation set ({@link EVALUATION_SETS}): the same fields on cases of its own,
- * outside the sweep's case set, so it changes neither the other sets nor any fingerprint.
+ * outside the sweep's case set, so it changes neither the other sets nor any fingerprint. The sweep
+ * runs one more set, `explore` ({@link EXPLORE_SET}): `full`'s candidates in fewer rows, no grid of
+ * its own.
  */
 import {
   assertGemmGeometry,
@@ -457,6 +459,34 @@ export const DEFAULT_CANDIDATE_SET: CandidateSet = "quick+";
 
 export const isCandidateSet = (value: string): value is CandidateSet =>
   (CANDIDATE_SETS as readonly string[]).includes(value);
+
+/**
+ * The `explore` set of the geometry sweep: the candidates of `full` on its case table, measured
+ * class by class, a candidate no longer measured in its class once a case of the class ruled it out
+ * (sweep.ts, geometry-explore.ts). It is a set a sweep runs and its record names, not a grid of its
+ * own, so it is no {@link CandidateSet}: {@link candidateGridOf} gives the set whose candidates,
+ * case table and keys it takes.
+ */
+export const EXPLORE_SET = "explore";
+
+/**
+ * The sets a geometry sweep runs and its record names in `settings.candidateSet`: the candidate
+ * sets ({@link CANDIDATE_SETS}), then {@link EXPLORE_SET}.
+ */
+export const SWEEP_SETS = [...CANDIDATE_SETS, EXPLORE_SET] as const;
+
+/** A set a geometry sweep runs ({@link SWEEP_SETS}). */
+export type SweepSet = (typeof SWEEP_SETS)[number];
+
+export const isSweepSet = (value: string): value is SweepSet =>
+  (SWEEP_SETS as readonly string[]).includes(value);
+
+/**
+ * The candidate set whose candidates, case table, case-set version and default fingerprint a sweep
+ * set measures: `full` for {@link EXPLORE_SET}, the set itself otherwise.
+ */
+export const candidateGridOf = (set: SweepSet): CandidateSet =>
+  set === EXPLORE_SET ? "full" : set;
 
 /**
  * An evaluation set has no candidates for a family its cases do not have (`k88` gives its f32

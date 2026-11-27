@@ -6,9 +6,11 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
-import { type Entry, parseParameters, type ParameterValues } from "../entry.ts";
+import { type ParameterValues, parseParameters } from "@karume/sweep-app-support/parameters";
+import { errorText } from "@karume/sweep-app-support/record";
+
+import type { Entry } from "../entry.ts";
 import { runEntry } from "../execute.ts";
-import { errorText } from "../record.ts";
 import { browserHost } from "./browser-host.ts";
 import { element } from "./dom.ts";
 import { parameterForm } from "./form.ts";

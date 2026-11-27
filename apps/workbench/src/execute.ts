@@ -1,32 +1,27 @@
 /**
- * One run of an entry, as the browser shell and the Node run both do it. {@link executeEntry} times
- * the entry's `run`, catches what it throws and wraps the outcome in the record; {@link runEntry} is
- * the whole sequence around it — read the environment and the checkout, execute, serialise, save —
- * with what differs between the hosts passed in as a {@link RunHost}.
+ * One run of an entry, as the browser shell and the Node run both do it. {@link executeEntry} runs
+ * the entry through the record's `recordRun` (which times it, catches what it throws and wraps the
+ * outcome in the record); {@link runEntry} is the whole sequence around it — read the environment
+ * and the checkout, execute, serialise, save — with what differs between the hosts passed in as a
+ * {@link RunHost}.
  */
 
-import type {
-  Entry,
-  GpuOptions,
-  OpenDistribution,
-  OpenInput,
-  ParameterValues,
-  RunContext,
-} from "./entry.ts";
+import type { ParameterValues } from "@karume/sweep-app-support/parameters";
 import {
-  buildRecord,
   type Checkout,
   type RecordBatch,
   type RecordEnvironment,
+  recordRun,
   recordText,
-  type Settlement,
   type WorkbenchRecord,
-} from "./record.ts";
+} from "@karume/sweep-app-support/record";
+
+import type { Entry, GpuOptions, OpenDistribution, OpenInput, RunContext } from "./entry.ts";
 
 /** The run context as the host gives it; the backend comes from the record's environment. */
 export type HostContext = Omit<RunContext, "backend">;
 
-export const executeEntry = async (options: {
+export const executeEntry = (options: {
   readonly entry: Entry;
   readonly context: HostContext;
   readonly environment: RecordEnvironment;
@@ -35,25 +30,17 @@ export const executeEntry = async (options: {
   readonly batch?: RecordBatch;
 }): Promise<WorkbenchRecord> => {
   const { entry, context, environment } = options;
-  const started = performance.now();
-  let settlement: Settlement;
-  try {
-    const backend = environment.backend?.name;
-    const result = await entry.run({ ...context, ...(backend === undefined ? {} : { backend }) });
-    settlement = { kind: "resolved", result, aborted: context.signal.aborted };
-  } catch (error) {
-    settlement = { kind: "rejected", error, aborted: context.signal.aborted };
-  }
-  const milliseconds = performance.now() - started;
-  return buildRecord({
-    entry: { id: entry.id, parameters: context.parameters },
-    ...(options.batch === undefined ? {} : { batch: options.batch }),
-    endedAt: new Date(),
-    milliseconds,
-    environment,
-    checkout: options.checkout,
-    settlement,
-  });
+  const backend = environment.backend?.name;
+  return recordRun(
+    {
+      entry: { id: entry.id, parameters: context.parameters },
+      ...(options.batch === undefined ? {} : { batch: options.batch }),
+      environment,
+      checkout: options.checkout,
+      signal: context.signal,
+    },
+    () => entry.run({ ...context, ...(backend === undefined ? {} : { backend }) }),
+  );
 };
 
 /** What a host brings to a run: where its facts come from, its GPU, its distributions and its save. */

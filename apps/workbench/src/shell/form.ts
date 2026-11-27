@@ -8,7 +8,8 @@ import {
   parameterText,
   type ParameterValue,
   type ParameterValues,
-} from "../entry.ts";
+} from "@karume/sweep-app-support/parameters";
+
 import { element } from "./dom.ts";
 
 export type ParameterForm = {

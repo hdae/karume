@@ -12,6 +12,13 @@
 import { loadManifest, resolveSelection } from "@karume/hub";
 import { type GenerateEvent, Pipeline } from "@karume/models/anima";
 import { acquireGpu } from "@karume/runtime";
+import {
+  choicesValue,
+  choiceValue,
+  integerValue,
+  ParameterError,
+  textValue,
+} from "@karume/sweep-app-support/parameters";
 
 import {
   ANIMA_PRESETS,
@@ -26,14 +33,7 @@ import {
   TIMING_MOUNTS,
   timingModel,
 } from "../../anima-step-timing/record.ts";
-import {
-  choicesValue,
-  choiceValue,
-  type Entry,
-  integerValue,
-  ParameterError,
-  textValue,
-} from "../../entry.ts";
+import type { Entry } from "../../entry.ts";
 import { SOURCE_KINDS, sourceParameter } from "../../local-parameters.ts";
 
 /** A neutral request; its words do not change the shapes the DiT runs at. */

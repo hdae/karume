@@ -1,16 +1,32 @@
 /**
  * The record of one workbench run: the envelope every entry shares (what ran, with which
- * parameters, where and on which checkout) around the entry's own result. Pure: the browser shell,
- * the dev server and the Node run build and serialize records with these functions, so the saved
- * bytes are the same everywhere.
+ * parameters, where and on which checkout) around the entry's own result. Pure apart from the clock
+ * {@link recordRun} reads: the workbench's browser shell, its dev server and its Node run, and the
+ * benchmark app, build and serialize records with these functions, so the saved bytes are the same
+ * everywhere.
  *
  * SPEC: docs/spec/workbench.md#the-record
  */
 
-import type { EntryResult, ParameterValues, Verdict } from "./entry.ts";
+import type { ParameterValues } from "./parameters.ts";
 
 /** The version of the envelope; bump it when a field changes meaning or goes away. */
 export const RECORD_FORMAT = "karume-workbench/1";
+
+/** An entry id: kebab-case. The registry and the results directory both hold ids to it. */
+export const ENTRY_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** What a check-like entry concludes. Absent for an entry that only measures. */
+export type Verdict = "pass" | "fail" | "incomplete";
+
+/** What a run resolves to: the record's `verdict`, `summary` and `data`. */
+export type EntryResult = {
+  readonly verdict?: Verdict;
+  /** A few plain lines a person reads first. */
+  readonly summary: readonly string[];
+  /** The entry's own record body. */
+  readonly data: unknown;
+};
 
 export type AdapterSummary = {
   readonly vendor: string;
@@ -155,3 +171,38 @@ export const buildRecord = (facts: {
 /** The text that is saved, downloaded and copied: one function, so the bytes are the same everywhere. */
 export const recordText = (record: WorkbenchRecord): string =>
   `${JSON.stringify(record, null, 1)}\n`;
+
+/**
+ * Runs `run` and wraps how it settled in the record ({@link buildRecord}): `seconds` is its wall
+ * time, `recordedAt` the moment it settled, and it is `cancelled` when `signal` was aborted by then.
+ * Never rejects for what `run` throws (that is the record's `error`).
+ */
+export const recordRun = async (
+  facts: {
+    readonly entry: { readonly id: string; readonly parameters: ParameterValues };
+    readonly batch?: RecordBatch;
+    readonly environment: RecordEnvironment;
+    readonly checkout: Checkout;
+    readonly signal: AbortSignal;
+  },
+  run: () => Promise<EntryResult>,
+): Promise<WorkbenchRecord> => {
+  const started = performance.now();
+  let settlement: Settlement;
+  try {
+    const result = await run();
+    settlement = { kind: "resolved", result, aborted: facts.signal.aborted };
+  } catch (error) {
+    settlement = { kind: "rejected", error, aborted: facts.signal.aborted };
+  }
+  const milliseconds = performance.now() - started;
+  return buildRecord({
+    entry: facts.entry,
+    ...(facts.batch === undefined ? {} : { batch: facts.batch }),
+    endedAt: new Date(),
+    milliseconds,
+    environment: facts.environment,
+    checkout: facts.checkout,
+    settlement,
+  });
+};

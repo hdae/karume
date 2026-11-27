@@ -20,6 +20,12 @@ import { fetchAssets, type LoadedManifest, loadManifest, resolveSelection } from
 import { Pipeline } from "@karume/models/anima";
 import { acquireGpu, type GpuContext } from "@karume/runtime";
 import { openSafetensors } from "@karume/safetensors";
+import {
+  booleanValue,
+  choiceValue,
+  integerValue,
+  textValue,
+} from "@karume/sweep-app-support/parameters";
 
 import {
   animaSingleFileData,
@@ -28,14 +34,7 @@ import {
   type ArmRecord,
   TEXT_CONDITIONER_SOURCES,
 } from "../../anima-single-file/record.ts";
-import {
-  booleanValue,
-  choiceValue,
-  type Entry,
-  integerValue,
-  type RangedFile,
-  textValue,
-} from "../../entry.ts";
+import type { Entry, RangedFile } from "../../entry.ts";
 import { SOURCE_KINDS, sourceParameter } from "../../local-parameters.ts";
 import { sha256Hex } from "../../sha256.ts";
 

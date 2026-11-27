@@ -124,19 +124,43 @@
  * (`karume-geometry-sweep/4`). Uses GPU timestamps when the adapter lists `timestamp-query`. After
  * a case's warm start every geometry gets a quick look, and only the default geometry and the
  * candidates whose quick time is within the margin of the default's are timed in full
- * (`GeometrySweepOptions.quickLookMargin`; 0 times every geometry).
+ * (`GeometrySweepOptions.quickLookMargin`; 0 times every geometry). Besides its status lines it
+ * reports a `plan` event when a case starts (the geometries it plans, the candidates it skips) and
+ * a `step` event per unit of the case's measurement (a phase and its done / total), for a two-level
+ * progress display.
  */
 export { runGeometrySweep } from "./src/tune/sweep.ts";
 export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/sweep.ts";
+export type {
+  GeometrySweepPhase,
+  GeometrySweepPlannedCase,
+  GeometrySweepStep,
+} from "./src/tune/harness.ts";
 /**
- * The candidate set (`"quick"`, `"quick+"`, `"full"`, or an evaluation set on cases of its own,
- * from whose record no table is derived: `"k88"` — the f32 GEMM skeleton forms and the conv2d
- * counter decode) and the op families of a sweep. In `"quick+"` and `"full"` a linear / matmul /
- * bmm case measures every tile also with each skeleton form, and a conv2d case also with the
- * counter decode and with both, so a table derived from their records can adopt them; `"quick"`
- * measures the tiles alone.
+ * The candidate set (`"quick"`, `"quick+"`, `"full"`, `"explore"`, or an evaluation set on cases of
+ * its own, from whose record no table is derived: `"k88"` — the f32 GEMM skeleton forms and the
+ * conv2d counter decode) and the op families of a sweep. In `"quick+"` and `"full"` a linear /
+ * matmul / bmm case measures every tile also with each skeleton form, and a conv2d case also with
+ * the counter decode and with both, so a table derived from their records can adopt them; `"quick"`
+ * measures the tiles alone. `"explore"` measures the candidates of `"full"` class by class, a
+ * candidate no longer measured in the cases of a class once one of them ruled it out (a skipped
+ * row).
  */
-export type { CandidateSet as GeometrySweepCandidateSet } from "./src/tune/geometries.ts";
+export type { SweepSet as GeometrySweepCandidateSet } from "./src/tune/geometries.ts";
+/**
+ * The `explore` set's order and threshold: the cases class by class (a profile field's cases
+ * together — what a caller that sweeps one case per call measures them in, passing the rows along
+ * as `GeometrySweepOptions.exploreEvidence`), and the ratio to the default below which a timed
+ * candidate is dropped for its class (×1, under the derivation's ×1.05). {@link geometryCaseClass}
+ * is the class of a case by its id: the profile field {@link deriveGeometryProfile} reads the case
+ * in, the one mapping the order and the dropping use.
+ */
+export {
+  EXPLORE_KEEP_SPEEDUP,
+  geometryCaseClass,
+  geometryExploreOrder,
+} from "./src/tune/geometry-explore.ts";
+export type { ProfileSlot as GeometryCaseClass } from "./src/tune/derive.ts";
 export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";
 /**
  * Every case of the sweep's shape table as its id and op family, in op-family order: the ids
@@ -159,9 +183,26 @@ export type {
 /**
  * Derives a geometry profile from sweep records (and, for the online attention's key-axis form,
  * attention-bench records — `DeriveGeometryProfileOptions.attentionBench`), and serializes a profile
- * as JSON for storage and injection.
+ * as JSON for storage and injection. {@link GEOMETRY_MIN_SPEEDUP} is the default of
+ * `DeriveGeometryProfileOptions.minSpeedup`: a geometry is adopted for a field only when it is at
+ * least that much faster than the default in every case of the field (×1.05).
+ *
+ * What the derivation drops from one record's ratio material, as a reader of one record can ask it:
+ * {@link geometryCaseExclusion} (a whole case — the default's re-measurement failed, is missing or
+ * moved out of range, or the default row's rounding-error bound is over 1%) and
+ * {@link geometryRowExclusion} (one candidate's observation of a case — its ratio's rounding-error
+ * bound is over 1%), with the record's rounding step {@link geometryTimestampQuantum} (100 µs when
+ * its `gpuTiming.quantized` is true, else 0). No geometry is adopted for a field with a case that
+ * has no ratio for it.
  */
-export { deriveGeometryProfile, geometryProfileJson } from "./src/tune/derive.ts";
+export {
+  DEFAULT_MIN_SPEEDUP as GEOMETRY_MIN_SPEEDUP,
+  deriveGeometryProfile,
+  geometryCaseExclusion,
+  geometryProfileJson,
+  geometryRowExclusion,
+  geometryTimestampQuantum,
+} from "./src/tune/derive.ts";
 export type {
   AttentionBenchInput,
   DeriveGeometryProfileOptions,
@@ -299,12 +340,37 @@ export type {
  * {@link planGemvMeasurements} reads the same records and says, per case and row count of the
  * `full` set, the candidates the derivation reads there that fewer than two records could be
  * evidence for — what a sweep must measure for the derivation to be complete.
+ *
+ * What the derivation reads a group for, as a reader of one record can ask it: {@link gemvGroupRole}
+ * (what a class's kernels at a row count are read for — `winner` at M = 1, `no-regression` for the
+ * reorder class at the other row counts of the parallel range, `unread` elsewhere),
+ * {@link gemvTableCandidate} (whether a row at M = 1 is a candidate a table can hold: a sequential
+ * variant, or a plain or staged parallel row — not the subgroup form, a Session option),
+ * {@link GEMV_MIN_SPEEDUP} (the adoption threshold over the default's choice, ×1.10),
+ * {@link gemvClassReference} (the kernel a class is read against at a case and row count: the
+ * current default profile's choice at `exact` or at `reorder`, whatever a record's summary names),
+ * {@link gemvReferenceRefusal} (why a group's row of that kernel is no reference, from the row
+ * alone) and {@link gemvRowReading} (how a row reads against the reference's time: evidence with its
+ * gain, ruled out by a failure or a failed check, or no evidence). The derivation also reads whether
+ * a row is of the current runtime (its kernel fingerprint against the table it derives for) and
+ * takes a reference's time only when a second record repeats it; neither is read by these.
  */
-export { deriveLinearGemvChoices, planGemvMeasurements } from "./src/tune/gemv-derive.ts";
+export {
+  deriveLinearGemvChoices,
+  gemvClassReference,
+  gemvReferenceRefusal,
+  gemvRowReading,
+  gemvTableCandidate,
+  planGemvMeasurements,
+} from "./src/tune/gemv-derive.ts";
+export { GEMV_MIN_SPEEDUP, gemvGroupRole } from "./src/tune/gemv-candidates.ts";
+export type { GemvGroupRole } from "./src/tune/gemv-candidates.ts";
 export type {
   DeriveLinearGemvOptions,
   GemvMeasurementPlanning,
   GemvMissingMeasurement,
+  GemvReferenceRefusal,
+  GemvRowReading,
   GemvSweepInput,
   LinearGemvDecision,
   LinearGemvDerivation,

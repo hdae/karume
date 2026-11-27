@@ -7,8 +7,8 @@
  * cancelled); one that failed before any chat rethrows. Pure, so `vp test` covers it.
  */
 
-import type { EntryResult } from "../entry.ts";
-import { messageText } from "../record.ts";
+import { type EntryResult, messageText } from "@karume/sweep-app-support/record";
+
 import { buildBenchData, type DecodeBenchData } from "./data.ts";
 import { armLabel, type BenchArm, type BenchSettings, benchPrompt } from "./plan.ts";
 import { type ArmGemvChoices, gemvChoicesLine } from "./profile.ts";

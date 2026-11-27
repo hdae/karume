@@ -17,8 +17,9 @@ import { EXPERT_SPECULATION_DEPTH } from "@karume/gemma4-app-support/settings";
 import { chatPrompt } from "@karume/models/gemma";
 import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb } from "@karume/runtime/tune";
+import { booleanValue, choiceValue, textValue } from "@karume/sweep-app-support/parameters";
 
-import { booleanValue, choiceValue, type Entry, textValue } from "../../entry.ts";
+import type { Entry } from "../../entry.ts";
 import { buildGemmaPipeline, type GemmaPipeline } from "../../gemma4/pipeline.ts";
 import {
   acquireWithSubgroups,

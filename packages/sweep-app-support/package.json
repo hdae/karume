@@ -1,0 +1,33 @@
+{
+  "name": "@karume/sweep-app-support",
+  "version": "0.0.0",
+  "private": true,
+  "description": "What the workbench and the benchmark app share of the two sweeps: the typed parameters, the record envelope and its path rule, the per-case loop with idle time, and the GEMV and geometry sweeps' plans, runs, merged records and summaries.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./parameters": "./src/parameters.ts",
+    "./record": "./src/record.ts",
+    "./record-path": "./src/record-path.ts",
+    "./environment": "./src/environment.ts",
+    "./per-case-sweep": "./src/per-case-sweep.ts",
+    "./gemv-sweep/record": "./src/gemv-sweep/record.ts",
+    "./gemv-sweep/run": "./src/gemv-sweep/run.ts",
+    "./gemv-sweep/settings": "./src/gemv-sweep/settings.ts",
+    "./gemv-sweep/summary": "./src/gemv-sweep/summary.ts",
+    "./geometry-sweep/k88": "./src/geometry-sweep/k88.ts",
+    "./geometry-sweep/record": "./src/geometry-sweep/record.ts",
+    "./geometry-sweep/run": "./src/geometry-sweep/run.ts",
+    "./geometry-sweep/settings": "./src/geometry-sweep/settings.ts",
+    "./geometry-sweep/summary": "./src/geometry-sweep/summary.ts",
+    "./node": "./node.ts"
+  },
+  "dependencies": {
+    "@karume/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@webgpu/types": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

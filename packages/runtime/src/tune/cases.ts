@@ -39,7 +39,7 @@
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
-import { type CandidateSet, DEFAULT_CANDIDATE_SET } from "./geometries.ts";
+import { DEFAULT_CANDIDATE_SET, type SweepSet } from "./geometries.ts";
 
 /**
  * The op families of the sweep (the vocabulary of the CLI's `--op` and the page's checkboxes — both
@@ -821,10 +821,10 @@ export const K88_CASES: readonly SweepCase[] = [
 
 /**
  * The case table a candidate set sweeps: the evaluation set `k88` its own table, every other set
- * {@link SWEEP_CASES}. The sweep, its record's case-set version and default fingerprint, and the
- * page's case list take it from here.
+ * (`explore` among them) {@link SWEEP_CASES}. The sweep, its record's case-set version and default
+ * fingerprint, and the page's case list take it from here.
  */
-export const sweepCasesFor = (set: CandidateSet): readonly SweepCase[] =>
+export const sweepCasesFor = (set: SweepSet): readonly SweepCase[] =>
   set === "k88" ? K88_CASES : SWEEP_CASES;
 
 /**
@@ -846,13 +846,13 @@ export type SweepCaseEntry = {
 };
 
 /**
- * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}) as
- * its id and op, in the table's order (the `k88` cases with their `censusCount` and
- * `censusGroup`). A new array of new objects on every call: the table
- * itself stays internal (its other descriptive fields are no public surface), and nothing a caller
- * does to the result reaches the case set or the fingerprints.
+ * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}; the
+ * `explore` set sweeps `full`'s, {@link SWEEP_CASES}) as its id and op, in the table's order (the
+ * `k88` cases with their `censusCount` and `censusGroup`). A new array of new objects on every call:
+ * the table itself stays internal (its other descriptive fields are no public surface), and nothing a
+ * caller does to the result reaches the case set or the fingerprints.
  */
-export const sweepCaseEntries = (set: CandidateSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
+export const sweepCaseEntries = (set: SweepSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
   set === "k88"
     ? K88_CASES.map((sweepCase) => ({
         id: sweepCase.id,

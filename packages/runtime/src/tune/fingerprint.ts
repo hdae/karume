@@ -61,11 +61,11 @@ import {
   sweepOpFamily,
 } from "./families.ts";
 import {
-  type CandidateSet,
   conv2dCandidate,
   gemmCandidate,
   type GeometryCandidate,
   i8a8Candidate,
+  type SweepSet,
 } from "./geometries.ts";
 import { type CasePlan, casePlan } from "./harness.ts";
 import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
@@ -472,6 +472,7 @@ export type MeasuredRow = {
   readonly caseId: string;
   readonly geometryParams: GemmGeometry | I8a8Geometry;
   readonly error?: string;
+  readonly skipped?: true;
 };
 
 /**
@@ -479,7 +480,9 @@ export type MeasuredRow = {
  * into which the cases and the case plan can be injected).
  *
  * In the order of the record's rows, builds the (case, geometry) of every non-failed row (a row
- * without `error` — failed rows are no adoption material) from the case plan with the record's dp4a
+ * without `error` — failed rows are no adoption material) that the sweep did not skip (a `skipped`
+ * row of the `explore` set built no kernel and measured nothing, so no change of its kernel can make
+ * its record stale) from the case plan with the record's dp4a
  * variant, and hashes the same one-line JSON as {@link profileKernelsId} joined with newlines. The
  * dispatch-count limit is the same {@link FINGERPRINT_WORKGROUP_LIMIT} (kept independent of the
  * device).
@@ -505,7 +508,7 @@ export const candidateKernelsId = (
   const plans = new Map<string, CasePlan>();
   const lines: string[] = [];
   for (const row of rows) {
-    if (row.error !== undefined) continue;
+    if (row.error !== undefined || row.skipped === true) continue;
     const sweepCase = byId.get(row.caseId);
     if (sweepCase === undefined) {
       throw new KernelsIdError(
@@ -542,8 +545,9 @@ export const candidateKernelsId = (
 /**
  * The kernel fingerprint of the candidates the sweep measured (the record's `candidateKernels` —
  * ADR 0117 decision 8): the hash (16 hex digits) of the kernels that the (case, geometry) of the
- * record's non-failed rows build with the record's dp4a variant. Reads neither the GPU nor the
- * clock. The writer records it at the end of the sweep, and the generator re-derives it with the
+ * record's non-failed rows that were not skipped build with the record's dp4a variant. Reads
+ * neither the GPU nor the clock. The writer records it at the end of the sweep, and the generator
+ * re-derives it with the
  * current runtime and rejects the record on a difference — no table is built from old measurements
  * (speed ratios, output match) on a runtime where only the candidates' WGSL changed (the table's
  * family fingerprints are derived with the current runtime at generation, so matching could not
@@ -657,7 +661,8 @@ export const familyCaseSetId = (family: GeometryProfileFamily): string =>
  * and, for `gemm` and `i8a8-linear`, the bucket boundaries of `gemmRows` (`PROFILE_GEMM_ROWS_BOUNDS`)
  * and of `i8a8.linear` (`I8A8_LINEAR_ROWS_BOUNDS`). Given a candidate
  * set, the versions a sweep of every case of that set records ({@link candidateSetCaseSetIds} — the
- * same values for the table-deriving sets, the families of its own table for an evaluation set).
+ * same values for the table-deriving sets and `explore`, the families of its own table for an
+ * evaluation set).
  *
  * No hand-bumped version number (no way to add a case and forget the bump). When a family's cases
  * are added, removed or reordered, or a dispatch-deciding field or a bound of the family changes,
@@ -665,7 +670,7 @@ export const familyCaseSetId = (family: GeometryProfileFamily): string =>
  * (re-sweep of that family). Changes only to informational fields such as descriptions do not change
  * it.
  */
-export const sweepCaseSetIds = (set?: CandidateSet): GeometryProfileFamilyIds =>
+export const sweepCaseSetIds = (set?: SweepSet): GeometryProfileFamilyIds =>
   set === undefined ? caseSetIds(SWEEP_CASES) : candidateSetCaseSetIds(set);
 
 /**
@@ -674,7 +679,7 @@ export const sweepCaseSetIds = (set?: CandidateSet): GeometryProfileFamilyIds =>
  * family of the set's case table, the default table's fingerprint over the family's cases
  * ({@link candidateSetDefaultKernelsIds}; without `set`, over `SWEEP_CASES`).
  */
-export const sweepDefaultKernelsIds = (set?: CandidateSet): GeometryProfileFamilyIds =>
+export const sweepDefaultKernelsIds = (set?: SweepSet): GeometryProfileFamilyIds =>
   set === undefined
     ? geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE)
     : candidateSetDefaultKernelsIds(set);
@@ -693,7 +698,7 @@ export const attentionBenchShapeSetId = (): string =>
  * (the whole table when absent).
  */
 const setCases = (
-  set: CandidateSet,
+  set: SweepSet,
   families: readonly GeometryProfileFamily[] | undefined,
 ): readonly SweepCase[] => {
   const cases = sweepCasesFor(set);
@@ -710,7 +715,7 @@ const setCases = (
  * the sweep's case set.
  */
 export const candidateSetCaseSetIds = (
-  set: CandidateSet,
+  set: SweepSet,
   families?: readonly GeometryProfileFamily[],
 ): GeometryProfileFamilyIds => caseSetIds(setCases(set, families));
 
@@ -721,7 +726,7 @@ export const candidateSetCaseSetIds = (
  * ({@link sweepDefaultKernelsIds} for the table-deriving sets).
  */
 export const candidateSetDefaultKernelsIds = (
-  set: CandidateSet,
+  set: SweepSet,
   families?: readonly GeometryProfileFamily[],
 ): GeometryProfileFamilyIds =>
   profileKernelsIds(DEFAULT_GEOMETRY_PROFILE, setCases(set, families), casePlan);

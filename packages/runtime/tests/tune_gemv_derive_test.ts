@@ -18,7 +18,9 @@
 // (one record derives nothing); ⑤ what the field gets (the exception row replaced, added or removed;
 // the parallel row replaced in place; nothing when nothing is adopted) and the provenance and lines
 // that name the records; ⑥ the plan of what the records lack (planGemvMeasurements); ⑦ a regeneration
-// of the tile geometry carries a base table's `linearGemv`.
+// of the tile geometry carries a base table's `linearGemv`; ⑧ the candidates a table can hold, as a
+// reader of one record asks it (gemvTableCandidate: not the subgroup form, a row-blocked kernel, a
+// row-block height or the GEMM).
 //
 // Faults injected: record 2 at ×1.09 (one record below the bar); differing words, and a reorder row
 // outside the band, in record 2; records made under older default choices (read against the current
@@ -46,6 +48,7 @@ import {
   deriveGeometryProfile,
   deriveLinearGemvChoices,
   type GemvSweepInput,
+  gemvTableCandidate,
   type LinearGemvDecision,
   type LinearGemvDerivation,
   parseGeometryProfileJson,
@@ -1644,5 +1647,56 @@ describe("a regeneration of the tile geometry (deriveGeometryProfile with a base
     // Before the provenance, as the type orders the fields (the printer writes them in this order)
     const keys = Object.keys(profile);
     assertEquals(keys.indexOf("linearGemv"), keys.indexOf("provenance") - 1);
+  });
+});
+
+describe("gemvTableCandidate: the candidates a table can hold", () => {
+  const variant = { cols: 32, unroll: 4 };
+  it("takes a sequential variant of the identical class and a plain or staged parallel row of the reorder class", () => {
+    assert(
+      gemvTableCandidate({
+        class: "identical",
+        choice: { id: "gemv-m1", storage: "i4", groupSize: 32, variant },
+      }),
+    );
+    assert(
+      gemvTableCandidate({
+        class: "reorder",
+        choice: { id: "gemv-parallel", storage: "i4", groupSize: 32, lanes: 4, variant },
+      }),
+    );
+    assert(
+      gemvTableCandidate({
+        class: "reorder",
+        choice: { id: "gemv-parallel-staged", storage: "i8", lanes: 16, variant },
+      }),
+    );
+  });
+
+  it("does not take the subgroup form (a Session option), a row-blocked kernel (a row's form past one row), a row-block height or the GEMM (faults: each)", () => {
+    assert(
+      !gemvTableCandidate({
+        class: "reorder",
+        choice: { id: "gemv-parallel-subgroup32", storage: "i4", groupSize: 32, lanes: 8, variant },
+      }),
+    );
+    assert(
+      !gemvTableCandidate({
+        class: "reorder",
+        choice: { id: "gemv-parallel-staged", storage: "i8", lanes: 16, variant, parallelRows: 4 },
+      }),
+    );
+    assert(
+      !gemvTableCandidate({
+        class: "identical",
+        choice: { id: "gemv-rows", storage: "i8", variant, rowsVariant: { ...variant, rows: 8 } },
+      }),
+    );
+    assert(
+      !gemvTableCandidate({
+        class: "identical",
+        choice: { id: "gemm-f32", storage: "bf16", v4: true },
+      }),
+    );
   });
 });

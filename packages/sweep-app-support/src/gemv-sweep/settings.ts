@@ -1,8 +1,8 @@
 /**
- * The GEMV sweep entry's settings: what a run is asked for (candidate set, cases, row counts,
- * candidates, the quick look's margin, rounds, idle seconds between cases) and its plan (the case
- * list `runGemvSweep` is called with, one case per call — the sentinels first for the `explore`
- * set). Pure, so the case selection is tested without a GPU.
+ * The GEMV sweep entry's settings: its declared parameters, what a run is asked for (candidate set,
+ * cases, row counts, candidates, the quick look's margin, rounds, idle seconds between cases) and
+ * its plan (the case list `runGemvSweep` is called with, one case per call — the sentinels first for
+ * the `explore` set). Pure, so the case selection is tested without a GPU.
  */
 
 import {
@@ -18,10 +18,11 @@ import {
   choicesValue,
   choiceValue,
   integerValue,
+  type Parameter,
   ParameterError,
   type ParameterValues,
   textValue,
-} from "../entry.ts";
+} from "../parameters.ts";
 
 /** The candidate sets, the smaller first (the default). */
 export const GEMV_CANDIDATE_SETS = [
@@ -43,6 +44,69 @@ export const GEMV_ROW_COUNTS: readonly string[] = [
 
 /** Every candidate name of the runtime's table (the options of `candidates`). */
 export const GEMV_CANDIDATE_NAMES: readonly string[] = gemvSweepCandidateNames();
+
+/** The entry id of the GEMV sweep: the workbench's entry and the record's `entry.id`. */
+export const GEMV_SWEEP_ENTRY_ID = "gemv-sweep";
+
+/**
+ * The GEMV sweep entry's parameters, in the order a record's `entry.parameters` holds them: the
+ * workbench's entry declares them, and the benchmark app parses its run's values with them.
+ */
+export const GEMV_SWEEP_PARAMETERS: readonly Parameter[] = [
+  {
+    kind: "choice",
+    name: "candidateSet",
+    label:
+      "Candidate set (quick: M = 1; full: M = 1, 4 and 8, the whole grid; row-blocks: M = 16 and 64; explore: M = 1, 4 and 8, the whole grid on the sentinels, the predicted candidates elsewhere)",
+    options: GEMV_CANDIDATE_SETS,
+    default: "quick",
+  },
+  {
+    kind: "choices",
+    name: "cases",
+    label: "Cases (none: every case)",
+    options: GEMV_CASE_IDS,
+    default: [],
+  },
+  {
+    kind: "choices",
+    name: "rows",
+    label: "Row counts (none: every row count of the set)",
+    options: GEMV_ROW_COUNTS,
+    default: [],
+  },
+  {
+    kind: "choices",
+    name: "candidates",
+    label: "Candidates besides the references (none: every candidate; the explore set takes none)",
+    options: GEMV_CANDIDATE_NAMES,
+    default: [],
+  },
+  {
+    // Text, so that empty can mean the set's default (×1.25; ×1.10 for explore)
+    kind: "text",
+    name: "quickLookMargin",
+    label:
+      "Quick look margin (empty: the set's default, ×1.25 and ×1.10 for explore; 0: off — every kernel is timed in full)",
+    default: "",
+  },
+  {
+    kind: "integer",
+    name: "rounds",
+    label: "Rounds per kernel (the min is kept)",
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER,
+    default: 5,
+  },
+  {
+    kind: "integer",
+    name: "idleSeconds",
+    label: "Idle before every case but the first (s)",
+    min: 0,
+    max: Number.MAX_SAFE_INTEGER,
+    default: 10,
+  },
+];
 
 /** What a run is asked for: the entry's typed parameters. */
 export type GemvSweepSelection = {

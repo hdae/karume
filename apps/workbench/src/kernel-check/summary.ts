@@ -4,7 +4,8 @@
  * Pure, over the same outcomes the record body is built from.
  */
 
-import type { EntryResult, Verdict as EntryVerdict } from "../entry.ts";
+import type { EntryResult, Verdict as EntryVerdict } from "@karume/sweep-app-support/record";
+
 import {
   type CheckOutcomes,
   hexWord,

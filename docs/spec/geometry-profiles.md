@@ -51,6 +51,14 @@ time.
 - A sweep record's row the quick look screened out (`screened`, [workbench.md](workbench.md#the-entries)) has no
   ratio and no output match: it is no observation, so a geometry screened out in a case that no record timed it in is
   not adopted for that case's class (its verdict says so).
+- A record of the `explore` set ([workbench.md](workbench.md#the-geometry-sweeps-explore-set)) is read by the same
+  rules, as a `full` record that holds part of the candidates: its case-set versions and default fingerprints are
+  `full`'s, and its candidate fingerprint covers the rows that are not skipped. A skipped row (`skipped`: an earlier
+  case of the class ruled the geometry out in that sweep) is no observation, as a screened row is — neither a failure
+  nor a mismatch —, so the geometry is not adopted for the class unless another record timed it in that case; the
+  verdict says `not measured in <case> (the explore set dropped it for the class)`. The table's provenance names the
+  set (`candidateSet: "explore"`). A skipped default row, a row both skipped and screened, and a candidate set that is
+  neither a candidate set nor `explore` are refused, naming the record.
 
 ## The skeleton form and the counter decode
 
@@ -58,9 +66,10 @@ time.
   `"tas-tb-un"`) in the row-count rules of linear / matmul / bmm (`gemmRows`) and in `conv2d`, and the counter decode
   (`decode: "counter"`) in `conv2d` only. The fused attention's fields take neither. The output words are the same
   with and without them; they are a choice of speed, and the pipeline key names them.
-- The sweep's candidate sets `quick+` and `full` measure them. A linear / matmul / bmm case measures every tile of the
-  set and then the same tile with each form (three geometries per tile). A conv2d case measures every tile, the tile
-  with each form, with the decode, and with the decode and each form (six per tile). `quick` measures the tiles alone.
+- The sweep's candidate sets `quick+` and `full` measure them (and `explore`, which measures `full`'s candidates). A
+  linear / matmul / bmm case measures every tile of the set and then the same tile with each form (three geometries per
+  tile). A conv2d case measures every tile, the tile with each form, with the decode, and with the decode and each form
+  (six per tile). `quick` measures the tiles alone.
 - A case measures the fields only when its kernel takes them: the vec4 kernel of f32 compute, by the predicate the
   pipeline keys use. Every linear / matmul / bmm and conv2d case of the sweep's table runs that kernel. The fused
   attention measures the tiles alone: its kernels keep the original form, so a field there would time one kernel twice.

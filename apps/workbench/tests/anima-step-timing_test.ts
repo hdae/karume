@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import { ParameterError, parseParameters } from "@karume/sweep-app-support/parameters";
 
 import {
   ANIMA_MOUNT_MODEL,
@@ -14,7 +15,6 @@ import {
   timingModel,
 } from "../src/anima-step-timing/record.ts";
 import stepTiming from "../src/entries/local/anima-step-timing.ts";
-import { ParameterError, parseParameters } from "../src/entry.ts";
 
 /** The callbacks of one generation: stages around `stepMs` (each step's length in ms). */
 const timeline = (stepMs: readonly number[]): TimedEvent[] => {

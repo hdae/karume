@@ -5,7 +5,8 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
-import { errorText, type WorkbenchRecord } from "../record.ts";
+import { errorText, type WorkbenchRecord } from "@karume/sweep-app-support/record";
+
 import { element } from "./dom.ts";
 import { downloadRecord, type SaveResult } from "./save.ts";
 

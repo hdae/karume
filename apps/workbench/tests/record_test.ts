@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
-
-import type { Entry, EntryResult } from "../src/entry.ts";
-import { executeEntry } from "../src/execute.ts";
 import {
   buildRecord,
   type Checkout,
+  type EntryResult,
   RECORD_FORMAT,
   type RecordEnvironment,
   recordText,
   type Settlement,
   utcStamp,
-} from "../src/record.ts";
+} from "@karume/sweep-app-support/record";
+
+import type { Entry } from "../src/entry.ts";
+import { executeEntry } from "../src/execute.ts";
 
 const ENVIRONMENT: RecordEnvironment = {
   host: "browser",

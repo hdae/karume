@@ -11,8 +11,7 @@ import type {
   SessionAbRecord,
   SessionAbVerdict,
 } from "@karume/runtime/tune";
-
-import type { EntryResult, Verdict } from "../entry.ts";
+import type { EntryResult, Verdict } from "@karume/sweep-app-support/record";
 
 import type {
   SessionAbArmCounts,

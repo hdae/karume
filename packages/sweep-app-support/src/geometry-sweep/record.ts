@@ -12,7 +12,7 @@ import {
   sweepCandidateKernelsId,
 } from "@karume/runtime/tune";
 
-import { type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
+import { mergedQuantized, type MergeOptions, mergePerCase } from "../per-case-sweep.ts";
 
 export type { MergeOptions };
 
@@ -101,7 +101,7 @@ export const mergeSweepReports = (
     candidateKernels: sweepCandidateKernelsId(rows, first.dp4a),
     gpuTiming: {
       ...first.gpuTiming,
-      quantized: reports.some((report) => report.gpuTiming.quantized),
+      quantized: mergedQuantized(reports),
     },
     settings: { ...first.settings, cases: [...options.plannedCaseIds] },
     cases: reports.flatMap((report) => report.cases),
@@ -112,7 +112,7 @@ export const mergeSweepReports = (
 /** One case of the summary table. */
 export type CaseSummaryRow = {
   readonly caseId: string;
-  /** Rows measured so far (the default and every candidate, failures included). */
+  /** Rows so far (the default and every candidate, failures and skipped rows included). */
   readonly rows: number;
   /** The default geometry's time per dispatch, in the record's unit. */
   readonly defaultPerDispatch?: number;

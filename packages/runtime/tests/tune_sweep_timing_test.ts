@@ -20,6 +20,12 @@
 // The GEMV sweep's progress steps: each phase of a row count counts from 0 to its total (fault: a
 // kernel screened, so the calibration counts one kernel fewer than the quick look).
 //
+// The geometry sweep's explore set over two cases of one class: the later case neither prepares nor
+// times a candidate the first screened out, failed or timed below ×1, and writes a skipped row for
+// it, while it times one at exactly ×1 (faults: one candidate per reason); each case's plan event
+// and the totals of its steps (faults: the skipped candidates, a failed pipeline); one case per call
+// with the earlier rows handed in holds what one call holds (fault: the evidence ignored).
+//
 // The fake device's passes take the time the test gives them: a timed pass's timestamp difference
 // (`gpuNs`, by the pass's pipeline key, dispatch count and index), and the wall clock a pass takes to
 // complete (`wallMs` — the probe reads only that), on the fake device's own clock, which the sweep
@@ -35,12 +41,15 @@
 // 1 % (the spread must say so) and a cancel in the middle of the rounds (no row may come of them).
 // The warm start of each sweep, and the rotation of the rounds, are read from the log of passes.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStrictEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import type { Tolerance } from "../src/reference/allclose.ts";
 import { opTolerance } from "../src/reference/op-tolerance.ts";
-import { SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
+import { caseShape, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
+import type { GeometryCandidate } from "../src/tune/geometries.ts";
+import type { SweepRow } from "../src/tune/report.ts";
+import { planSweep, sweepSettings } from "../src/tune/sweep.ts";
 import {
   type GemvCandidate,
   type GemvGates,
@@ -62,6 +71,8 @@ import {
   createResources,
   createSweepContext,
   destroySweepContext,
+  type GeometrySweepPlannedCase,
+  type GeometrySweepStep,
   prepareLaunch,
   quickLookOrder,
   type ReadyLaunch,
@@ -1042,5 +1053,214 @@ describe("the geometry sweep's quick look", () => {
       );
     }
     assertEquals(summary.screened, 0);
+  });
+});
+
+describe("the geometry sweep's explore set", () => {
+  /** A case of the sweep's table by id. */
+  const caseOf = (id: string): SweepCase => {
+    const found = SWEEP_CASES.find((sweepCase) => sweepCase.id === id);
+    if (found === undefined) throw new Error(`no case ${id}`);
+    return found;
+  };
+  // Two small cases of one class (gemmRows ≤ 16); their kernels' keys hold no shape, so one time
+  // per key serves both
+  const FIRST = caseOf("bmm-b16-m16-n64-k64");
+  const LATER = caseOf("bmm-b16-m16-n64-k128");
+  const plan = casePlan(FIRST, 65535, false);
+  const keyOf = (candidate: GeometryCandidate): string => plan.launch(candidate).key;
+  const othersOf = (sweepCase: SweepCase): GeometryCandidate[] =>
+    candidatesFor(sweepCase, "full").filter(
+      (candidate) => candidate.name !== plan.defaultCandidate.name,
+    );
+  const others = othersOf(FIRST);
+  // The default at 5 µs; slower ×0.98, screened ×1.5 the default's quick time, failing (no
+  // pipeline), equal ×1 exactly; every other candidate ×1.25 faster
+  const [slower, screened, failing, equal] = others;
+  const times = new Map(others.map((candidate) => [keyOf(candidate), 4_000]));
+  times.set(keyOf(slower), 5_100);
+  times.set(keyOf(screened), 7_500);
+  times.set(keyOf(equal), 5_000);
+  const timing: FakeTiming = {
+    gpuNs: byKey(times),
+    failingPipelines: new Set([keyOf(failing)]),
+  };
+
+  /**
+   * One `explore` sweep of `ids` with `evidence` handed in, on a fake device of its own: its rows,
+   * its plan and step events, and how many passes the log held when each case started.
+   */
+  const sweepExplore = (ids: readonly string[], evidence: readonly SweepRow[] = []) =>
+    withContext(timing, async (context, passes) => {
+      const planned = planSweep({
+        candidateSet: "explore",
+        cases: ids,
+        rounds: 2,
+        exploreEvidence: evidence,
+      });
+      const plans: GeometrySweepPlannedCase[] = [];
+      const steps: GeometrySweepStep[] = [];
+      const passesAt: number[] = [];
+      const result = await runSweep(context, planned.cases, sweepSettings(planned, "ns"), {
+        onPlan: (planned) => {
+          plans.push(planned);
+          passesAt.push(passes.length);
+        },
+        onStep: (step) => steps.push(step),
+      });
+      return { ...result, plans, steps, passesAt, passes: [...passes] };
+    });
+  let both: ReturnType<typeof sweepExplore> | undefined;
+  /** The sweep of both cases in one call (run once, read by several cases below). */
+  const bothCases = () => (both ??= sweepExplore([FIRST.id, LATER.id]));
+
+  const rowsOf = (rows: readonly SweepRow[], caseId: string): SweepRow[] =>
+    rows.filter((row) => row.caseId === caseId);
+  const rowNamed = (rows: readonly SweepRow[], candidate: GeometryCandidate): SweepRow => {
+    const found = rows.find((row) => row.geometry === candidate.name);
+    if (found === undefined) throw new Error(`no row ${candidate.name}`);
+    return found;
+  };
+
+  it("measures every candidate in the first case of the class, and in the later case neither prepares nor times the ones the first screened out, failed or timed below ×1 — a skipped row each — while it times the one at exactly ×1 (faults: one candidate per reason)", async () => {
+    const run = await bothCases();
+    const first = rowsOf(run.rows, FIRST.id);
+    assertEquals(first.length, 1 + others.length);
+    assertEquals(
+      first.filter((row) => row.skipped === true),
+      [],
+    );
+    assert((rowNamed(first, slower).speedupVsDefault ?? 1) < 1);
+    assertEquals(rowNamed(first, screened).screened, true);
+    assert(rowNamed(first, failing).error !== undefined);
+    assertEquals(rowNamed(first, equal).speedupVsDefault, 1);
+    const later = rowsOf(run.rows, LATER.id);
+    assertEquals(later.length, 1 + othersOf(LATER).length);
+    assertEquals(
+      later.filter((row) => row.skipped === true),
+      [slower, screened, failing].map((candidate): SweepRow => ({
+        caseId: LATER.id,
+        op: LATER.op,
+        shape: caseShape(LATER),
+        censusCount: LATER.censusCount,
+        geometry: candidate.name,
+        geometryParams: candidate.geometry,
+        isDefault: false,
+        skipped: true,
+      })),
+    );
+    assertEquals(rowNamed(later, equal).rounds?.length, 2);
+    // The dropped candidates took no pass in the later case (and the slower and the screened one
+    // did in the first: the control)
+    const droppedKeys = new Set([slower, screened, failing].map(keyOf));
+    assertEquals(
+      run.passes.slice(run.passesAt[1]).filter((pass) => droppedKeys.has(pass.key)),
+      [],
+    );
+    const firstKeys = new Set(run.passes.slice(0, run.passesAt[1]).map((pass) => pass.key));
+    assert(firstKeys.has(keyOf(slower)) && firstKeys.has(keyOf(screened)));
+  });
+
+  it("states each case's plan when it starts: the geometries it plans and the candidates it skips", async () => {
+    const run = await bothCases();
+    assertEquals(run.plans, [
+      { caseId: FIRST.id, index: 0, geometries: 1 + others.length, skipped: 0 },
+      { caseId: LATER.id, index: 1, geometries: 1 + othersOf(LATER).length - 3, skipped: 3 },
+    ]);
+  });
+
+  /** Per case, each phase's total and the counts it reported, in the order they came. */
+  const phasesOf = (steps: readonly GeometrySweepStep[], caseId: string) =>
+    steps
+      .filter((step) => step.caseId === caseId)
+      .reduce<{ phase: string; total: number; done: number[] }[]>((phases, step) => {
+        const last = phases.at(-1);
+        if (last !== undefined && last.phase === step.phase && last.total === step.total) {
+          last.done.push(step.done);
+        } else {
+          phases.push({ phase: step.phase, total: step.total, done: [step.done] });
+        }
+        return phases;
+      }, []);
+  const upTo = (total: number): number[] => Array.from({ length: total + 1 }, (_, index) => index);
+
+  it("counts each phase of a case from 0 to its total: the geometries prepared, the warm start, the quick looks, the geometries timed, the re-measurement (faults: the skipped candidates counted; a failed pipeline looked at)", async () => {
+    const run = await bothCases();
+    const timedIn = (caseId: string): number =>
+      rowsOf(run.rows, caseId).filter((row) => row.rounds !== undefined).length;
+    const [firstPlan, laterPlan] = run.plans;
+    assertEquals(phasesOf(run.steps, FIRST.id), [
+      { phase: "prepare", total: firstPlan.geometries, done: upTo(firstPlan.geometries) },
+      { phase: "warm-start", total: 1, done: upTo(1) },
+      // The failing candidate has no pipeline: it gets no quick look
+      {
+        phase: "quick-look",
+        total: firstPlan.geometries - 1,
+        done: upTo(firstPlan.geometries - 1),
+      },
+      { phase: "timing", total: timedIn(FIRST.id), done: upTo(timedIn(FIRST.id)) },
+      { phase: "repeat", total: 1, done: upTo(1) },
+    ]);
+    assertEquals(phasesOf(run.steps, LATER.id), [
+      { phase: "prepare", total: laterPlan.geometries, done: upTo(laterPlan.geometries) },
+      { phase: "warm-start", total: 1, done: upTo(1) },
+      { phase: "quick-look", total: laterPlan.geometries, done: upTo(laterPlan.geometries) },
+      { phase: "timing", total: timedIn(LATER.id), done: upTo(timedIn(LATER.id)) },
+      { phase: "repeat", total: 1, done: upTo(1) },
+    ]);
+  });
+
+  it("holds, swept one case per call with the earlier calls' rows handed in, what one call over the cases holds (fault: the evidence ignored)", async () => {
+    const run = await bothCases();
+    const first = await sweepExplore([FIRST.id]);
+    const later = await sweepExplore([LATER.id], first.rows);
+    assertEquals([...first.rows, ...later.rows], run.rows);
+    assertEquals(later.plans, [{ ...run.plans[1], index: 0 }]);
+  });
+
+  it("lets an exception the plan or step callback throws reach the caller as is, at every phase: it never becomes a failure row (fault: a callback inside a measurement's try)", async () => {
+    const phases: readonly GeometrySweepStep["phase"][] = [
+      "prepare",
+      "warm-start",
+      "quick-look",
+      "timing",
+      "repeat",
+    ];
+    for (const phase of phases) {
+      const thrown = new Error(`thrown at ${phase}`);
+      const caught = await withContext(timing, (context) =>
+        runSweep(
+          context,
+          [FIRST],
+          sweepSettings(planSweep({ candidateSet: "explore", cases: [FIRST.id], rounds: 1 }), "ns"),
+          {
+            onStep: (step) => {
+              if (step.phase === phase && step.done === step.total) throw thrown;
+            },
+          },
+        ).then(
+          () => undefined,
+          (error: unknown) => error,
+        ),
+      );
+      assertStrictEquals(caught, thrown, phase);
+    }
+    const planned = new Error("thrown at plan");
+    const caught = await withContext(timing, (context) =>
+      runSweep(
+        context,
+        [FIRST],
+        sweepSettings(planSweep({ candidateSet: "explore", cases: [FIRST.id], rounds: 1 }), "ns"),
+        {
+          onPlan: () => {
+            throw planned;
+          },
+        },
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      ),
+    );
+    assertStrictEquals(caught, planned);
   });
 });

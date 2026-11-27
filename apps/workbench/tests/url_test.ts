@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
+import { parseParameters } from "@karume/sweep-app-support/parameters";
 
-import { type Entry, parseParameters } from "../src/entry.ts";
+import type { Entry } from "../src/entry.ts";
 import { batchQueryOf, givenOfQuery, queryOf, selectionOfQuery } from "../src/shell/url.ts";
 
 const ENTRY: Entry = {

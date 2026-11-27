@@ -689,11 +689,23 @@
         "kind": "typeAlias"
       },
       {
+        "name": "EXPLORE_KEEP_SPEEDUP",
+        "kind": "variable"
+      },
+      {
         "name": "EXPLORE_QUICK_LOOK_MARGIN",
         "kind": "variable"
       },
       {
+        "name": "GEMV_MIN_SPEEDUP",
+        "kind": "variable"
+      },
+      {
         "name": "GEMV_SENTINEL_COUNT",
+        "kind": "variable"
+      },
+      {
+        "name": "GEOMETRY_MIN_SPEEDUP",
         "kind": "variable"
       },
       {
@@ -705,11 +717,23 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvGroupRole",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvMeasurementPlanning",
         "kind": "typeAlias"
       },
       {
         "name": "GemvMissingMeasurement",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvReferenceRefusal",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvRowReading",
         "kind": "typeAlias"
       },
       {
@@ -777,6 +801,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometryCaseClass",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeometryProfileDerivation",
         "kind": "typeAlias"
       },
@@ -821,6 +849,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometrySweepPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepPlannedCase",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeometrySweepProgress",
         "kind": "typeAlias"
       },
@@ -830,6 +866,10 @@
       },
       {
         "name": "GeometrySweepRow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepStep",
         "kind": "typeAlias"
       },
       {
@@ -965,6 +1005,10 @@
         "kind": "function"
       },
       {
+        "name": "gemvClassReference",
+        "kind": "function"
+      },
+      {
         "name": "gemvExploreOrder",
         "kind": "function"
       },
@@ -974,6 +1018,18 @@
       },
       {
         "name": "gemvGridNeighbours",
+        "kind": "function"
+      },
+      {
+        "name": "gemvGroupRole",
+        "kind": "function"
+      },
+      {
+        "name": "gemvReferenceRefusal",
+        "kind": "function"
+      },
+      {
+        "name": "gemvRowReading",
         "kind": "function"
       },
       {
@@ -997,6 +1053,22 @@
         "kind": "function"
       },
       {
+        "name": "gemvTableCandidate",
+        "kind": "function"
+      },
+      {
+        "name": "geometryCaseClass",
+        "kind": "function"
+      },
+      {
+        "name": "geometryCaseExclusion",
+        "kind": "function"
+      },
+      {
+        "name": "geometryExploreOrder",
+        "kind": "function"
+      },
+      {
         "name": "geometryProfileJson",
         "kind": "function"
       },
@@ -1005,7 +1077,15 @@
         "kind": "function"
       },
       {
+        "name": "geometryRowExclusion",
+        "kind": "function"
+      },
+      {
         "name": "geometrySweepCases",
+        "kind": "function"
+      },
+      {
+        "name": "geometryTimestampQuantum",
         "kind": "function"
       },
       {
