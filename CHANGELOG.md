@@ -104,7 +104,8 @@ measurements in `docs/research/`.
   states both rules. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
   and, under the new rule, `tableChoice` and `evidence`.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
-  (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group),
+  (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group,
+  and against the device table's choice where the record names it, as the derivation keeps a table's choice),
   at ×1.065 and at ×1.03 side by side, beside the run's class as the derivation will read the record
   (`gemvRecordReading`: rounded or missing GPU timestamps are no evidence, however steady) — steady in ns, "this run
   alone is enough for a table";

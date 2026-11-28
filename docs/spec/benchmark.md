@@ -116,8 +116,13 @@ own rules, predicates and exclusions of `@karume/runtime/tune` (nothing restated
   the current default profile's choice at `exact` or at `reorder`, `gemvClassReference`, whatever the group's
   summary names — is one, `gemvReferenceRefusal`; the candidate's row is evidence with its check held,
   `gemvRowReading`; both rows have a pass of at least 20 ms and two positive rounds; the record times in ns) with a
-  break-even margin of at least the margin and a re-timing of the reference within the bar (`gemvReadingIsEvidence`),
-  counted at the default margin, ×1.065 (`GEMV_MARGIN`), and at the lowest one, ×1.03 (`GEMV_LOWEST_MARGIN`), side
+  break-even margin of at least the margin and a re-timing of the reference within the bar (`gemvReadingIsEvidence`).
+  Where the group's summary names the device table's choice for the class (`table`) and it is another kernel than
+  the default's, the count reads as the derivation keeps a table's choice: the group holds a pattern when a candidate
+  clears its bar over the default's choice and over the table's in the same group, or the default's choice clears it
+  over the table's; a group without a time of the table's choice holds none (a record that did not time it does not
+  move it), and one where that choice failed or its check failed is read against the default's choice. A record
+  without `table` (taken before it) is read against the default's choice. Counted at the default margin, ×1.065 (`GEMV_MARGIN`), and at the lowest one, ×1.03 (`GEMV_LOWEST_MARGIN`), side
   by side. Beside the count the page states the run's class, `gemvSteadiness` over the finished GEMV cases'
   summaries (the class of the record they merge into), read as the derivation will read that record
   (`gemvRecordReading` of `@karume/runtime/tune`, the derivation's own test: the finished cases' timing as the merge
@@ -134,11 +139,12 @@ own rules, predicates and exclusions of `@karume/runtime/tune` (nothing restated
   its ratio's rounding-error bound is over 1%). The rounding step is the one of the record the finished cases' records
   merge into (100 µs when any of them looked rounded — `mergedQuantized`, `geometryTimestampQuantum`).
 
-The page shows both as "n of m" and says what they are: where the run held steady, a table can take them from it
-alone; where it did not, only after a second run on the same machine agrees. The derivation reads more than this
-count does — whether a row is of the current runtime (its kernel fingerprint against the table derived for), the
-table's own choice to beat, for a parallel row its kernels at the other row counts of its range, and on an unsteady
-device a second record —, so the count is no promise of a table.
+The page shows both as "n of m" and says what they are: "beats today's choice" — the device table's where the record
+names it —; where the run held steady and its timestamps count, a table can take them from it alone; where it did
+not, only after a second run on the same machine agrees. The derivation reads more than this count does — whether a
+row is of the current runtime (its kernel fingerprint against the table derived for), the table it derives for
+where that is not the one the record names, for a parallel row its kernels at the other row counts of its range, a
+sequential key's other cases, and on an unsteady device a second record —, so the count is no promise of a table.
 
 ## The file
 

@@ -137,6 +137,47 @@ describe("gemvPatterns", () => {
     expect(count([summary], rows)).toEqual({ atMargin: 1, atLowest: 1, of: 1 });
   });
 
+  describe("where the record names the device table's choice (summary.table)", () => {
+    /** The table's exception at exact: c128u8, at `gain` over the baseline (its words the baseline's). */
+    const tableChoice = (gain: number, extra: Partial<GemvSweepRow> = {}) => ({
+      ...gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / gain }),
+      candidate: "c128u8",
+      choice: { id: "gemv-m1" as const, storage: "i8" as const, variant: { cols: 128, unroll: 8 } },
+      ...extra,
+    });
+    const variant = (gain: number) => gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / gain });
+    const summary = [gemvSummary(GEMV_A, { table: { exact: "c128u8", reorder: "parallel-l4" } })];
+
+    it("counts a candidate only where it beats the table's choice by the bar too (fault: read against the default's choice alone, which counts ×1.038 over the table's ×1.3)", () => {
+      const near = [...references(GEMV_A), tableChoice(1.3), variant(1.35)];
+      expect(count(summary, near)).toEqual({ atMargin: 0, atLowest: 1, of: 1 });
+      const clear = [...references(GEMV_A), tableChoice(1.3), variant(1.5)];
+      expect(count(summary, clear)).toEqual({ atMargin: 1, atLowest: 1, of: 1 });
+    });
+
+    it("counts the default's choice that beats the table's by the bar (the derivation goes back to it)", () => {
+      expect(count(summary, [...references(GEMV_A), tableChoice(0.8)])).toEqual({
+        atMargin: 1,
+        atLowest: 1,
+        of: 1,
+      });
+    });
+
+    it("counts nothing where the record has no time of the table's choice, and reads against the default's where its check failed", () => {
+      expect(count(summary, [...references(GEMV_A), variant(1.5)])).toEqual({
+        atMargin: 0,
+        atLowest: 0,
+        of: 1,
+      });
+      const failed = [
+        ...references(GEMV_A),
+        tableChoice(1.3, { identicalToBaseline: false }),
+        variant(1.5),
+      ];
+      expect(count(summary, failed)).toEqual({ atMargin: 1, atLowest: 1, of: 1 });
+    });
+  });
+
   it("counts groups, not candidates: two cases, one with two winners", () => {
     const rows = [
       ...references(GEMV_A),
