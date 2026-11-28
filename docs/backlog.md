@@ -423,8 +423,8 @@ maintainer's ruling of 2026-11-06).
   - `karume-gemma4` was uploaded with `e4b/drafter/` on 2026-11-26; at the next release, its pin in `gemma.SOURCES`;
   - the drafter goldens into the test-asset dataset, and the e2e rooted at the mirror: extend
     `e2e_gemma4_drafter_test.ts` to E4B;
-  - a fusion hit-count row for the E4B drafter, and the stale expectation of the series case in
-    `e2e_gemma4_fusion_counts_test.ts` (`rmsNormAdd`; it fails under `KARUME_SERIES=1`);
+  - the stale expectation of the series case in `e2e_gemma4_fusion_counts_test.ts` (`rmsNormAdd`; it fails under
+    `KARUME_SERIES=1`);
   - an addendum to ADR [0096](decisions/0096-speculative-decoding.md), and the census rows;
   - `docs/limitations.md` and the comment of `tools/export-recipes/gemma4/distribution.py` still describe the E2B
     drafter only.
@@ -633,14 +633,6 @@ maintainer's ruling of 2026-11-06).
   has no whole-row arm in the bench, because the key that turns the selection off is test-only; H-29's ramp was not
   measured there), E4B and 12B after the changes, the measurement of K-49, and the sampler without a top-k (H-45). The
   numbers are in [research 2026-11-18](research/2026-11-18-decode-host.md).
-
-- **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
-  stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
-  would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
-  umT5, BiRefNet (Lucida included), Depth Anything, SigLIP2, Qwen3.5 (MOSS-Image's text encoder), EmbeddingGemma 2
-  (text, vision and audio), Gemma 4 26B and the q4_0 QAT line, the mobile QAT line's E4B (its check counts E2B only),
-  and Irodori v4.1-small, v4.1-small-mf and v4-Large. The opt-in candidate report already binds and plans those with
-  a local mirror.
 
 - **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
   blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
