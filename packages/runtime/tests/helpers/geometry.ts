@@ -1,11 +1,29 @@
 import { type GpuContext, RUNTIME_INTERNAL } from "../../src/gpu/context.ts";
+import { gemmKeyPart } from "../../src/kernels/gemm.ts";
+import type { GemmGeometry } from "../../src/kernels/gemm-geometry.ts";
 import {
+  DEFAULT_GEOMETRY_PROFILE,
   type GeometryProfile,
   type ResolvedGeometryProfile,
   resolveGeometryProfile,
   selectGeometryProfile,
 } from "../../src/kernels/geometry-profile.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../../src/kernels/geometry-profiles/index.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../../src/kernels/i8a8-geometry.ts";
+
+/**
+ * Every tile geometry the linear GEMM takes on some adapter: the row-count rules (`gemmRows`) of the
+ * default profile and of every embedded one, each geometry once (told apart by its key part, the
+ * skeleton form included). A geometry a new table adds joins the loops that read this list by
+ * itself.
+ */
+export const linearGemmGeometries = (): readonly GemmGeometry[] => [
+  ...new Map(
+    [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES]
+      .flatMap((profile) => profile.gemmRows.map(({ geometry }) => geometry))
+      .map((geometry) => [gemmKeyPart(true, undefined, geometry, true), geometry] as const),
+  ).values(),
+];
 
 /**
  * The geometry profile Sessions on this device run with. Mirrors the selection Session

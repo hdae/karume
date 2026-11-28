@@ -87,6 +87,11 @@ measurements in `docs/research/`.
   time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
   record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
   needs the field).
+- `@karume/runtime`: the split-K linear, which only the private Session key `LINEAR_SPLIT_K` selects, is now the split
+  of the GEMM skeleton — the reference GEMM's kernel over one slice of the K tiles, then the existing combine —
+  instead of one thread per output. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
+  the reference's grid is under-filled (Gemma 4 prefill's narrow projections), and is up to 1.33 times slower where
+  the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change.
 
 ## [0.24.0] - 2026-11-25
 

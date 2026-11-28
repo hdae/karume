@@ -29,7 +29,7 @@ import {
   linearI8a8UsesVec4,
   linearI8a8UsesVecFill,
 } from "../src/kernels/linear-i8a8.ts";
-import { linearSplitKCombineKey, linearSplitKPartialKey } from "../src/kernels/linear-splitk.ts";
+import { linearSplitKCombineKey, linearSplitKGemmKey } from "../src/kernels/linear-splitk.ts";
 import {
   quantizeRowsGeometry,
   quantizeRowsKey,
@@ -171,7 +171,10 @@ const CASES: readonly Case[] = [
     shape: { m: 16, n: 64, k: 1536 },
     storage: "f32",
     knobs: { linearSplitK: true },
-    keys: () => [linearSplitKPartialKey(), linearSplitKCombineKey()],
+    keys: () => [
+      linearSplitKGemmKey("f32", true, 4, 16, undefined, gemmRowsGeometry(PROFILE, 16)),
+      linearSplitKCombineKey(),
+    ],
   },
   {
     name: "the M = 1 GEMV, f16 storage",

@@ -1,0 +1,453 @@
+// karume linear split-K partial (x[m,k] · wᵀ[k,n] over the K tiles of slice wid.z of 4, no bias, f32, register tile 128x128 / 8x8 per thread / wg 16x16)
+struct Dims {
+  m: u32,
+  n: u32,
+  k: u32,
+}
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(4) var<storage, read_write> partials: array<f32>;
+
+// Shared A tile (128 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)
+var<workgroup> sa: array<f32, 2048>;
+var<workgroup> sb: array<vec4<f32>, 512>;
+
+@compute @workgroup_size(16, 16)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let tid = lid.y * 16u + lid.x;
+  // The base of slice wid.z in partials [slices, m, n]
+  let pbase = wid.z * dims.m * dims.n;
+  // A tile assignment (128 rows × 4 quads over 256 threads in 2 rounds)
+  let ar = tid / 4u;
+  let aq = tid % 4u;
+  let arow0 = wid.y * 128u + ar;
+  let arow_base0 = arow0 * dims.k;
+  let sa_base0 = ar * 16u + aq * 4u;
+  let arow1 = arow0 + 64u;
+  let arow_base1 = arow_base0 + 64u * dims.k;
+  let sa_base1 = sa_base0 + 1024u;
+  // W tile assignment (128 output channels × 4 quads over 256 threads in 2 rounds)
+  let wc0 = tid / 4u;
+  let wq = tid % 4u;
+  let wcol0 = wid.x * 128u + wc0;
+  let wrow_base0 = wcol0 * dims.k;
+  // Placed transposed on the shared-memory side
+  // (column quad = wc / 4, component = wc % 4)
+  let wsq0 = wc0 / 4u;
+  let wsl0 = wc0 % 4u;
+  let sb_base0 = (wq * 4u) * 32u + wsq0;
+  let wc1 = wc0 + 64u;
+  let wcol1 = wcol0 + 64u;
+  let wrow_base1 = wcol1 * dims.k;
+  let wsq1 = wc1 / 4u;
+  let wsl1 = wc1 % 4u;
+  let sb_base1 = (wq * 4u) * 32u + wsq1;
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
+  let tiles = (dims.k + 15u) / 16u;
+  var acc0_0 = vec4<f32>(0.0);
+  var acc0_1 = vec4<f32>(0.0);
+  var acc1_0 = vec4<f32>(0.0);
+  var acc1_1 = vec4<f32>(0.0);
+  var acc2_0 = vec4<f32>(0.0);
+  var acc2_1 = vec4<f32>(0.0);
+  var acc3_0 = vec4<f32>(0.0);
+  var acc3_1 = vec4<f32>(0.0);
+  var acc4_0 = vec4<f32>(0.0);
+  var acc4_1 = vec4<f32>(0.0);
+  var acc5_0 = vec4<f32>(0.0);
+  var acc5_1 = vec4<f32>(0.0);
+  var acc6_0 = vec4<f32>(0.0);
+  var acc6_1 = vec4<f32>(0.0);
+  var acc7_0 = vec4<f32>(0.0);
+  var acc7_1 = vec4<f32>(0.0);
+  // Slice wid.z of 4: the K tiles [t_first, t_end), tiles / 4 of them and one more
+  // for the first tiles % 4 slices (the runs cover every tile once, in order)
+  let slice_tiles = tiles / 4u;
+  let slice_extra = tiles % 4u;
+  let t_first = wid.z * slice_tiles + min(wid.z, slice_extra);
+  let t_end = t_first + slice_tiles + select(0u, 1u, wid.z < slice_extra);
+  for (var t = t_first; t < t_end; t = t + 1u) {
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
+    let ak0 = t * 16u + aq * 4u;
+    var av0 = vec4<f32>(0.0);
+    if (arow0 < dims.m) {
+      if (ak0 < dims.k) {
+        av0.x = x[arow_base0 + ak0];
+      }
+      if (ak0 + 1u < dims.k) {
+        av0.y = x[arow_base0 + ak0 + 1u];
+      }
+      if (ak0 + 2u < dims.k) {
+        av0.z = x[arow_base0 + ak0 + 2u];
+      }
+      if (ak0 + 3u < dims.k) {
+        av0.w = x[arow_base0 + ak0 + 3u];
+      }
+    }
+    sa[sa_base0] = av0.x;
+    sa[sa_base0 + 1u] = av0.y;
+    sa[sa_base0 + 2u] = av0.z;
+    sa[sa_base0 + 3u] = av0.w;
+    var av1 = vec4<f32>(0.0);
+    if (arow1 < dims.m) {
+      if (ak0 < dims.k) {
+        av1.x = x[arow_base1 + ak0];
+      }
+      if (ak0 + 1u < dims.k) {
+        av1.y = x[arow_base1 + ak0 + 1u];
+      }
+      if (ak0 + 2u < dims.k) {
+        av1.z = x[arow_base1 + ak0 + 2u];
+      }
+      if (ak0 + 3u < dims.k) {
+        av1.w = x[arow_base1 + ak0 + 3u];
+      }
+    }
+    sa[sa_base1] = av1.x;
+    sa[sa_base1 + 1u] = av1.y;
+    sa[sa_base1 + 2u] = av1.z;
+    sa[sa_base1 + 3u] = av1.w;
+    let wk0 = t * 16u + wq * 4u;
+    var wv0 = vec4<f32>(0.0);
+    if (wcol0 < dims.n) {
+      let wbase = wrow_base0 + wk0;
+      if (wk0 < dims.k) {
+        wv0.x = w[wbase];
+      }
+      if (wk0 + 1u < dims.k) {
+        wv0.y = w[wbase + 1u];
+      }
+      if (wk0 + 2u < dims.k) {
+        wv0.z = w[wbase + 2u];
+      }
+      if (wk0 + 3u < dims.k) {
+        wv0.w = w[wbase + 3u];
+      }
+    }
+    switch wsl0 {
+      case 0u: {
+        sb[sb_base0].x = wv0.x;
+        sb[sb_base0 + 32u].x = wv0.y;
+        sb[sb_base0 + 64u].x = wv0.z;
+        sb[sb_base0 + 96u].x = wv0.w;
+      }
+      case 1u: {
+        sb[sb_base0].y = wv0.x;
+        sb[sb_base0 + 32u].y = wv0.y;
+        sb[sb_base0 + 64u].y = wv0.z;
+        sb[sb_base0 + 96u].y = wv0.w;
+      }
+      case 2u: {
+        sb[sb_base0].z = wv0.x;
+        sb[sb_base0 + 32u].z = wv0.y;
+        sb[sb_base0 + 64u].z = wv0.z;
+        sb[sb_base0 + 96u].z = wv0.w;
+      }
+      default: {
+        sb[sb_base0].w = wv0.x;
+        sb[sb_base0 + 32u].w = wv0.y;
+        sb[sb_base0 + 64u].w = wv0.z;
+        sb[sb_base0 + 96u].w = wv0.w;
+      }
+    }
+    var wv1 = vec4<f32>(0.0);
+    if (wcol1 < dims.n) {
+      let wbase = wrow_base1 + wk0;
+      if (wk0 < dims.k) {
+        wv1.x = w[wbase];
+      }
+      if (wk0 + 1u < dims.k) {
+        wv1.y = w[wbase + 1u];
+      }
+      if (wk0 + 2u < dims.k) {
+        wv1.z = w[wbase + 2u];
+      }
+      if (wk0 + 3u < dims.k) {
+        wv1.w = w[wbase + 3u];
+      }
+    }
+    switch wsl1 {
+      case 0u: {
+        sb[sb_base1].x = wv1.x;
+        sb[sb_base1 + 32u].x = wv1.y;
+        sb[sb_base1 + 64u].x = wv1.z;
+        sb[sb_base1 + 96u].x = wv1.w;
+      }
+      case 1u: {
+        sb[sb_base1].y = wv1.x;
+        sb[sb_base1 + 32u].y = wv1.y;
+        sb[sb_base1 + 64u].y = wv1.z;
+        sb[sb_base1 + 96u].y = wv1.w;
+      }
+      case 2u: {
+        sb[sb_base1].z = wv1.x;
+        sb[sb_base1 + 32u].z = wv1.y;
+        sb[sb_base1 + 64u].z = wv1.z;
+        sb[sb_base1 + 96u].z = wv1.w;
+      }
+      default: {
+        sb[sb_base1].w = wv1.x;
+        sb[sb_base1 + 32u].w = wv1.y;
+        sb[sb_base1 + 64u].w = wv1.z;
+        sb[sb_base1 + 96u].w = wv1.w;
+      }
+    }
+    workgroupBarrier();
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
+    for (var kk = 0u; kk < 16u; kk = kk + 1u) {
+      let bv0 = sb[kk * 32u + lid.x * 2u];
+      let bv1 = sb[kk * 32u + lid.x * 2u + 1u];
+      acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;
+      acc0_1 = acc0_1 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv1;
+      acc1_0 = acc1_0 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv0;
+      acc1_1 = acc1_1 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv1;
+      acc2_0 = acc2_0 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv0;
+      acc2_1 = acc2_1 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv1;
+      acc3_0 = acc3_0 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv0;
+      acc3_1 = acc3_1 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv1;
+      acc4_0 = acc4_0 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv0;
+      acc4_1 = acc4_1 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv1;
+      acc5_0 = acc5_0 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv0;
+      acc5_1 = acc5_1 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv1;
+      acc6_0 = acc6_0 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv0;
+      acc6_1 = acc6_1 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv1;
+      acc7_0 = acc7_0 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv0;
+      acc7_1 = acc7_1 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv1;
+    }
+    workgroupBarrier();
+  }
+  let ocol = wid.x * 128u + lid.x * 8u;
+  let orow0 = wid.y * 128u + lid.y * 8u;
+  let orow1 = orow0 + 1u;
+  let orow2 = orow0 + 2u;
+  let orow3 = orow0 + 3u;
+  let orow4 = orow0 + 4u;
+  let orow5 = orow0 + 5u;
+  let orow6 = orow0 + 6u;
+  let orow7 = orow0 + 7u;
+  if (orow0 < dims.m) {
+    let obase = pbase + orow0 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc0_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc0_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc0_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc0_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc0_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc0_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc0_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc0_1.w;
+    }
+  }
+  if (orow1 < dims.m) {
+    let obase = pbase + orow1 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc1_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc1_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc1_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc1_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc1_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc1_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc1_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc1_1.w;
+    }
+  }
+  if (orow2 < dims.m) {
+    let obase = pbase + orow2 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc2_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc2_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc2_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc2_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc2_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc2_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc2_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc2_1.w;
+    }
+  }
+  if (orow3 < dims.m) {
+    let obase = pbase + orow3 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc3_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc3_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc3_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc3_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc3_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc3_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc3_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc3_1.w;
+    }
+  }
+  if (orow4 < dims.m) {
+    let obase = pbase + orow4 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc4_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc4_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc4_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc4_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc4_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc4_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc4_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc4_1.w;
+    }
+  }
+  if (orow5 < dims.m) {
+    let obase = pbase + orow5 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc5_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc5_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc5_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc5_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc5_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc5_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc5_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc5_1.w;
+    }
+  }
+  if (orow6 < dims.m) {
+    let obase = pbase + orow6 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc6_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc6_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc6_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc6_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc6_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc6_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc6_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc6_1.w;
+    }
+  }
+  if (orow7 < dims.m) {
+    let obase = pbase + orow7 * dims.n;
+    if (ocol < dims.n) {
+      partials[obase + ocol] = acc7_0.x;
+    }
+    if (ocol + 1u < dims.n) {
+      partials[obase + ocol + 1u] = acc7_0.y;
+    }
+    if (ocol + 2u < dims.n) {
+      partials[obase + ocol + 2u] = acc7_0.z;
+    }
+    if (ocol + 3u < dims.n) {
+      partials[obase + ocol + 3u] = acc7_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      partials[obase + ocol + 4u] = acc7_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      partials[obase + ocol + 5u] = acc7_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      partials[obase + ocol + 6u] = acc7_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      partials[obase + ocol + 7u] = acc7_1.w;
+    }
+  }
+}

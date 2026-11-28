@@ -79,6 +79,23 @@ the adapter. A strategy that was not measured to gain on an adapter is not selec
 run time. No adapter has such a measurement, so no Session selects them. They run through the private Session key
 `REORDER_STRATEGIES`, which the kernel checks and tests pass; it is not part of the public surface.
 
+### Strategies admitted only by a private key
+
+The split-K GEMM (`packages/runtime/src/kernels/linear-splitk.ts`) is a `reorder` strategy of `linear`, contract
+class R (only the order of the additions differs):
+
+- It is the split of the reference GEMM: the same kernel, at the tile geometry the reference GEMM takes for the row
+  count, runs over one slice of the K tiles per workgroup of the dispatch's z axis. The tiles are dealt out in whole
+  tiles, as evenly as they go. Each slice is summed from 0 in the reference GEMM's ascending order; a second pass adds
+  the slices' partial sums in slice order, then the bias, last.
+- `exact` never selects it. With one slice its two passes give the reference GEMM's words on every tile geometry the
+  linear GEMM takes; that is the kernel's structural check, not a form any Session runs.
+- No level, preset or geometry profile selects it. It runs only through the private Session key `LINEAR_SPLIT_K`,
+  which its kernel tests pass; it is not part of the public surface. Under that key a linear takes it when its weight
+  is stored as f32, `linearCompute` is `"f32"`, the GEMV family does not take the linear, and its K is cut by the
+  slice rule: the largest of 16, 8, 4 and 2 slices that divides K and leaves each slice at least 256 terms.
+- Its partial sums are a temporary of `slices × m × n` f32 values between its two passes.
+
 ## Named approximations
 
 Each is its own Session option. A level never turns one on.

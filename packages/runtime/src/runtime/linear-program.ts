@@ -74,14 +74,12 @@ import {
 } from "../kernels/linear-i8a8.ts";
 import {
   LINEAR_SPLITK_COMBINE_GROUP,
-  LINEAR_SPLITK_TILE,
   linearSplitKCombineKey,
   linearSplitKCombineWgsl,
+  linearSplitKGemmKey,
+  linearSplitKGemmWgsl,
   linearSplitKParams,
-  linearSplitKPartialKey,
   linearSplitKPartialsBytes,
-  linearSplitKPartialWgsl,
-  type LinearSplitKSlices,
 } from "../kernels/linear-splitk.ts";
 import {
   quantizeRowsGeometry,
@@ -93,7 +91,7 @@ import {
 } from "../kernels/quantize-rows.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import type { LinearPrologue } from "./fusion-rule.ts";
-import type { LinearChoice, LinearGemvChoice } from "./linear-strategies.ts";
+import type { LinearChoice, LinearGemvChoice, LinearSplitKChoice } from "./linear-strategies.ts";
 import { ExecutionError } from "./plan.ts";
 import type { I8a8Dot } from "./session-types.ts";
 
@@ -228,7 +226,15 @@ export const linearProgramFor = (
     case "planes-gemv":
       return linearPlanesGemvProgram(`linear gemv planes ${operands}`, choice.variant, m, n, k);
     case "gemm-splitk":
-      return linearSplitKProgram(`linear split-K ${operands}`, m, n, k, choice.slices);
+      return linearSplitKProgram(
+        `linear split-K ${operands}`,
+        choice,
+        m,
+        n,
+        k,
+        facts.weightStorage,
+        facts.geometryProfile,
+      );
     case "gemm-f32":
     case "gemm-f16":
       return linearGemmProgram(
@@ -641,35 +647,45 @@ const linearI8a8Program = (
 };
 
 /**
- * The split-K linear (src/kernels/linear-splitk.ts): the partial sums of every K slice into one
- * temporary, then their sum and the bias into the output.
+ * The split-K linear (src/kernels/linear-splitk.ts): the split of the linear GEMM writes the partial
+ * sums of every K slice into one temporary, then the combine adds them and the bias into the output.
+ *
+ * MUST: the partial takes the tile geometry the reference GEMM takes for `m` (the adapter's profile
+ * — the same lookup as {@link linearGemmProgram}), passed once unchanged to key, WGSL and grid; the
+ * slice is the grid's z axis, one workgroup per (tile, slice), so a grid past the device limit on any
+ * axis fails loudly (the emitter's `tiledWorkgroups`).
  */
 const linearSplitKProgram = (
   where: string,
+  { slices, v4, groupSize }: LinearSplitKChoice,
   m: number,
   n: number,
   k: number,
-  slices: LinearSplitKSlices,
+  weightStorage: WeightStorage,
+  profile: GeometryProfile,
 ): LinearProgram => {
   const params = linearSplitKParams(m, n, k, slices);
+  const geometry = gemmRowsGeometry(profile, m);
   return {
     where,
     temps: [linearSplitKPartialsBytes(m, n, slices)],
     dispatches: [
       {
-        key: linearSplitKPartialKey(),
-        wgsl: linearSplitKPartialWgsl,
+        key: linearSplitKGemmKey(weightStorage, v4, slices, m, groupSize, geometry),
+        wgsl: () => linearSplitKGemmWgsl(weightStorage, v4, slices, m, groupSize, geometry),
         params,
+        // The linear GEMM's numbering without the bias: the partials take the output's binding.
         bindings: [
           { binding: 1, operand: "x" },
           { binding: 2, operand: "weight" },
-          { binding: 3, operand: { temp: 0 } },
+          { binding: 4, operand: { temp: 0 } },
+          { binding: LINEAR_SCALE_BINDING, operand: "weightScale" },
         ],
         grid: {
           kind: "tiled",
           axes: [
-            { items: n, tile: LINEAR_SPLITK_TILE },
-            { items: m, tile: LINEAR_SPLITK_TILE },
+            { items: n, tile: gemmTileN(geometry) },
+            { items: m, tile: gemmTileM(geometry) },
             { items: slices, tile: 1 },
           ],
         },

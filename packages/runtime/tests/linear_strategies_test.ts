@@ -175,7 +175,7 @@ describe("with the private option that allows the split-K GEMM", () => {
 
   it("cuts the reduction of an f32-stored weight into the most slices that leave 256 terms each", () => {
     const choice = selectLinearStrategy(facts({ m: 16, n: 64, k: 1536 }, "f32", splitK));
-    assertEquals(choice, { id: "gemm-splitk", slices: 4 });
+    assertEquals(choice, { id: "gemm-splitk", slices: 4, v4: true, groupSize: undefined });
     assertEquals(LINEAR_STRATEGIES["gemm-splitk"].level, "reorder");
   });
 
