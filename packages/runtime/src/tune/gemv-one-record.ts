@@ -7,7 +7,8 @@
  *
  * - A reading is evidence when its reference's re-timed pass (`retime`: that pass ÷ the rounds'
  *   minimum) departs from 1 by no more than the bar a gain must clear, margin × gap × referenceGap,
- *   in either direction (a record without the re-timing has none to test).
+ *   in either direction; a reference whose re-timed pass read no time (`unread`) tested nothing, so
+ *   no reading against it is evidence (a record without the re-timing has none to test).
  * - At M = 1 a candidate qualifies when its check held, at least one reading is evidence, and every
  *   reading that is evidence has a gain of at least margin × gap × referenceGap (its break-even
  *   margin at least the margin).
@@ -44,8 +45,11 @@ export type GemvPairReading = {
   readonly gap: number;
   /** The other kernel's gap. */
   readonly referenceGap: number;
-  /** The other kernel's re-timed pass ÷ its rounds' minimum; absent when it was not re-timed. */
-  readonly retime?: number;
+  /**
+   * The other kernel's re-timed pass ÷ its rounds' minimum; `unread` when that pass read no time
+   * (clamped or 0); absent when it was not re-timed (a record written before the re-timing).
+   */
+  readonly retime?: number | "unread";
   readonly breakEven: number;
 };
 
@@ -132,6 +136,7 @@ const ratio = (value: number): string => `×${value.toFixed(3)}`;
 /** Whether a reading is evidence at `margin`: its reference's re-timing departs within the bar. */
 export const gemvReadingIsEvidence = (reading: GemvPairReading, margin: number): boolean => {
   if (reading.retime === undefined) return true;
+  if (reading.retime === "unread") return false;
   const departure = Math.max(reading.retime, 1 / reading.retime);
   return departure <= margin * reading.gap * reading.referenceGap;
 };
@@ -150,7 +155,7 @@ const barFailure = (
   if (evidence.length === 0) {
     return readings.length === 0
       ? `no steady record timed it against ${what} at M=1`
-      : `no reading against ${what} at M=1 is evidence: the reference's re-timing departs beyond the bar`;
+      : `no reading against ${what} at M=1 is evidence: the reference's re-timing departs beyond the bar or read no time`;
   }
   const short = evidence.find((reading) => reading.breakEven < margin);
   return short === undefined

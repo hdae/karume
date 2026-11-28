@@ -19,10 +19,11 @@ measurements in `docs/research/`.
 
 - `@karume/runtime/tune`: the GEMV sweep times the device table's choices too (the profile its device resolves to, at
   `exact` and at `reorder`), in every candidate set and whatever a narrowing, the quick look or the case's M = 1 group
-  says, and every reference once more after the rounds (a reference row's `retimedPerDispatch`); a summary names the
+  says, and every reference once more after the rounds (a reference row's `retimedPerDispatch`, or `retimingUnread` —
+  `clamped` or `zero` — where that pass read no time, which the derivation reads as no evidence); a summary names the
   table's choices (`table`), and the record states its class by its summaries (`steadiness`: `steady`, `unsteady` or
   `unclassified`, from `gemvSteadiness`) and, when the caller gives one, its session (`session`: a random id made once
-  per page load or process with `gemvSweepSession`, and the time since its start). All four fields are optional, so the
+  per page load or process with `gemvSweepSession`, and the time since its start). All these fields are optional, so the
   record stays `karume-gemv-sweep/4` and the records taken before them read as they did. The numbers of the rule they
   serve are exported with it (`GEMV_MARGIN`, `GEMV_LOWEST_MARGIN`, `GEMV_STEADY_MIN_GROUPS`, `GEMV_STEADY_MAX_SHARE`,
   `GEMV_STEADY_GROUP_SPREAD`, `GEMV_MIN_PASS_MS`, `gemvRoundsGap`, `gemvBreakEven`). The workbench and the benchmark

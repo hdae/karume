@@ -226,6 +226,8 @@ type RowObservation = {
   readonly rounds?: readonly number[];
   /** A reference's pass once more after the rounds ÷ `reps` (a record of 2026-11-28 on). */
   readonly retimedPerDispatch?: number;
+  /** A reference whose pass once more read no time (clamped or 0): no evidence is read against it. */
+  readonly retimingUnread?: "clamped" | "zero";
   readonly identicalToBaseline?: boolean;
   readonly withinBand?: boolean;
   readonly screened?: true;
@@ -300,6 +302,8 @@ const optionalAt = <T>(
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 const isString = (value: unknown): value is string => typeof value === "string";
 const isTrue = (value: unknown): value is true => value === true;
+const isRetimingUnread = (value: unknown): value is "clamped" | "zero" =>
+  value === "clamped" || value === "zero";
 /** A row's rounds: finite times of at least 0 (a clamped round is 0). */
 const isRounds = (value: unknown): value is number[] =>
   Array.isArray(value) &&
@@ -403,6 +407,10 @@ const parseRow = (value: unknown, where: string): RowObservation => {
   const reps = optionalAt(row, "reps", isPositiveInteger, where);
   const rounds = optionalAt(row, "rounds", isRounds, where);
   const retimedPerDispatch = optionalAt(row, "retimedPerDispatch", isPositiveNumber, where);
+  const retimingUnread = optionalAt(row, "retimingUnread", isRetimingUnread, where);
+  if (retimingUnread !== undefined && retimedPerDispatch !== undefined) {
+    throw new Error(`${where}: a row has retimingUnread or retimedPerDispatch, not both`);
+  }
   const identicalToBaseline = optionalAt(row, "identicalToBaseline", isBoolean, where);
   const withinBand = optionalAt(row, "withinBand", isBoolean, where);
   const screened = optionalAt(row, "screened", isTrue, where);
@@ -426,6 +434,7 @@ const parseRow = (value: unknown, where: string): RowObservation => {
     ...(reps === undefined ? {} : { reps }),
     ...(rounds === undefined ? {} : { rounds }),
     ...(retimedPerDispatch === undefined ? {} : { retimedPerDispatch }),
+    ...(retimingUnread === undefined ? {} : { retimingUnread }),
     ...(identicalToBaseline === undefined ? {} : { identicalToBaseline }),
     ...(withinBand === undefined ? {} : { withinBand }),
     ...(screened === undefined ? {} : { screened }),
@@ -1648,9 +1657,17 @@ const readsSteady = (source: GemvSweepSource): boolean =>
 /** ns per ms: a record read by the rule of one steady record times in ns. */
 const NS_PER_MS = 1e6;
 
-/** A kernel's row in a steady record's group as the rule of one steady record reads its time. */
+/**
+ * A kernel's row in a steady record's group as the rule of one steady record reads its time, with
+ * its re-timing (absent: not re-timed; `unread`: re-timed, and the pass read no time).
+ */
 type SteadyTime =
-  | { readonly kind: "time"; readonly time: number; readonly gap: number; readonly retime?: number }
+  | {
+      readonly kind: "time";
+      readonly time: number;
+      readonly gap: number;
+      readonly retime?: number | "unread";
+    }
   | { readonly kind: "none" };
 
 /**
@@ -1667,7 +1684,10 @@ const steadyTime = (state: GroupState | undefined, name: string): SteadyTime => 
 
 /** A row's time, gap and re-timing as {@link steadyTime} reads them, whatever its group. */
 const steadyRowTime = (
-  row: Pick<RowObservation, "error" | "perDispatch" | "reps" | "rounds" | "retimedPerDispatch">,
+  row: Pick<
+    RowObservation,
+    "error" | "perDispatch" | "reps" | "rounds" | "retimedPerDispatch" | "retimingUnread"
+  >,
 ): SteadyTime => {
   const { perDispatch, reps } = row;
   if (row.error !== undefined || perDispatch === undefined || reps === undefined) {
@@ -1682,9 +1702,11 @@ const steadyRowTime = (
     kind: "time",
     time: perDispatch,
     gap,
-    ...(row.retimedPerDispatch === undefined
-      ? {}
-      : { retime: row.retimedPerDispatch / perDispatch }),
+    ...(row.retimingUnread !== undefined
+      ? { retime: "unread" as const }
+      : row.retimedPerDispatch === undefined
+        ? {}
+        : { retime: row.retimedPerDispatch / perDispatch }),
   };
 };
 
@@ -1747,6 +1769,7 @@ export const gemvSteadyReading = (
     | "reps"
     | "rounds"
     | "retimedPerDispatch"
+    | "retimingUnread"
     | "isBaseline"
     | "identicalToBaseline"
     | "withinBand"
@@ -1758,6 +1781,7 @@ export const gemvSteadyReading = (
     | "reps"
     | "rounds"
     | "retimedPerDispatch"
+    | "retimingUnread"
     | "isBaseline"
     | "identicalToBaseline"
   >,

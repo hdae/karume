@@ -21,7 +21,7 @@
 // classless record against a table that moved PLE's choices (the default's written back); a pass of 10 ms; a
 // second steady record at ×1.05; a re-timed reference ×0.9 its rounds' minimum.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
   deriveLinearGemvChoices,
@@ -455,6 +455,48 @@ describe("the re-timed reference", () => {
     assertEquals(departed.outcome, "kept");
     assertStringIncludes(departed.reason ?? "", "re-timing departs");
     assertEquals(sequentialOf(derive([retimed(0.98)])).derivedChoice, "c64u8");
+  });
+
+  it("makes a group no evidence when the re-timed pass read no time, while a row of a record before the re-timing is read untested (fault: the marker read as no re-timing at all)", () => {
+    for (const unread of ["clamped", "zero"] as const) {
+      const derivation = derive([
+        record("a.json", [
+          {
+            ...ple1({ c64u8: faster(1.2) }),
+            fields: { 1: { c32u4: { retimingUnread: unread } satisfies Partial<GemvSweepRow> } },
+          },
+        ]),
+      ]);
+      const decision = sequentialOf(derivation);
+      assertEquals([decision.outcome, decision.derivedChoice], ["kept", "c32u4"], unread);
+      assertStringIncludes(decision.reason ?? "", "read no time");
+      const reading = decision.evidence?.[0]?.candidates.find(
+        ({ candidate }) => candidate === "c64u8",
+      )?.m1[0];
+      assertEquals(reading?.retime, "unread");
+    }
+    // The control: neither field (a record written before the re-timing)
+    assertEquals(
+      sequentialOf(derive([record("a.json", [ple1({ c64u8: faster(1.2) })])])).derivedChoice,
+      "c64u8",
+    );
+  });
+
+  it("refuses a row that has both a re-timed pass and the mark that it read no time", () => {
+    const both = record("a.json", [
+      {
+        ...ple1({ c64u8: faster(1.2) }),
+        fields: {
+          1: {
+            c32u4: {
+              retimedPerDispatch: BASE_TIME,
+              retimingUnread: "zero",
+            } satisfies Partial<GemvSweepRow>,
+          },
+        },
+      },
+    ]);
+    assertThrows(() => derive([both]), Error, "retimingUnread or retimedPerDispatch, not both");
   });
 });
 

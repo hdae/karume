@@ -116,6 +116,10 @@ type FakePass = {
 /** A pass as the log keeps it: with its timestamp difference when it was timed. */
 type LoggedPass = FakePass & { readonly gpuNs?: number };
 
+/** The begin and end timestamps of a pass whose difference is `ns` (a negative one: the end first). */
+const timestampPair = (ns: number): ArrayBuffer =>
+  new BigUint64Array(ns < 0 ? [BigInt(-ns), 0n] : [0n, BigInt(ns)]).buffer;
+
 type FakeTiming = {
   /** A timed pass's timestamp difference (ns). */
   readonly gpuNs: (pass: FakePass) => number;
@@ -170,7 +174,7 @@ const fakeTimingDevice = (
     mapAsync: (): Promise<void> => Promise.resolve(),
     getMappedRange: (_offset = 0, length = descriptor.size): ArrayBuffer =>
       descriptor.label === "geometry-sweep-timestamps"
-        ? new BigUint64Array([0n, BigInt(Math.round(lastTimed?.gpuNs ?? 0))]).buffer
+        ? timestampPair(Math.round(lastTimed?.gpuNs ?? 0))
         : new ArrayBuffer(length),
   });
   const createCommandEncoder = () => {
@@ -1181,6 +1185,30 @@ describe("the GEMV sweep's references: the device table's choices and their re-t
     );
     // A candidate that is no reference is not re-timed
     assertEquals(rowAt(result.rows, 1, "parallel-l8").retimedPerDispatch, undefined);
+  });
+
+  it("marks a reference whose extra pass reads no time — a negative timestamp difference, or 0 — instead of leaving it without a value (fault: the marker dropped, read as a record before the re-timing)", async () => {
+    const plan = one("staged-l2");
+    const baselineKey = keyOfName(plan, plan.baseline.name);
+    // The baseline's timed passes in a run where every pass reads a time: its last is the re-timing
+    const control = await sweep([plan], byKey(times));
+    const last = timedOf(control.passes).filter(({ key }) => key === baselineKey).length - 1;
+    assert(rowAt(control.result.rows, 1, plan.baseline.name).retimedPerDispatch !== undefined);
+    for (const [ns, marker] of [
+      [-5, "clamped"],
+      [0, "zero"],
+    ] as const) {
+      const { result } = await sweep([plan], (pass) =>
+        pass.key === baselineKey && pass.timedIndex === last ? ns : byKey(times)(pass),
+      );
+      const baseline = rowAt(result.rows, 1, plan.baseline.name);
+      assertEquals(
+        [baseline.retimingUnread, baseline.retimedPerDispatch, baseline.rounds?.length],
+        [marker, undefined, 2],
+      );
+      // The other references' passes read times
+      assertEquals(rowAt(result.rows, 1, "parallel-l4").retimingUnread, undefined);
+    }
   });
 });
 

@@ -42,7 +42,10 @@
  *    there are more rounds than kernels). A kernel's time is the min of its rounds, GPU timestamps
  *    or the wall clock. Then every reference that finished its rounds is timed once more, in plan
  *    order (its row's `retimedPerDispatch`): a reference whose time moved within the group shows
- *    there, which the rule of one steady record reads.
+ *    there, which the rule of one steady record reads. A pass that reads no time (its timestamp
+ *    difference negative, clamped, or 0) is marked so (`retimingUnread`), not left without a value:
+ *    then the rule reads the reference's group as no evidence, where a record written before the
+ *    re-timing existed has nothing to test.
  * Interleaving puts every kernel under the device states the row count went through, so a heating
  * device slows them alike instead of whichever was measured last; how far the state moved is the
  * spread of the baseline's rounds (the summary's `baselineSpread`). There is no per-kernel warm-up
@@ -738,8 +741,11 @@ export const sweepGemvCase = async (
     }));
     const [baseline] = kernels;
     const references = gemvPlanReferences(plan);
-    /** The re-timed pass of each reference that finished its rounds, per dispatch. */
-    const retimed = new Map<Kernel, number>();
+    /**
+     * The re-timed pass of each reference that finished its rounds: per dispatch, or why it read no
+     * time (a negative timestamp difference, clamped to 0, or a difference of 0).
+     */
+    const retimed = new Map<Kernel, number | "clamped" | "zero">();
     const step = (phase: GemvSweepPhase, done: number, total: number): void =>
       hooks.onStep?.({ caseId: gemvCase.id, m, phase, done, total });
     /** The kernels in `kind` now. */
@@ -949,7 +955,8 @@ export const sweepGemvCase = async (
         if (state.kind === "calibrated" && state.samples.length === settings.rounds) {
           try {
             const sample = await measurePass(context, state.ready, state.reps);
-            if (!sample.clamped) retimed.set(kernel, (sample.gpu ?? sample.wallNs) / state.reps);
+            const value = (sample.gpu ?? sample.wallNs) / state.reps;
+            retimed.set(kernel, sample.clamped ? "clamped" : value > 0 ? value : "zero");
           } catch (cause) {
             kernel.state = { kind: "failed", cause };
           }
@@ -985,7 +992,9 @@ export const sweepGemvCase = async (
         row:
           again === undefined || row.error !== undefined
             ? row
-            : { ...row, retimedPerDispatch: again },
+            : typeof again === "number"
+              ? { ...row, retimedPerDispatch: again }
+              : { ...row, retimingUnread: again },
         checks: state.checks,
       };
     };

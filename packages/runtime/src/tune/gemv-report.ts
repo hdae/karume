@@ -22,11 +22,11 @@
  * its own margin, so the plan of missing measurements counts only the rows it timed. A reader that predates the set refuses
  * such a record by its candidate set.
  *
- * Four more optional fields came with the rule of one steady record (2026-11-28), each additive, so a
+ * Five more optional fields came with the rule of one steady record (2026-11-28), each additive, so a
  * record that has them is still a `/4` record and one without them (written before) reads as it did:
  * the record's `session` and `steadiness`, a summary's `table` (the device table's choices, which the
  * sweep times besides the set's candidates) and a reference row's `retimedPerDispatch` (its one pass
- * more after the rounds). An older reader misreads nothing: it ignores the fields, and the rows of
+ * more after the rounds) or, where that pass read no time, `retimingUnread`. An older reader misreads nothing: it ignores the fields, and the rows of
  * the table's choices are rows like any other.
  */
 
@@ -134,9 +134,18 @@ export type GemvSweepRow = {
    * A reference (the baseline, the default profile's choice at `reorder` and the device table's
    * choices — the summary's `profile` and `table`) timed once more after the rounds: that one pass ÷
    * `reps`, in the record's unit. Absent for any other row, for a reference whose rounds did not all
-   * finish or whose extra pass was clamped, and in a record written before the field existed.
+   * finish or whose extra pass read no time ({@link retimingUnread}), and in a record written before
+   * the field existed.
    */
   readonly retimedPerDispatch?: number;
+  /**
+   * A reference whose extra pass after the rounds read no time: `clamped` when its timestamp
+   * difference was negative (kept as 0), `zero` when it was 0. The rule of one steady record reads
+   * no evidence against such a reference (its re-timing tested nothing), where a record written
+   * before the re-timing existed — neither field — is read untested. Never beside
+   * {@link retimedPerDispatch}.
+   */
+  readonly retimingUnread?: "clamped" | "zero";
   readonly wallNsPerDispatch?: number;
   /** The baseline's `perDispatch` ÷ this row's (above 1: faster than the baseline). */
   readonly speedupVsBaseline?: number;
