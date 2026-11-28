@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the Irodori distribution — pure functions derived from the
 manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
 live in `karume.modelcard`. This module holds only **facts specific to Irodori**: attribution (where
 the weights come from, the bundled codec and text backbone, the licenses) and what this pipeline's
@@ -28,18 +30,27 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
+    UpstreamQuote,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
+    model_measurements,
     model_sections,
     models,
+    pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -59,12 +70,65 @@ class IrodoriUpstream:
     #: Display name used in the title and the bold text of the overview (matches what upstream
     #: calls itself).
     display: str
-    #: The upstream commit the weights were taken from, named in the attribution (`None` for the
-    #: entries published before the card named one).
-    revision: str | None = None
+    #: The upstream commit the weights were taken from (THIRD_PARTY_NOTICES.md — the fetch record
+    #: of the snapshot in `inputs/irodori/<model name>/`), pinned in the attribution.
+    revision: str
     #: The model upstream distilled these weights from (a MeanFlow student names its RF teacher —
     #: ADR 0150), or `None`.
     teacher: str | None = None
+
+
+#: The GPU the measurements of 2026-08-12 and 2026-11-14 ran on (the development machine of
+#: those dates: ADR 0151 names it for 2026-11-14; for 2026-08-12 the records name no device, and
+#: the machine had this GPU then).
+_IRODORI_MEASURED_ON = "NVIDIA GeForce RTX 3080 Ti"
+
+#: What Irodori-TTS v4 Small measured (the quantization record of 2026-08-12, ADR 0050: the
+#: maintainer's listening of f32 / f16 pairs, and the wall time of `i8-a8`).
+_IRODORI_V4_MEASUREMENTS: tuple[Measurement, ...] = (
+    Measurement(
+        "f16",
+        "a listening check of f32 and f16 pairs with the same text and seed, plain synthesis and"
+        " voice cloning, found the audio almost the same",
+        _IRODORI_MEASURED_ON,
+        "2026-08-12",
+    ),
+    Measurement(
+        "i8-a8",
+        "one generation took 7.6 s of wall time against 8.5 s without the int8 activations, in two"
+        " runs under the same conditions",
+        _IRODORI_MEASURED_ON,
+        "2026-08-12",
+    ),
+)
+
+#: Model name → what its presets measured, written under its quant table (the maintainer's ruling
+#: of 2026-11-27: a measurement is a note naming its device and date, never a preset's
+#: description). v4.1-small carries v4 Small's, naming it: its other graphs are byte-identical to
+#: v4 Small's (`IRODORI_V41_SHARED_ROLES` in `distribution.py`). v4.1-small-mf: the maintainer's
+#: listening of 2026-11-14 (ADR 0150). v4-Large has none.
+IRODORI_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "v4-small": _IRODORI_V4_MEASUREMENTS,
+    "v4.1-small": tuple(
+        Measurement(
+            measurement.preset,
+            measurement.statement,
+            measurement.device,
+            measurement.date,
+            "Irodori-TTS v4 Small, which differs from this model only in the duration predictor",
+        )
+        for measurement in _IRODORI_V4_MEASUREMENTS
+    ),
+    "v4.1-small-mf": (
+        Measurement("i8", "a listening check found it fine", _IRODORI_MEASURED_ON, "2026-11-14"),
+        Measurement(
+            "i8-a8",
+            "a listening check found no audible degradation",
+            _IRODORI_MEASURED_ON,
+            "2026-11-14",
+        ),
+    ),
+}
 
 
 #: Distributed model name → upstream facts. v4.1-small is the successor with only the duration
@@ -78,10 +142,14 @@ class IrodoriUpstream:
 #: `license: mit` in the model card's frontmatter at the revision below): all are `license: mit`.
 IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     "v4-small": IrodoriUpstream(
-        repo="Aratako/Irodori-TTS-v4-Small", display="Irodori-TTS v4 Small"
+        repo="Aratako/Irodori-TTS-v4-Small",
+        display="Irodori-TTS v4 Small",
+        revision="4c92c7ee2bb15c19a97cf4e86d24fd6bf33b0135",
     ),
     "v4.1-small": IrodoriUpstream(
-        repo="Aratako/Irodori-TTS-v4.1-Small", display="Irodori-TTS v4.1 Small"
+        repo="Aratako/Irodori-TTS-v4.1-Small",
+        display="Irodori-TTS v4.1 Small",
+        revision="2b28324dc263ed5e6638b3cf3dd94c82ead07b4b",
     ),
     "v4.1-small-mf": IrodoriUpstream(
         repo="Aratako/Irodori-TTS-v4.1-Small-MF",
@@ -113,16 +181,64 @@ IRODORI_LARGE_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
 #: and the tokenizer asset), so it is listed in `base_model` and in the attribution.
 IRODORI_LARGE_TEXT_ENCODER_MODEL = "google/t5gemma-2-1b-1b"
 
+#: The commit of {@link IRODORI_LARGE_TEXT_ENCODER_MODEL} the v4-Large checkpoint's `config_json`
+#: names as its `text_encoder_revision` (read 2026-11-14 — THIRD_PARTY_NOTICES.md).
+IRODORI_LARGE_TEXT_ENCODER_REVISION = "dd0a2683227859151b1730ca3a63087df5b5f39b"
+
 #: License identifier of the v4-Large line (the HF tag in the card's frontmatter — upstream's own
 #: tag). The same value is the license every container a v4-Large model exports must carry
 #: (`irodori.distribution.assert_irodori_container_licenses`).
 IRODORI_LARGE_LICENSE = "gemma"
 
-#: The two Gemma documents upstream's model card links (its "License" section) — the card links the
-#: same URLs; their verbatim texts are in the repository's `LICENSE.md`.
-GEMMA_TERMS_URL = "https://ai.google.dev/gemma/terms"
-GEMMA_PROHIBITED_USE_POLICY_URL = "https://ai.google.dev/gemma/prohibited_use_policy"
-
+#: What the upstream cards state and the recipe cannot measure, quoted verbatim (the maintainer's
+#: ruling of 2026-11-27 — the cards at the pinned commits, the local snapshots in `inputs/irodori/`
+#: read 2026-11-27): how a MeanFlow student was distilled, the terms of the v4-Large line, and what
+#: the codec derives from (the ground of its Apache 2.0 attribution).
+IRODORI_MEANFLOW_QUOTES: Mapping[str, UpstreamQuote] = {
+    "Aratako/Irodori-TTS-v4.1-Small-MF": UpstreamQuote(
+        repo="Aratako/Irodori-TTS-v4.1-Small-MF",
+        revision="ccc78f5d480b6e51b69b2d5042a14c4da04fea6e",
+        sections=("MeanFlow Distillation",),
+        paragraphs=(
+            "This model was distilled from a frozen v4.1-Small RF teacher. An interval-length"
+            " embedding was added to the student DiT, and the entire student DiT was trained to"
+            " predict the teacher's average velocity. The condition encoders and duration predictor"
+            " were kept frozen.",
+            "Classifier-free guidance (CFG) is incorporated into the teacher targets during"
+            " distillation. MeanFlow inference therefore uses one conditional DiT evaluation per"
+            " sampling step, without separate CFG evaluations.",
+        ),
+    ),
+}
+IRODORI_LARGE_TERMS_QUOTES: Mapping[str, UpstreamQuote] = {
+    "Aratako/Irodori-TTS-v4-Large": UpstreamQuote(
+        repo="Aratako/Irodori-TTS-v4-Large",
+        revision="2e0c55428ce97268a507f1feeb2478f8d9148e8b",
+        sections=("License", "Ethical Restrictions"),
+        paragraphs=(
+            "This model is subject to the **[Gemma Terms of Use](https://ai.google.dev/gemma/terms)**"
+            " because its shared text/caption encoder is derived from"
+            " **[google/t5gemma-2-1b-1b](https://huggingface.co/google/t5gemma-2-1b-1b)**. Use and"
+            " redistribution must comply with those terms, including the **[Gemma Prohibited Use"
+            " Policy](https://ai.google.dev/gemma/prohibited_use_policy)**, as well as the"
+            " additional ethical restrictions below.",
+            "In addition to the license terms, the following ethical restrictions apply:",
+            "1.  **No Impersonation:** Do not use this model to clone or impersonate the voice of"
+            " any individual (e.g., voice actors, celebrities, public figures) without their"
+            " explicit consent.",
+            "2.  **No Misinformation:** Do not use this model to generate deepfakes or synthetic"
+            " speech intended to mislead others or spread misinformation.",
+            "3.  **Voice Generation Disclaimer:** When generating speech purely from text or"
+            " captions without using reference audio, it is possible that the generated voice may"
+            " coincidentally resemble that of a real person. This is strictly a probabilistic"
+            " artifact within the latent space. The model was not trained with the intent of"
+            " reproducing specific individuals.",
+            "4.  **Liability Disclaimer:** The developers assume no liability for any misuse of"
+            " this model. Users are solely responsible for ensuring their use of the generated"
+            " content complies with applicable laws and regulations in their jurisdiction.",
+        ),
+    ),
+}
 #: The `flowParameterization` value of a MeanFlow model in `pipelineConfig` (the spelling of
 #: `irodori.distribution.IRODORI_FLOW_MEANFLOW`, which imports this module — kept as a literal
 #: here to avoid the cycle; `tests/test_card.py` pins that the two agree).
@@ -140,6 +256,12 @@ def _is_meanflow(model: Mapping[str, Any]) -> bool:
 #: above). It is redistributed, so it is listed in the attribution.
 #: License checked at the source (2026-08-12): `license: mit`.
 IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
+IRODORI_TEXT_BACKBONE_LICENSE = "mit"
+
+#: The commit of {@link IRODORI_TEXT_BACKBONE_MODEL} the checkpoints' `config_json` names as their
+#: `text_encoder_revision` (the same in v4-small, v4.1-small and v4.1-small-MF, read 2026-11-26 —
+#: THIRD_PARTY_NOTICES.md).
+IRODORI_TEXT_BACKBONE_REVISION = "77675fc96a7e445e982e2ba90246b816efc74ec6"
 
 
 def irodori_upstream(model_name: str) -> IrodoriUpstream:
@@ -173,6 +295,10 @@ def irodori_large_upstream(model_name: str) -> IrodoriUpstream:
 #: It is redistributed, so it is listed both in `base_model` and in the attribution section.
 IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
+#: The commit of {@link IRODORI_CODEC_MODEL} the codec containers were exported from (the HF
+#: cache's `refs/main` — the local fetch record, THIRD_PARTY_NOTICES.md).
+IRODORI_CODEC_REVISION = "47376ee24834d7a05a48ebabfe3cde29b3c5e214"
+
 #: The upstream chain of the codec weights (checked 2026-09-24 against the HF models API and
 #: each README).
 #: The `base_model` of `IRODORI_CODEC_MODEL` (`47376ee2…`, `license: mit`) is
@@ -192,6 +318,35 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 #: machine-readable tag and the bundled `LICENSE`.
 IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
 IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
+
+#: The HF license identifiers of the codec's chain above (`IRODORI_CODEC_MODEL` and its parent are
+#: `license: mit`, the original weights `license: apache-2.0`).
+IRODORI_CODEC_MODEL_LICENSE = "mit"
+IRODORI_CODEC_ORIGIN_LICENSE = "apache-2.0"
+
+#: What the codec's card states it derives from (the ground of its Apache 2.0 attribution).
+IRODORI_CODEC_QUOTE = UpstreamQuote(
+    repo=IRODORI_CODEC_MODEL,
+    revision=IRODORI_CODEC_REVISION,
+    sections=("Overview",),
+    paragraphs=(
+        "**Base Model:** Derived from"
+        " [Semantic-DACVAE-Japanese](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese)"
+        " (originally [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked)).",
+    ),
+)
+
+#: Every quotation of an upstream card the family's cards write (checked against the cached cards
+#: by `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (
+    *IRODORI_MEANFLOW_QUOTES.values(),
+    *IRODORI_LARGE_TERMS_QUOTES.values(),
+    IRODORI_CODEC_QUOTE,
+)
+
+#: The license of upstream's training / inference implementation (GitHub `Aratako/Irodori-TTS` —
+#: its `LICENSE` is the MIT License), named by its HF identifier as the card names every license.
+IRODORI_IMPLEMENTATION_LICENSE = "mit"
 
 #: License identifier of the distribution (the HF tag in the card's frontmatter — upstream
 #: Irodori-TTS and the direct upstream of the bundled codec, {@link IRODORI_CODEC_MODEL}, are both
@@ -260,8 +415,8 @@ def _irodori_overview(
         "",
         f"A Japanese text-to-speech distribution: the **{upstream.display}** {flow} DiT",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Nine graphs make up the chain: {backbone}, the",
         "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
@@ -290,22 +445,36 @@ def _irodori_overview(
 def _irodori_weights_line(upstream: IrodoriUpstream) -> list[str]:
     """The first bullet of the attribution: where the weights come from (with the upstream
     revision and the distillation teacher when the table names them)."""
-    at = "" if upstream.revision is None else f" at revision `{upstream.revision}`"
-    lines = [
-        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},"
-        " licensed **MIT**",
+    return [
+        f"- **Weights**: {pinned(upstream.repo, upstream.revision)},"
+        f" licensed **{IRODORI_LICENSE}**",
+        "  (as of retrieval). The training / inference implementation it comes with",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is licensed"
+        f" **{IRODORI_IMPLEMENTATION_LICENSE}** as well;",
+        "  Karume's runtime contains none of that code — it is an independent implementation that",
+        "  reads these weights from its own container format.",
+        *(
+            []
+            if upstream.teacher is None
+            else quotation(
+                _meanflow_quote(upstream),
+                f"  Upstream distilled it from {hf_link(upstream.teacher)} with MeanFlow; its card",
+                indent="  ",
+            )
+        ),
     ]
-    if upstream.teacher is not None:
-        lines += [
-            "  (as of retrieval). Upstream distilled it from"
-            f" [{upstream.teacher}](https://huggingface.co/{upstream.teacher}) with MeanFlow:",
-            "  the whole DiT was retrained (with an added interval embedding) to take few, large",
-            "  steps, and the guidance was fused into the teacher's targets, so it runs without",
-            "  classifier-free guidance. Its condition encoders and duration predictor are the",
-            "  teacher's. The training / inference implementation it comes with",
-        ]
-        return lines
-    return [*lines, "  (as of retrieval). The training / inference implementation it comes with"]
+
+
+def _meanflow_quote(upstream: IrodoriUpstream) -> UpstreamQuote:
+    """What a MeanFlow student's card states of its distillation ({@link IRODORI_MEANFLOW_QUOTES};
+    a student without one fails — the card does not reword it)."""
+    quote = IRODORI_MEANFLOW_QUOTES.get(upstream.repo)
+    if quote is None or quote.revision != upstream.revision:
+        raise ValueError(
+            f"{upstream.repo}: no quotation of its card at {upstream.revision} says how it was"
+            " distilled — IRODORI_MEANFLOW_QUOTES"
+        )
+    return quote
 
 
 def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
@@ -314,13 +483,14 @@ def _irodori_backbone_lines(model: Mapping[str, Any]) -> list[str]:
     holder = _component_holder(model, ("backbone",))
     if holder is None:
         return [
-            "  licensed **MIT** (as of retrieval). It is redistributed here in the container"
-            " format as",
+            f"  licensed **{IRODORI_TEXT_BACKBONE_LICENSE}** (as of retrieval). It is redistributed"
+            " here in the container format as",
             "  the `backbone` component, so that license travels with this repository too.",
         ]
     return [
-        "  licensed **MIT** (as of retrieval). This repository does not store it: the manifest",
-        f"  references the containers `{holder}` ships as the `backbone` component,",
+        f"  licensed **{IRODORI_TEXT_BACKBONE_LICENSE}** (as of retrieval). This repository does"
+        " not store it: the manifest",
+        f"  references the containers {hf_link(holder)} ships as the `backbone` component,",
         "  and they are fetched from there. That license applies to the backbone this distribution",
         "  runs.",
     ]
@@ -343,7 +513,7 @@ def _irodori_codec_lines(model: Mapping[str, Any]) -> list[str]:
         ]
     return [
         "  (as of retrieval). Upstream ships it as a separate repository. This repository does not",
-        f"  store it: the manifest references the containers `{holder}` ships as the",
+        f"  store it: the manifest references the containers {hf_link(holder)} ships as the",
         "  `codec_decoder` / `codec_encoder` components, and they are fetched from there so that",
         f"  text-to-audio runs from this distribution. Its weights derive from{origin}",
     ]
@@ -361,18 +531,17 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
         *_irodori_weights_line(upstream),
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
-        "  Karume's runtime contains none of that code — it is an independent implementation that",
-        "  reads these weights from its own container format.",
-        f"- **Text backbone**: fine-tuned from"
-        f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
+        "- **Text backbone**: fine-tuned from"
+        f" {pinned(IRODORI_TEXT_BACKBONE_MODEL, IRODORI_TEXT_BACKBONE_REVISION)},",
         *_irodori_backbone_lines(model),
-        f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
-        " licensed **MIT**",
+        f"- **Codec**: {pinned(IRODORI_CODEC_MODEL, IRODORI_CODEC_REVISION)},"
+        f" licensed **{IRODORI_CODEC_MODEL_LICENSE}**",
         *_irodori_codec_lines(model),
-        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
-        "  the Apache License 2.0 text is included in `LICENSE.md` for the codec components.",
-        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
+        f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
+        "  a verbatim copy of that license is in `LICENSE.md` for the codec components.",
+        *quotation(IRODORI_CODEC_QUOTE, "  Its card", indent="  "),
+        f"{changes_made_here()} conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
         "  as `f32` / `f16` / `i8` series, and the DiT (`dit` / `dit_context`) adds an `i4` series",
         "  rounded with GPTQ calibration (the quant table below says which storage each quant",
@@ -380,6 +549,7 @@ def _irodori_base_weights(manifest: Mapping[str, Any], upstream: IrodoriUpstream
         "  as effective weights, keeps only the mean half of `quantizer.in_proj` in",
         "  `codec_encoder`, and bypasses the watermarking branch in `codec_decoder`; constant",
         "  sub-expressions are precomputed. No retraining, no fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _irodori_metadata(upstream).base_model]),
     ]
 
 
@@ -564,7 +734,15 @@ def render_irodori_model_card(
             _irodori_usage(manifest, repo),
             *model_sections(
                 manifest,
-                (partial(quants, host_assets=host_assets), _irodori_shape, _irodori_defaults),
+                (
+                    partial(
+                        quants,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, IRODORI_MEASUREMENTS),
+                    ),
+                    _irodori_shape,
+                    _irodori_defaults,
+                ),
             ),
         )
     )
@@ -577,6 +755,18 @@ IRODORI_CODEC_COMPONENTS: tuple[str, ...] = ("codec_decoder", "codec_encoder")
 
 #: The DiT pair (`irodori.distribution.IRODORI_DIT_ROLES`, the same cycle and the same pin).
 IRODORI_DIT_COMPONENTS: tuple[str, ...] = ("dit", "dit_context")
+
+
+def _large_terms_quote(upstream: IrodoriUpstream) -> UpstreamQuote:
+    """What a v4-Large-line card states of its terms ({@link IRODORI_LARGE_TERMS_QUOTES}; a model
+    without one fails — the card does not reword it)."""
+    quote = IRODORI_LARGE_TERMS_QUOTES.get(upstream.repo)
+    if quote is None or quote.revision != upstream.revision:
+        raise ValueError(
+            f"{upstream.repo}: no quotation of its card at {upstream.revision} states its terms —"
+            " IRODORI_LARGE_TERMS_QUOTES"
+        )
+    return quote
 
 
 def _irodori_large_metadata(upstream: IrodoriUpstream) -> CardMetadata:
@@ -645,7 +835,7 @@ def _irodori_large_codec_line(model: Mapping[str, Any]) -> str:
         return "  (as of retrieval). It is redistributed here in the container format as the"
     return (
         f"  (as of retrieval). This repository does not store it: the manifest references the"
-        f" containers `{holder}` ships as"
+        f" containers {hf_link(holder)} ships as"
     )
 
 
@@ -661,7 +851,6 @@ def _irodori_large_base_weights(
             f"the DiT pair adds {dit} — the card says only an `i4` series rounded with GPTQ"
             " calibration (the rounding `irodori.distribution` requires of it)"
         )
-    at = "" if upstream.revision is None else f" at revision `{upstream.revision}`"
     stored = " / ".join(f"`{label}`" for label in common)
     series = f"every component is stored as {stored} series" + (
         ", and the DiT (`dit` / `dit_context`) adds an `i4` series rounded with GPTQ calibration"
@@ -674,37 +863,32 @@ def _irodori_large_base_weights(
         "",
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
-        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}){at},",
-        f"  tagged `license: {IRODORI_LARGE_LICENSE}` (as of retrieval). Upstream's model card"
-        " states that the model is",
-        f"  subject to the [Gemma Terms of Use]({GEMMA_TERMS_URL}) because its shared text /"
-        " caption encoder is",
-        "  derived from"
-        f" [{IRODORI_LARGE_TEXT_ENCODER_MODEL}](https://huggingface.co/{IRODORI_LARGE_TEXT_ENCODER_MODEL}),"
-        " and that use and",
-        "  redistribution must comply with those terms, including the"
-        f" [Gemma Prohibited Use Policy]({GEMMA_PROHIBITED_USE_POLICY_URL}),",
-        "  as well as the additional ethical restrictions listed on that model card. Both Gemma",
-        "  texts are included in `LICENSE.md`, and the notice upstream ships with the model is in",
-        "  `NOTICE.md`. The training / inference implementation it comes with",
-        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT;",
+        f"- **Weights**: {pinned(upstream.repo, upstream.revision)},",
+        f"  licensed **{IRODORI_LARGE_LICENSE}** (as of retrieval). Both Gemma texts (the Gemma",
+        "  Terms of Use and the Gemma Prohibited Use Policy) are included in `LICENSE.md`, and the",
+        "  notice upstream ships with the model is in `NOTICE.md`. The training / inference",
+        "  implementation it comes with ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS))"
+        f" is licensed **{IRODORI_IMPLEMENTATION_LICENSE}**;",
         "  Karume's runtime contains none of that code — it is an independent implementation that",
         "  reads these weights from its own container format.",
+        *quotation(_large_terms_quote(upstream), "  Its card", indent="  "),
         "- **Text encoder**: the `backbone` component is the checkpoint's fine-tuned text encoder",
-        f"  of [{IRODORI_LARGE_TEXT_ENCODER_MODEL}](https://huggingface.co/{IRODORI_LARGE_TEXT_ENCODER_MODEL}),"
+        "  of"
+        f" {pinned(IRODORI_LARGE_TEXT_ENCODER_MODEL, IRODORI_LARGE_TEXT_ENCODER_REVISION)},"
         " redistributed here in the container",
         "  format; the tokenizer asset is upstream's tokenizer of the same model, converted into",
         "  Karume's tokenizer format.",
-        f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
-        " licensed **MIT**",
+        f"- **Codec**: {pinned(IRODORI_CODEC_MODEL, IRODORI_CODEC_REVISION)},"
+        f" licensed **{IRODORI_CODEC_MODEL_LICENSE}**",
         _irodori_large_codec_line(model),
         "  the `codec_decoder` / `codec_encoder` components so that text-to-audio runs from this",
         "  distribution. Its weights derive from"
         f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
-        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
-        "  the MIT and Apache License 2.0 texts are included in `LICENSE.md` for the codec",
-        "  components.",
-        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        f"  licensed **{IRODORI_CODEC_ORIGIN_LICENSE}** (as of retrieval), by way of"
+        f" {hf_link(IRODORI_CODEC_PARENT_MODEL)};",
+        "  verbatim copies of both licenses are in `LICENSE.md` for the codec components.",
+        *quotation(IRODORI_CODEC_QUOTE, "  Its card", indent="  "),
+        f"{changes_made_here()} conversion into the Karume",
         f"  container format and **quantization** of the weights — {series}",
         f"  (the quant table below says which storage each quant {selects}).",
         "  The text encoder's sliding-window attention mask is precomputed as one constant, and",
@@ -713,6 +897,7 @@ def _irodori_large_base_weights(
         "  `quantizer.in_proj` in `codec_encoder`, and bypasses the watermarking branch in",
         "  `codec_decoder`; constant sub-expressions are precomputed. No retraining, no",
         "  fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _irodori_large_metadata(upstream).base_model]),
     ]
 
 
@@ -741,7 +926,11 @@ def render_irodori_large_model_card(
             *model_sections(
                 manifest,
                 (
-                    partial(quants, host_assets=host_assets),
+                    partial(
+                        quants,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, IRODORI_MEASUREMENTS),
+                    ),
                     _irodori_shape,
                     partial(_irodori_defaults, rare_token_split=False),
                 ),

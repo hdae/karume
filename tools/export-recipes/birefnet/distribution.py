@@ -74,7 +74,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from _shared.licenses import mit_license
+from _shared.licenses import license_markdown, mit_license
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
@@ -89,6 +89,7 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     BIREFNET_CHECKPOINTS,
@@ -770,6 +771,7 @@ BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
 #: shipping. The per-preset storage description (`{storage}`) is built from the same single place as
 #: the card's attribution section (`birefnet.card.birefnet_storage_lines`), from that checkpoint's
 #: presets ({@link birefnet_seat_dtypes}) and storage.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under
@@ -791,7 +793,7 @@ The following changes were made:
   floating-point rounding and removes two full-resolution intermediates.
 {storage}
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{closing}
 """
 
 
@@ -805,8 +807,9 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
     stops being a copy of the permission notice).
     """
     return {
-        "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[checkpoint]),
+        "LICENSE.md": license_markdown(mit_license(BIREFNET_COPYRIGHTS[checkpoint])),
         "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(
+            closing=notice_closing(),
             repo=BIREFNET_UPSTREAM[checkpoint],
             swin=SWIN_TRANSFORMER_UPSTREAM,
             storage="\n".join(birefnet_storage_lines(checkpoint, birefnet_seat_dtypes(checkpoint))),

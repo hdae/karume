@@ -45,7 +45,7 @@ from karume.dist import (
 )
 from moss import distribution as dist
 from moss import sources
-from moss.card import MOSS_TITLE, render_moss_model_card
+from moss.card import MOSS_BFL_NON_ENDORSEMENT, MOSS_TITLE, render_moss_model_card
 
 
 def _series_present() -> bool:
@@ -376,8 +376,8 @@ class TestTheCard:
             assert f"`{origin.source.revision}`" in card
 
     def test_the_front_matter_lists_every_upstream_whose_weights_it_carries(self) -> None:
-        """The Hub's model tree: the DiT, the text tower and the small decoder are redistributed;
-        FLUX.2 [klein] 4B supplies only the latent statistics and is not a base model."""
+        """The Hub's model tree: the DiT, the text tower and the small decoder are redistributed,
+        and FLUX.2 [klein] 4B supplies the latent statistics — every stored upstream is listed."""
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
         front_matter = card.split("---")[1]
         sequence = front_matter.split("base_model:\n")[1].split("\nbase_model_relation:")[0]
@@ -386,14 +386,15 @@ class TestTheCard:
             sources.SOURCE.repo,
             sources.TEXT_ENCODER_ORIGIN.repo,
             "black-forest-labs/FLUX.2-small-decoder",
+            "black-forest-labs/FLUX.2-klein-4B",
         ]
-        assert "black-forest-labs/FLUX.2-klein-4B" not in front_matter
 
     def test_the_vae_bullet_passes_the_usage_policy_pointer_on_as_information(self) -> None:
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
         vae_bullet = card.split("- **VAE decoder**")[1].split("\n- ")[0]
-        assert "BFL Usage Policy" in vae_bullet
-        assert "not a term of the Apache License, Version 2.0" in vae_bullet
+        assert "point to its usage policies, without a link of their own" in vae_bullet
+        assert "not a term of their **apache-2.0** license" in vae_bullet
+        assert "as further explained in our Usage Policies." in vae_bullet
         for origin in sources.VAE_ORIGINS:
             assert (
                 f"https://huggingface.co/{origin.source.repo}/blob/{origin.source.revision}"
@@ -415,14 +416,23 @@ class TestTheCard:
             assert "OpenMOSS" not in sentence
             assert "Qwen" not in sentence
 
+    def test_the_card_and_the_notice_write_the_one_flux_marks_sentence(self) -> None:
+        """docs/spec/distribution-cards.md#shared-wording — one constant for both."""
+        card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
+
+        assert f"\n- {MOSS_BFL_NON_ENDORSEMENT}\n" in card
+        assert f"\n\n{MOSS_BFL_NON_ENDORSEMENT}\n\n" in dist.MOSS_NOTICE_MARKDOWN
+        assert "the Black Forest Labs and FLUX names and marks" in MOSS_BFL_NON_ENDORSEMENT
+
     def test_the_title_is_followed_by_the_house_sentence(self) -> None:
         """Beside the FLUX marks sentence, not in place of it: every upstream and its publisher."""
         lines = render_moss_model_card(self._manifest(), "hdae/karume-moss-image").splitlines()
         title = lines.index(f"# {MOSS_TITLE}")
         assert lines[title + 2] == (
-            "This is an unofficial conversion of OpenMOSS-Team/MOSS-Image-SFT, Qwen/Qwen3.5-9B and"
-            " black-forest-labs/FLUX.2-small-decoder for Karume. It is not affiliated with or"
-            " endorsed by OpenMOSS, Alibaba Cloud and Black Forest Labs."
+            "This is an unofficial conversion of OpenMOSS-Team/MOSS-Image-SFT, Qwen/Qwen3.5-9B,"
+            " black-forest-labs/FLUX.2-small-decoder and black-forest-labs/FLUX.2-klein-4B for"
+            " Karume. It is not affiliated with or endorsed by OpenMOSS, Alibaba Cloud and Black"
+            " Forest Labs."
         )
 
     def test_the_notice_names_what_was_changed(self) -> None:

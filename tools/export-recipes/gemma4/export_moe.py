@@ -51,7 +51,9 @@ and holds each expert weight as a `gemma4.experts.PackedExperts` — the packed 
 rounded by the writer's own function — whose one expert is dequantised when a pick asks for it,
 through the op's own eager body. So the goldens describe exactly what the container decodes to
 (ADR 0006) and the trace and the reference share one per-pick summation. Estimated peak (recon of
-2026-11-08, not measured): about 20 GiB, against about 28 GiB with 12B's second import.
+2026-11-08, not measured): about 20 GiB, against about 28 GiB with 12B's second import. The QAT MTP
+drafter (`gemma4.export_drafter_qat`) takes its goldens against the same reference, built by the
+same steps ({@link load_reference}).
 
 ## Goldens
 
@@ -509,6 +511,33 @@ def reference_wrapper(
     return unified.UnifiedProductWrapper(model).eval()
 
 
+def load_reference(
+    model_dir: Path,
+    tokenizer_dir: Path,
+    *,
+    layers: int | None = None,
+    sym_max: int = one_shot.SYM_MAX,
+) -> unified.UnifiedProductWrapper:
+    """The reference a series' goldens run against, built by the series' own steps — the
+    shape-only trace ({@link _trace}), the checks before any read, the one grid import
+    (`gemma4.export_unified.prepare_material`) and {@link reference_wrapper} — for a script that
+    takes goldens against the stored model without writing it (the QAT MTP drafter,
+    `gemma4.export_drafter_qat`). `layers` is the cut model's ({@link export_cut}).
+
+    MUST: the same steps as {@link export_series} / {@link export_cut}, so the values are the ones
+    the product (or cut) container decodes to (ADR 0006).
+    """
+    checkpoint = open_checkpoint(model_dir)
+    config, _, graph, tensors, keys = _trace(model_dir, tokenizer_dir, layers, sym_max)
+    unified.assert_checkpoint_keys(
+        keys.persistent, checkpoint.names(), int(config.num_hidden_layers)
+    )
+    unified.assert_fixed_matrices(keys)
+    material = unified.prepare_material(graph, tensors, keys, checkpoint)
+    del graph, tensors
+    return reference_wrapper(config, checkpoint, keys, material.fixed)
+
+
 class LayerRecorder:
     """Forward hooks on the reference's decoder layers (each layer's output `[T, H]`, for the
     layers in `layers`) and, with `routes`, on its routers (the top {@link router_top} ids and
@@ -562,6 +591,12 @@ def teacher_forced(
             decode.last_rows_for(ids, rows),
         )
     return logits[0], hidden[0]
+
+
+def cut_suffix(layers: int) -> str:
+    """The series suffix of the model cut after `layers` layers (`gemma4-26b-cut<N>`) — the
+    spelling of this script's default and of the readers that take the cut as their target."""
+    return f"cut{layers}"
 
 
 def cut_layers(config: Any) -> list[int]:
@@ -1023,7 +1058,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--routing-outputs / --full-series / --no-full-check need --layers")
     model = args.model
     if args.layers is not None and args.out is None and not args.plan:
-        args.out = one_shot.series_dir(model, f"cut{args.layers}")
+        args.out = one_shot.series_dir(model, cut_suffix(args.layers))
     full_series = (
         None
         if args.no_full_check

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import ContainerReadError, read_layouts
-from _shared.licenses import apache_license_2_0, cc_by_sa_4_0
+from _shared.licenses import apache_license_2_0, cc_by_sa_4_0, license_markdown
 from _shared.upstream import assert_upstream_provenance, hf_upstreams
 from karume.dist import (
     LICENSE_FILENAME,
@@ -62,20 +62,30 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
     HF_OWNER,
-    REVISION_PIN_COMMENT,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     Upstream,
+    changes_made_here,
+    default_model,
+    from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    notice_closing,
+    pinned,
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 from wan import umt5_tokenizer, umt5_xxl_tokenizer
+from wan.sources import SOURCES as WAN_SOURCES
 from wan.sources import UMT5_SOURCES, Umt5Source
 from wan.umt5_intake import (
     UNDECLARED_LICENSE,
@@ -500,11 +510,12 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: 2026-10-04 (research `2026-10-04-umt5-upstream-provenance` §2.1 — the checked commit is named;
 #: moving Wan's pin does not change the checked fact). The "rejected inputs" of the tokenizer item
 #: come from the docstring of `wan.umt5_xxl_tokenizer` (measured 2026-10-15).
-UMT5_NOTICE_MARKDOWN = """# NOTICE
+#: SPEC: docs/spec/distribution-cards.md#noticemd
+UMT5_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
-`google/umt5-xxl` listed in `README.md` (Google, licensed under the Apache License, Version 2.0 —
-see `LICENSE.md`; that repository has no NOTICE file), and a converted form of that checkpoint's
+`google/umt5-xxl` (Google, licensed under the Apache License, Version 2.0 — see `LICENSE.md`; that
+repository has no NOTICE file), and a converted form of that checkpoint's
 tokenizer. That checkpoint holds the encoder in float32. Its encoder weights are bit-identical to
 the float32 `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit
 `0fad780a534b6463e45facd96134c9f345acfa5b`, checked on 2026-10-04). The following changes were
@@ -534,8 +545,7 @@ made:
   trailing space, characters outside the vocabulary), as well as inputs of more than 512 tokens,
   which the upstream would truncate.
 
-No retraining and no fine-tuning were performed. The original checkpoint and its original
-tokenizer files are not distributed here.
+{notice_closing("The original checkpoint and its original tokenizer files are")}
 """
 
 
@@ -549,9 +559,6 @@ UMT5_SUPPORTED_PIPELINE = UMT5_PIPELINE
 #: The HF pipeline tag (an encoder that turns text into embeddings).
 UMT5_PIPELINE_TAG = "feature-extraction"
 
-#: Where the original text is (the same text as `LICENSE.md` at the distribution repository root —
-#: Apache 2.0 §4(a)).
-UMT5_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The name of the Wan distribution repository that references this encoder across repositories
 #: (named by the card's "Used by" — only Wan2.2 is published, Wan2.1 is not; the same spelling as
@@ -566,6 +573,11 @@ UMT5_TOKENS = (2, 512)
 
 #: The encoder's output width (umT5-XXL's `d_model` — the `[L, 4096]` the card's Usage states).
 UMT5_HIDDEN_WIDTH = 4096
+
+
+#: The repository of the original umT5-XXL encoder (the default model's provenance), as the card
+#: names it in prose.
+UMT5_UPSTREAM_REPO = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
 
 
 def _umt5_upstream(name: str) -> Umt5Source:
@@ -601,10 +613,12 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "## What is this",
         "",
-        "The encoder of **umT5-XXL** (`google/umt5-xxl`) as a standalone text encoder for the",
+        f"The encoder of **umT5-XXL** ({hf_link(UMT5_UPSTREAM_REPO)}) as a standalone text encoder"
+        " for the",
         "WebGPU inference runtime **Karume**: the encoder converted into Karume's container format",
         "(a `.krm` part sequence whose first part carries the graph and model descriptors) with",
         "int8 weights, and the checkpoint's tokenizer converted into one JSON table.",
+        RUNTIME_SENTENCE,
         "",
         f"- One graph, `{UMT5_ROLE}`: the token ids `{UMT5_IDS_INPUT}` `[1, L]` and the",
         f"  relative-position bucket indices `{UMT5_BUCKETS_INPUT}` `[L, L]` (both int32) in,",
@@ -612,7 +626,8 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
         f"  `L` is the number of tokens of the prompt itself ({low} to {high}, the end token",
         "  `</s>` included) — there is no padding and no attention mask.",
         f"- One asset, `{UMT5_TOKENIZER_ROLE}` (format `{umt5_xxl_tokenizer.ASSET_FORMAT}`):",
-        "  the tokenizer of `google/umt5-xxl` as one JSON table — the vocabulary and its scores,",
+        f"  the tokenizer of {hf_link(UMT5_UPSTREAM_REPO)} as one JSON table — the vocabulary and"
+        " its scores,",
         "  the added tokens, the set of whitespace characters and the maximum length of",
         f"  {high} tokens. It carries no prompt cleaning.",
         "- The relative-position bucket indices depend on `L` only and are computed on the host:",
@@ -623,6 +638,8 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  16 buckets (keys after the query use 16–31): distances 0 to 7 get one bucket each,",
         "  and longer distances fall into 8 logarithmically spaced buckets that start at 8, 12,",
         "  16, 23, 32, 46, 64 and 91 (the last one covers every distance from 91 on).",
+        "- Not readable by transformers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{UMT5_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
         f" is `karume.json` (`{manifest['format']}`).",
     ]
@@ -644,9 +661,8 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         # keys read.
         lines.append(
             f"- **`{name}`**: the encoder weights (`shared.weight` and `encoder.*`) of"
-            f" [{source.repo}](https://huggingface.co/{source.repo}) at commit `{source.revision}`,"
-            f" licensed **{source.license}** (as of retrieval;"
-            f" [full text]({UMT5_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f" {pinned(source.repo, source.revision)}, licensed **{source.license}**"
+            f" {APACHE_LICENSE_REFERENCE}."
             " The decoder and `lm_head` are not included."
         )
         files = " and ".join(
@@ -659,10 +675,10 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         )
     lines += [
         "- **Relation to the Wan checkpoints**: every tensor is bit-identical to the float32",
-        "  `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit `0fad780a…`), and",
-        "  the bfloat16 `text_encoder` of `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (commit `b8fff731…`)",
-        "  is its round-to-nearest-even rounding (checked on 2026-10-04).",
-        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        f"  `text_encoder` folder in {_wan_checkpoint(UMT5_WAN21_TEXT_MODEL)}, and the bfloat16",
+        f"  `text_encoder` in {_wan_checkpoint(UMT5_WAN22_MODEL)} is its round-to-nearest-even",
+        "  rounding (checked on 2026-10-04).",
+        changes_made_here(APACHE_MODIFICATION_CLAUSE),
         "  only the encoder converted (no decoder, no `lm_head`);",
         "  conversion into the Karume container format; the weight matrices of the linear layers",
         "  and the vocabulary embedding quantized to int8 with one scale per output channel (per",
@@ -671,41 +687,63 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         '  `GELU(approximate="tanh")`; the graph runs on the valid tokens with the bucket indices',
         "  as an input; the tokenizer converted into one JSON table. No retraining and no",
         "  fine-tuning.",
+        *upstream_cards([hf_link(repo) for repo in _umt5_metadata(manifest).base_model]),
     ]
     return lines
+
+
+#: The two Wan checkpoints the card relates this encoder to, by their names in `wan.sources.SOURCES`
+#: (the commits it states are theirs — the checks of 2026-10-04 named these commits).
+UMT5_WAN21_TEXT_MODEL = "t2v-1.3b"
+UMT5_WAN22_MODEL = "ti2v-5b"
+
+
+def _wan_checkpoint(name: str) -> str:
+    """A Wan checkpoint of `wan.sources.SOURCES` with its full commit."""
+    source = WAN_SOURCES[name]
+    return pinned(source.repo, source.revision)
 
 
 def _consumer_link() -> str:
     """A link (Markdown) to the Wan repository that references this encoder across
     repositories."""
-    repo = f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}"
-    return f"[`{repo}`](https://huggingface.co/{repo})"
+    return hf_link(f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}")
 
 
-def _umt5_usage(repo: str) -> list[str]:
+def _umt5_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     """Usage: how to use the standalone public class `Encoder` (`@karume/models/umt5`), the input
     rules, and the Wan distribution that references this encoder across repositories.
 
-    The `fromPretrained` source is the same object-ref form as the other families' cards plus the
-    pin slot (`karume.modelcard.REVISION_PIN_COMMENT`). The swap paragraph (ADR 0122 decision 7,
-    item 2) describes plugging a compatible encoder into Wan instead of this one, and states the pin
-    rule (a string source follows main) and that it has no effect on the precomputed path. The
-    input rules are the six rejections of `wan.umt5_xxl_tokenizer` (measured 2026-10-15).
+    The call is the one every family's card writes (`karume.modelcard.from_pretrained` — the
+    object-ref form plus the pin slot, declared with `await using` as `Encoder` disposes
+    asynchronously), with the model and the quant as commented options. The swap paragraph (ADR
+    0122 decision 7, item 2) describes plugging a compatible encoder into Wan instead of this one,
+    and states the pin rule (a string source follows main) and that it has no effect on the
+    precomputed path. The input rules are the six rejections of `wan.umt5_xxl_tokenizer` (measured
+    2026-10-15).
     """
     low, high = UMT5_TOKENS
+    model_name = manifest["defaultModel"]
+    model = default_model(manifest)
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     return [
         "## Usage",
         "",
         "```ts",
         'import { Encoder } from "jsr:@karume/models/umt5";',
         "",
-        "const encoder = await Encoder.fromPretrained({",
-        f'  repo: "{repo}",',
-        *REVISION_PIN_COMMENT,
-        "});",
-        'const { inputIds, hiddenStates } = await encoder.encode("a cat");'
+        *from_pretrained(
+            "Encoder",
+            repo,
+            [
+                f'  // model: "{model_name}", // default — available: {model_names}',
+                f'  // quant: "{model["defaultQuant"]}", // default — available: {quant_names}',
+            ],
+            disposable="await using",
+        ),
+        'const { inputIds, hiddenStates } = await pipeline.encode("a cat");'
         f" // hiddenStates: [L, {UMT5_HIDDEN_WIDTH}] f32, row-major",
-        "await encoder.dispose();",
         "```",
         "",
         "`encode` tokenizes the text with the bundled tokenizer, builds the relative-position",
@@ -717,7 +755,8 @@ def _umt5_usage(repo: str) -> list[str]:
         "",
         "The text is tokenized as it is — no prompt cleaning and no Unicode normalization — and",
         "`</s>` is appended. The token ids then equal those of `AutoTokenizer` in `transformers`",
-        "5.14.1 and of the original `tokenizer.json` of `google/umt5-xxl` alike. Inputs on which",
+        f"5.14.1 and of the original `tokenizer.json` of {hf_link(UMT5_UPSTREAM_REPO)} alike."
+        " Inputs on which",
         "those two disagree, or that the graph cannot take, are rejected with an error instead of",
         "being encoded:",
         "",
@@ -740,8 +779,8 @@ def _umt5_usage(repo: str) -> list[str]:
         "Wan's prompt cleaning.",
         "",
         "To run Wan2.2 with a compatible umT5-XXL encoder instead of this one (for example a",
-        "fine-tune converted with the Karume export recipe), pass it through the component swap",
-        "seat: `components: { text_encoder: { source: { repo, revision } } }` in the options of",
+        "fine-tune converted with the Karume export recipe), pass it through the `components`",
+        "option: `components: { text_encoder: { source: { repo, revision } } }` in the options of",
         "`Ti2vPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository",
         "name follows `main`, so the encoder would move with every push while the Wan manifest",
         'pins this one. The swap needs the GPU text encoder: `textEncoder: "precomputed"` never',
@@ -774,6 +813,7 @@ def _umt5_limits(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+# SPEC: docs/spec/distribution-cards.md#the-model-card
 def render_umt5_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
@@ -796,7 +836,7 @@ def render_umt5_model_card(
             [""],
             models(manifest),
             [""],
-            _umt5_usage(repo),
+            _umt5_usage(manifest, repo),
             *model_sections(
                 manifest,
                 (partial(quants, host_assets=host_assets), _umt5_limits),
@@ -816,7 +856,7 @@ PIPELINE = Pipeline(
     # The redistribution conditions §4 of the upstream license (Apache 2.0) apply to the one
     # distribution repository (ADR 0092 decision 7).
     root_files={
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": UMT5_NOTICE_MARKDOWN,
     },
 )
@@ -950,7 +990,7 @@ def intake_root_files(intake: Umt5Intake) -> dict[str, str]:
             f"intake '{intake.name}': there is no text for the license {intake.license!r}"
             f" (available texts: {sorted(INTAKE_LICENSE_TEXTS)}) — LICENSE.md cannot be built"
         )
-    return {LICENSE_FILENAME: text(), **files}
+    return {LICENSE_FILENAME: license_markdown(text()), **files}
 
 
 def _intake_header(intake: Umt5Intake) -> list[str]:
@@ -1025,7 +1065,7 @@ def _intake_attribution(intake: Umt5Intake) -> list[str]:
         f"- **Base model**: {base_line}",
         f"- **Source precision**: {_intake_precision(intake)}",
         *config_lines,
-        "- **Changes made here** (listed in full in `NOTICE.md`): conversion into the Karume",
+        f"{changes_made_here()} conversion into the Karume",
         "  container format; the weight matrices of the linear layers and the vocabulary",
         "  embedding quantized to int8 with one scale per output channel (per row for the",
         "  embedding), the relative-position bias tables and the RMSNorm weights kept in float32;",

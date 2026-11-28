@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import math
+import textwrap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,7 @@ from safetensors import safe_open
 
 from _shared.calib_provenance import calib_complaint
 from _shared.container_read import read_provenance
-from _shared.licenses import apache_license_2_0, mit_license
+from _shared.licenses import FurtherLicense, apache_license_2_0, license_markdown, mit_license
 from _shared.paths import DIST_ROOT, INPUTS_ROOT
 from karume.container import ContainerFormatError
 from karume.dist import (
@@ -68,6 +69,7 @@ from karume.dist import (
     ir_graph,
     sha256_file,
 )
+from karume.modelcard import HF_OWNER, notice_closing
 from karume.verify import ContainerError, verify_container
 
 from .card import (
@@ -79,6 +81,8 @@ from .card import (
     IRODORI_LARGE_TEXT_ENCODER_MODEL,
     IRODORI_LARGE_UPSTREAMS,
     IRODORI_TEXT_BACKBONE_MODEL,
+    irodori_large_upstream,
+    irodori_upstream,
     render_irodori_large_model_card,
     render_irodori_model_card,
 )
@@ -376,8 +380,7 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         "f16",
         {},
         label="Half size (f16)",
-        description="Every graph stored as f16 and computed in f32 — half the f32 download,"
-        " with no audible difference in the listening check.",
+        description="Every graph stored as f16 and computed in f32 — half the f32 download.",
     ),
     "i8": QuantSeat(
         "i8",
@@ -391,7 +394,7 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         {"linearCompute": "a8"},
         label="Balanced (int8, int8 linear)",
         description="The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8, and faster per Euler step.",
+        " — the same download as plain int8.",
     ),
     "i8+dit4": QuantSeat(
         "i8",
@@ -1364,29 +1367,18 @@ IRODORI_MODEL_SEAT_LABELS: Mapping[str, Mapping[str, str]] = {
     },
 }
 
-#: Model → (preset name → its own description), for a model whose presets were judged apart from
-#: the family's rulings ({@link irodori_quants}). The family's descriptions carry the v4 listening
-#: check and the v4 speed measurement; for v4.1-small-mf they say only what was established for
-#: that model — the maintainer's listening of 2026-11-14 covered `i8` and `i8-a8`, and nothing
-#: else was judged or measured for it (ADR 0150). `f32` and `i8+dit4` state facts of the storage
-#: only, so they keep the family's text.
+#: Model → (preset name → its own description), for a model of which the family's description
+#: would state something untrue ({@link irodori_quants}). Every description states facts of the
+#: storage and the knobs only; what a preset measured is a note of the card
+#: (`IRODORI_MEASUREMENTS` in `card.py`).
 IRODORI_MODEL_SEAT_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = {
-    IRODORI_V41_MF_MODEL: {
-        "f16": "Every graph stored as f16 and computed in f32 — half the f32 download.",
-        "i8": "Every graph stored as int8 and computed in f32 — about a quarter of the f32"
-        " download; it sounded fine in a listening check.",
-        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8, with no audible degradation in a listening check.",
-    },
-    # Nothing was listened to or timed for v4-Large yet, and it ships no `f32`: storage facts only
-    # (`i8+dit4` keeps the family's text, which states storage facts only).
+    # v4-Large ships no `f32`, so the family's sizes relative to it do not apply (`i8-a8` and
+    # `i8+dit4` keep the family's text).
     IRODORI_V4_LARGE_MODEL: {
         "f16": "Every graph stored as f16 and computed in f32 — the largest download of this"
         " repository (no f32 preset is shipped).",
         "i8": "Every graph stored as int8 and computed in f32, with the execution path left"
         " unchanged.",
-        "i8-a8": "The int8 weights with per-token int8 activations in the DiT's linear layers"
-        " — the same download as plain int8.",
     },
 }
 
@@ -1867,16 +1859,12 @@ _IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIR
 #: §4(d) requires retaining (upstream's `NOTICE`) exists neither on HF nor on GitHub (the file
 #: listings of 2026-09-24 — the history is in the comment on the same constant in `irodori.card`).
 #:
-#: MUST: do not name the model's upstream repository (write "the checkpoint listed in
-#: `README.md`"). `root_files` is one set fixed per Pipeline, and this Pipeline builds the 3
-#: repositories v4-small / v4.1-small / v4.1-small-mf, so naming a version would make one
-#: repository's notice disagree with its contents. The card names the version from the manifest.
-#:
-#: MUST: do not say that this repository stores a given component — for the same reason. v4-small
-#: stores every component; v4.1-small and v4.1-small-mf reference most of theirs, the text
-#: backbone and the codec included, in another repository ({@link irodori_references}). The
-#: notice says that a component is stored here or fetched from the repository `karume.json`
-#: references, and the card, which reads the manifest, says which.
+#: The notice follows the models built ({@link irodori_notice_markdown}): this Pipeline builds the 3
+#: repositories v4-small / v4.1-small / v4.1-small-mf, and each repository's notice names its own
+#: checkpoint by its repository ID and the repositories its references point at (the driver passes
+#: the models — `dist.ROOT_FILES`). v4-small stores every component; v4.1-small and v4.1-small-mf
+#: reference most of theirs, the text backbone and the codec included, in another repository
+#: ({@link irodori_references}).
 #:
 #: MUST: the text must correspond to the distribution's contents — it is valid prose as a value, so
 #: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
@@ -1898,27 +1886,55 @@ _IRODORI_CODEC_CHANGES = """\
 - Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
   the codec's Snake activations, were precomputed and stored as constants."""
 
-IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
 
-This distribution is a modified form of the Irodori-TTS checkpoint listed in `README.md` and
+def _irodori_storage_paragraph(models: Sequence[str]) -> str:
+    """Where the components of the models built are stored: here, or — for what `karume.json`
+    references in another Karume repository ({@link irodori_references}) — in the repository
+    named, from which they are fetched."""
+    holders = list(
+        dict.fromkeys(
+            f"`{HF_OWNER}/{reference.repo_name}`"
+            for model in models
+            for reference in irodori_references(model)
+        )
+    )
+    if not holders:
+        return "Every component is stored in this repository."
+    spelled = holders[0] if len(holders) == 1 else f"{', '.join(holders[:-1])} and {holders[-1]}"
+    return textwrap.fill(
+        "Its components are stored in this repository, except those `karume.json` references in"
+        f" {spelled}, which are fetched from there and not stored here (the text backbone and the"
+        " codec among them). The attributions and the changes below cover every component the"
+        " distribution runs, wherever it is stored.",
+        width=100,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+#: SPEC: docs/spec/distribution-cards.md#noticemd
+def irodori_notice_markdown(models: Sequence[str]) -> str:
+    """`NOTICE.md` of the MIT line for a build of `models`: the checkpoints by their repository
+    IDs ({@link irodori.card.irodori_upstream}), where the components are stored, and every
+    change (the module comment above)."""
+    checkpoints = " and ".join(f"`{irodori_upstream(model).repo}`" for model in models)
+    kind = "checkpoint" if len(models) == 1 else "checkpoints"
+    return f"""# NOTICE
+
+This distribution is a modified form of the Irodori-TTS {kind} {checkpoints} and
 of the DACVAE codec `{IRODORI_CODEC_MODEL}` (which upstream ships as a separate
 repository), both licensed under the MIT License (see `LICENSE.md`). The checkpoint's
 text backbone was fine-tuned from `{IRODORI_TEXT_BACKBONE_MODEL}`, which is licensed under the
 MIT License as well; its copyright notice is kept in `LICENSE.md`.
 
-Each of its components is either stored in this repository or, when `karume.json` references it
-in another Karume distribution repository, fetched from that repository and not stored here;
-`README.md` says where the text backbone and the codec are stored. The attributions and the
-changes below cover every component the distribution runs, wherever it is stored.
+{_irodori_storage_paragraph(models)}
 
-The codec's weights derive from
-[`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
+The codec's weights derive from `{IRODORI_CODEC_ORIGIN_MODEL}`, which is
 licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
-that it was derived from
-[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
-itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The Apache License 2.0 text is included in
-`LICENSE.md` and covers the codec components ({_IRODORI_CODEC_COMPONENTS}); the changes made to
-them are listed below.
+that it was derived from `{IRODORI_CODEC_PARENT_MODEL}` (licensed under the MIT License), itself
+fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The text of the Apache License, Version 2.0 is
+included in `LICENSE.md` and covers the codec components ({_IRODORI_CODEC_COMPONENTS}); the changes
+made to them are listed below.
 
 The following changes were made:
 
@@ -1930,48 +1946,55 @@ The following changes were made:
   graphs (`dit` and `dit_context`) add an `i4` series rounded with GPTQ calibration. The `f32`
   series is not quantized.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
 
 
+# SPEC: docs/spec/distribution-cards.md#licensemd
 def irodori_license_markdown() -> str:
     """`LICENSE.md` — the MIT (all components) and Apache 2.0 (the 2 codec components) texts side
     by side in one file.
 
     `root_files` has a single `LICENSE.md` slot (`karume.dist.LEGAL_PATHS`), so the second license
-    text follows a separator (`---`) and a heading that names its scope. The file starts with the
-    MIT text + the copyright lines ({@link IRODORI_COPYRIGHTS}) as is — MIT covers every component,
-    the codec included (`IRODORI_CODEC_MODEL` and its parent both declare `license: mit`).
+    text follows a separator (`---`) and a heading that names its scope
+    ({@link _shared.licenses.license_markdown}). The file starts with the MIT text + the copyright
+    lines ({@link IRODORI_COPYRIGHTS}) — MIT covers every component, the codec included
+    (`IRODORI_CODEC_MODEL` and its parent both declare `license: mit`).
 
     MUST: neither license text is touched (reformatting it would stop it from being a copy of the
-    permission notice). The Apache text breaks into Markdown paragraphs and lists because of its
-    leading indentation, so it goes verbatim inside a fence (``` does not occur in the text — the
-    digest freeze in `tests/test_licenses.py` catches any change to it).
+    permission notice) — each goes verbatim inside a fence (the digest freeze in
+    `tests/test_licenses.py` catches any change to the texts).
     """
-    return (
-        mit_license(IRODORI_COPYRIGHTS)
-        + "\n---\n\n"
-        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
-        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\n"
-        + "licensed under the Apache License, Version 2.0 (see `NOTICE.md`). They are covered by"
-        + " the license\nbelow in addition to the MIT License above; every other component is"
-        + " covered by the MIT License\nalone.\n\n"
-        + "```text\n"
-        + apache_license_2_0()
-        + "```\n"
+    return license_markdown(
+        mit_license(IRODORI_COPYRIGHTS),
+        [
+            FurtherLicense(
+                license="Apache License 2.0",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+                f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\n"
+                "licensed under the Apache License, Version 2.0 (see `NOTICE.md`). They are covered"
+                " by the license\nbelow in addition to the MIT License above; every other component"
+                " is covered by the MIT License\nalone.",
+                text=apache_license_2_0(),
+            )
+        ],
     )
 
 
-def irodori_root_files() -> dict[str, str]:
-    """Legal texts at the root of the distribution repository (`karume.dist.Pipeline.root_files`).
+# SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
+def irodori_root_files(models: Sequence[str]) -> dict[str, str]:
+    """Legal texts at the root of a distribution repository of the MIT line, for a build of
+    `models` (`karume.dist.Pipeline.root_files`, replaced per build by the driver's
+    `dist.ROOT_FILES`).
 
     `LICENSE.md` holds MIT + Apache 2.0 side by side ({@link irodori_license_markdown}), and
-    `NOTICE.md` holds the attribution and the modification notice ({@link IRODORI_NOTICE_MARKDOWN}).
+    `NOTICE.md` holds the attribution and the modification notice of those models
+    ({@link irodori_notice_markdown}).
     """
     return {
         "LICENSE.md": irodori_license_markdown(),
-        "NOTICE.md": IRODORI_NOTICE_MARKDOWN,
+        "NOTICE.md": irodori_notice_markdown(models),
     }
 
 
@@ -1989,7 +2012,8 @@ PIPELINE = Pipeline(
     # The redistribution terms of the upstream licenses (MIT, and Apache 2.0 of the codec's original
     # weights) apply to the one distribution repository, so they are set here once regardless of how
     # many times it is assembled (ADR 0092 decision 7).
-    root_files=irodori_root_files(),
+    # The driver replaces it with the files of the models a build includes (`dist.ROOT_FILES`).
+    root_files=irodori_root_files([IRODORI_DEFAULT_MODEL]),
     references=irodori_references,
 )
 
@@ -2029,40 +2053,50 @@ def gemma_notice() -> str:
 IRODORI_LARGE_COPYRIGHTS: tuple[str, ...] = (IRODORI_COPYRIGHTS[0],)
 
 
+# SPEC: docs/spec/distribution-cards.md#licensemd
 def irodori_large_license_markdown() -> str:
     """`LICENSE.md` of the v4-Large line — the Gemma Terms of Use and the Gemma Prohibited Use
     Policy it incorporates (the checkpoint's terms), then the MIT and Apache 2.0 texts of the codec
     components, in one file (`root_files` has a single `LICENSE.md` slot —
     `karume.dist.LEGAL_PATHS`).
 
-    The file starts with the Terms of Use as is; every later text follows a separator (`---`) and,
-    for the codec's two, a heading that names its scope. MUST: no text is touched — the two Gemma
-    files are Markdown already and go in as they are; the MIT and Apache texts go verbatim inside a
-    fence, as in {@link irodori_license_markdown} (``` occurs in none of the four texts).
+    The file starts with the Terms of Use; every later text follows a separator (`---`), a heading
+    that names its scope and a paragraph ({@link _shared.licenses.license_markdown}) — the
+    Prohibited Use Policy's scope is the Terms' own, as they incorporate it. MUST: no text is
+    touched — each goes verbatim inside a fence, the two Gemma files (Markdown) included.
     """
-    return (
-        gemma_terms_of_use()
-        + "\n---\n\n"
-        + gemma_prohibited_use_policy()
-        + "\n---\n\n"
-        + f"## MIT License — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} are the DACVAE codec"
-        + f" `{IRODORI_CODEC_MODEL}`,\nwhich is licensed under the MIT License (see `NOTICE.md`)."
-        + " They are covered by the license below and\nby the Apache License 2.0 that follows."
-        + " Every other component comes from the checkpoint listed in\n`README.md`, which upstream"
-        + " tags `license: gemma`, and is covered by the Gemma Terms of Use above.\n\n"
-        + "```text\n"
-        + mit_license(IRODORI_LARGE_COPYRIGHTS)
-        + "```\n"
-        + "\n---\n\n"
-        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
-        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
-        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\nlicensed under the Apache License,"
-        + " Version 2.0 (see `NOTICE.md`). They are covered by the license below\nin addition to"
-        + " the MIT License above.\n\n"
-        + "```text\n"
-        + apache_license_2_0()
-        + "```\n"
+    return license_markdown(
+        gemma_terms_of_use(),
+        [
+            FurtherLicense(
+                license="Gemma Prohibited Use Policy",
+                scope="part of the Gemma Terms of Use above",
+                paragraph="The Gemma Terms of Use above incorporate this policy, so it covers what"
+                " they cover: every\ncomponent but the codec components"
+                f" ({_IRODORI_CODEC_COMPONENTS}).",
+                text=gemma_prohibited_use_policy(),
+            ),
+            FurtherLicense(
+                license="MIT License",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} are the DACVAE codec"
+                f" `{IRODORI_CODEC_MODEL}`,\nwhich is licensed under the MIT License (see"
+                " `NOTICE.md`). They are covered by the license below and\nby the Apache License"
+                " 2.0 that follows. Every other component comes from the checkpoint\n"
+                f"`{irodori_large_upstream(IRODORI_V4_LARGE_MODEL).repo}`, which upstream tags"
+                " `license: gemma`, and is covered by the Gemma Terms of Use above.",
+                text=mit_license(IRODORI_LARGE_COPYRIGHTS),
+            ),
+            FurtherLicense(
+                license="Apache License 2.0",
+                scope=f"codec components ({_IRODORI_CODEC_COMPONENTS})",
+                paragraph=f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+                f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\nlicensed under the Apache License,"
+                " Version 2.0 (see `NOTICE.md`). They are covered by the license below\nin"
+                " addition to the MIT License above.",
+                text=apache_license_2_0(),
+            ),
+        ],
     )
 
 
@@ -2118,31 +2152,30 @@ def _irodori_large_codec_holder() -> str:
 #:
 #: MUST: every statement about a license repeats what upstream states (its model card and tags) and
 #: what the MIT line's notice already says of the codec — the maintainer checks the wording before
-#: publication. As in {@link IRODORI_NOTICE_MARKDOWN}, the model's upstream repository is not named
-#: (`root_files` is fixed per Pipeline; the card names it from the manifest), and the components
-#: are spelled from the weights declarations.
+#: publication. The line has one model, so its fixed notice names that checkpoint by its repository
+#: ID, and the components are spelled from the weights declarations.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 IRODORI_LARGE_NOTICE_MARKDOWN = f"""# NOTICE
 
 {gemma_notice()}
 
-This repository redistributes a modified form of the Irodori-TTS checkpoint listed in `README.md`.
-The checkpoint's model card states that it is subject to the Gemma Terms of Use because its shared
-text / caption encoder is derived from `{IRODORI_LARGE_TEXT_ENCODER_MODEL}`. The Gemma Terms of Use
-and the Gemma Prohibited Use Policy are included in `LICENSE.md`; the notice above is the one the
-checkpoint is distributed with.
+This repository redistributes a modified form of the Irodori-TTS checkpoint
+`{irodori_large_upstream(IRODORI_V4_LARGE_MODEL).repo}`, which is subject to the Gemma Terms of
+Use because its shared text / caption encoder is derived from
+`{IRODORI_LARGE_TEXT_ENCODER_MODEL}`, as its model card states (`README.md` quotes it). The Gemma
+Terms of Use and the Gemma Prohibited Use Policy are included in `LICENSE.md`; the notice above is
+the one the checkpoint is distributed with.
 
 The codec components ({_IRODORI_CODEC_COMPONENTS}) are the DACVAE codec
 `{IRODORI_CODEC_MODEL}` (which upstream ships as a separate repository), licensed
 under the MIT License. This repository does not store them: `karume.json` references the
 containers `{_irodori_large_codec_holder()}` stores, and they are fetched from there. Its
-weights derive from
-[`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
+weights derive from `{IRODORI_CODEC_ORIGIN_MODEL}`, which is
 licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
-that it was derived from
-[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
-itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The MIT License and Apache License 2.0
-texts are included in `LICENSE.md` and cover the codec components; the changes made to them are
-listed below.
+that it was derived from `{IRODORI_CODEC_PARENT_MODEL}` (licensed under the MIT License), itself
+fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The texts of the MIT
+License and the Apache License, Version 2.0 are included in `LICENSE.md` and cover the codec
+components; the changes made to them are listed below.
 
 The following changes were made:
 
@@ -2156,7 +2189,7 @@ The following changes were made:
   Karume's tokenizer format.
 {_IRODORI_CODEC_CHANGES}
 {_irodori_large_storage_sentence()}
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
 
 

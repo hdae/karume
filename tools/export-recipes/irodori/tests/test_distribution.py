@@ -19,6 +19,7 @@ points it points to) are in `irodori/tests/test_card.py`.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,6 @@ from irodori.distribution import (
     IRODORI_MEANFLOW_SAMPLING_DEFAULTS,
     IRODORI_MODEL_SEAT_DESCRIPTIONS,
     IRODORI_MODEL_SEAT_LABELS,
-    IRODORI_NOTICE_MARKDOWN,
     IRODORI_OUTPUT_PATHS,
     IRODORI_PUBLISHED,
     IRODORI_PUBLISHED_PART0,
@@ -93,6 +93,7 @@ from irodori.distribution import (
     irodori_large_repo_name,
     irodori_license_markdown,
     irodori_mit_repo_name,
+    irodori_notice_markdown,
     irodori_plan,
     irodori_presets,
     irodori_published_sources,
@@ -100,6 +101,7 @@ from irodori.distribution import (
     irodori_reexported_pins,
     irodori_references,
     irodori_repo_name,
+    irodori_root_files,
     irodori_series_name,
     irodori_sources,
     irodori_weights,
@@ -139,6 +141,14 @@ _CHECKPOINT_TENSORS: Mapping[str, np.ndarray] = {
         )
     )
 }
+
+
+#: Words of a measured claim — what a preset description never states (it says what the preset
+#: is; a measurement is a note of the card).
+MEASURED_WORDS = re.compile(
+    r"\b(faster|fastest|slower|listening|audibl\w*|sounded|closest|tension|measured)\b",
+    re.IGNORECASE,
+)
 
 
 def _fake_checkpoint(
@@ -1243,6 +1253,16 @@ class TestIrodoriStorageSeries:
         """
         assert IRODORI_QUANT_ABBREVIATIONS == {}
 
+    @pytest.mark.parametrize(
+        "model",
+        [IRODORI_V4_MODEL, IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL, IRODORI_V4_LARGE_MODEL],
+    )
+    def test_no_preset_description_states_a_measurement(self, model: str) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a description says what
+        the preset is; what it measured is a note of the card naming its device and date."""
+        for name, quant in irodori_quants(model).items():
+            assert MEASURED_WORDS.search(quant["description"]) is None, (name, quant)
+
     def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
         for name, seat in IRODORI_QUANT_SEATS.items():
             assert seat.label and seat.description, name
@@ -1551,7 +1571,7 @@ class TestIrodoriLegalText:
         insertion point is the template text itself."""
         license_text = PIPELINE.root_files["LICENSE.md"]
 
-        assert license_text.startswith(mit_license(IRODORI_COPYRIGHTS))
+        assert license_text.startswith("```text\n" + mit_license(IRODORI_COPYRIGHTS) + "```\n")
         assert license_text.count("Permission is hereby granted, free of charge") == 1
 
     def test_the_license_carries_the_apache_text_verbatim_for_the_codec(self) -> None:
@@ -1609,7 +1629,7 @@ class TestIrodoriLegalText:
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
-        assert notice == IRODORI_NOTICE_MARKDOWN
+        assert notice == irodori_notice_markdown([IRODORI_DEFAULT_MODEL])
         assert IRODORI_CODEC_MODEL in notice
         assert IRODORI_TEXT_BACKBONE_MODEL in notice
         for component in _irodori_model(manifest)["weights"]:
@@ -1624,31 +1644,39 @@ class TestIrodoriLegalText:
         upstream (MIT) would leave no trace anywhere in the distribution repository that the
         original weights are Apache.
         """
-        notice = IRODORI_NOTICE_MARKDOWN
+        notice = irodori_notice_markdown([IRODORI_DEFAULT_MODEL])
 
         assert "licensed under the MIT License" in notice
         assert IRODORI_CODEC_MODEL in notice
-        assert f"https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}" in notice
-        assert f"https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}" in notice
+        assert f"`{IRODORI_CODEC_ORIGIN_MODEL}`" in notice
+        assert f"`{IRODORI_CODEC_PARENT_MODEL}`" in notice
         assert "licensed under the Apache License, Version 2.0" in notice
         for role in IRODORI_CODEC_DIRS:
             assert f"`{role}`" in notice, role
 
-    def test_the_notice_holds_for_every_repository_of_the_line(self) -> None:
-        """MUST: the body's upstream repository is not named — one set of `root_files` goes into
-        the v4-small, v4.1-small and v4.1-small-mf repositories, so naming a version would make one
-        repository's notice disagree with its contents.
-        """
-        for upstream in IRODORI_UPSTREAMS.values():
-            assert upstream.repo not in IRODORI_NOTICE_MARKDOWN
-            assert upstream.display not in IRODORI_NOTICE_MARKDOWN
-        assert "the Irodori-TTS checkpoint listed in `README.md`" in IRODORI_NOTICE_MARKDOWN
+    def test_each_repository_of_the_line_names_its_own_checkpoint_and_no_other(self) -> None:
+        """The three repositories of the line (v4-small, v4.1-small, v4.1-small-mf) are one
+        Pipeline, so the notice follows the models built (`dist.ROOT_FILES`): each names its own
+        checkpoint by its repository ID — another version's ID would make one repository's notice
+        disagree with its contents."""
+        for model, upstream in IRODORI_UPSTREAMS.items():
+            notice = irodori_notice_markdown([model])
+            others = [other.repo for name, other in IRODORI_UPSTREAMS.items() if name != model]
 
-    def test_the_notice_does_not_claim_to_store_what_a_repository_references(self) -> None:
-        """MUST: v4.1-small and v4.1-small-mf reference the text backbone and the codec in
-        v4-small's repository, and the same notice goes into all three — so it says that a
-        component is stored here or fetched from the repository `karume.json` references, and
-        leaves which to the card."""
+            assert f"`{upstream.repo}`" in notice
+            assert not [repo for repo in others if f"`{repo}`" in notice], model
+            assert "listed in `README.md`" not in notice
+
+    def test_the_driver_builds_the_notice_of_the_models_built(self) -> None:
+        import dist
+
+        for model in IRODORI_UPSTREAMS:
+            assert dist.ROOT_FILES["irodori"]([model]) == irodori_root_files([model])
+
+    def test_the_notice_says_where_the_referenced_components_are_stored(self) -> None:
+        """v4.1-small and v4.1-small-mf reference the text backbone and the codec in v4-small's
+        repository (v4.1-small-mf also v4.1-small's): the notice names the repositories its
+        references point at; v4-small's says it stores every component."""
         referencing = [
             model
             for model in (IRODORI_V4_MODEL, IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL)
@@ -1656,11 +1684,15 @@ class TestIrodoriLegalText:
         ]
         assert referencing == [IRODORI_V41_MODEL, IRODORI_V41_MF_MODEL]
 
-        assert "This repository redistributes" not in IRODORI_NOTICE_MARKDOWN
-        assert "fetched from that repository and not stored here" in IRODORI_NOTICE_MARKDOWN
-        assert "`README.md` says where the text backbone and the codec are stored" in (
-            IRODORI_NOTICE_MARKDOWN
+        assert "Every component is stored in this repository." in irodori_notice_markdown(
+            [IRODORI_V4_MODEL]
         )
+        for model in referencing:
+            prose = " ".join(irodori_notice_markdown([model]).split())
+            assert "This repository redistributes" not in prose
+            for reference in irodori_references(model):
+                assert f"`hdae/{reference.repo_name}`" in prose
+            assert "which are fetched from there and not stored here" in prose
 
 
 class TestIrodoriCli:
@@ -2221,16 +2253,13 @@ class TestIrodoriMeanFlow:
         assert IRODORI_DEFAULT_QUANT == "i8-a8"
 
     def test_its_preset_descriptions_claim_only_what_was_judged_for_it(self) -> None:
-        """The family's f16 listening claim and the v4 speed claim of `i8-a8` are not carried over;
-        the storage, the knobs and the labels are the family's."""
+        """No description states a measurement (what was judged for the student is a note of its
+        card — `IRODORI_MEASUREMENTS`), so its presets are the family's to the letter."""
         family = irodori_quants(IRODORI_V4_MODEL)
         student = irodori_quants(IRODORI_V41_MF_MODEL)
-        changed = {name for name in family if family[name] != student[name]}
 
-        assert changed == set(IRODORI_MODEL_SEAT_DESCRIPTIONS[IRODORI_V41_MF_MODEL])
-        for name in changed:
-            assert {**student[name], "description": ""} == {**family[name], "description": ""}
-            assert_quant_presentation(name, student[name])
+        assert IRODORI_V41_MF_MODEL not in IRODORI_MODEL_SEAT_DESCRIPTIONS
+        assert student == family
         assert "faster" not in student["i8-a8"]["description"]
         assert "listening" not in student["f16"]["description"]
 
@@ -2591,7 +2620,10 @@ class TestIrodoriV4Large:
         assert "# Irodori-TTS v4 Large — Karume" in card
         assert "the shared T5Gemma 2 text encoder `backbone`" in card
         assert "ModernBERT" not in card
-        assert "references the containers `hdae/karume-irodori-v4-small` ships as" in card
+        assert (
+            "references the containers [hdae/karume-irodori-v4-small]"
+            "(https://huggingface.co/hdae/karume-irodori-v4-small) ships as" in card
+        )
         assert "every component is stored as `f16` / `i8` series" in card
         assert "no `f32` series is distributed" in card
         assert "splitRareTokens: false" not in card
@@ -2658,7 +2690,7 @@ class TestIrodoriLargeLegalText:
     def test_the_license_opens_with_the_terms_of_use_verbatim(self) -> None:
         license_text = LARGE_PIPELINE.root_files["LICENSE.md"]
 
-        assert license_text.startswith(gemma_terms_of_use())
+        assert license_text.startswith("```text\n" + gemma_terms_of_use() + "```\n")
         assert license_text.count(gemma_prohibited_use_policy()) == 1
         assert license_text.index(gemma_prohibited_use_policy()) >= len(gemma_terms_of_use())
 
@@ -2704,7 +2736,7 @@ class TestIrodoriLargeLegalText:
         assert "every graph is stored as `f16` and `i8`" in notice
         assert "No `f32` series is\n  distributed." in notice
         assert IRODORI_LARGE_TEXT_ENCODER_MODEL in notice
-        assert f"https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}" in notice
+        assert f"`{IRODORI_CODEC_ORIGIN_MODEL}`" in notice
         assert "licensed under the Apache License, Version 2.0" in notice
 
     def test_the_notice_says_the_codec_is_referenced_where_the_manifest_does(self) -> None:
@@ -2725,14 +2757,14 @@ class TestIrodoriLargeLegalText:
         from irodori.distribution import _IRODORI_CODEC_CHANGES
 
         assert _IRODORI_CODEC_CHANGES in IRODORI_LARGE_NOTICE_MARKDOWN
-        assert _IRODORI_CODEC_CHANGES in IRODORI_NOTICE_MARKDOWN
+        assert _IRODORI_CODEC_CHANGES in irodori_notice_markdown([IRODORI_V4_MODEL])
 
-    def test_the_notice_does_not_name_the_models_repository(self) -> None:
-        """As in the MIT line's notice: `root_files` is fixed per Pipeline; the card names the
-        model from the manifest."""
+    def test_the_notice_names_the_models_repository(self) -> None:
+        """The line has one model, so its fixed notice names that checkpoint by its repository ID,
+        as every notice names its upstreams."""
         for upstream in IRODORI_LARGE_UPSTREAMS.values():
-            assert upstream.repo not in IRODORI_LARGE_NOTICE_MARKDOWN
-        assert "the Irodori-TTS checkpoint listed in `README.md`" in IRODORI_LARGE_NOTICE_MARKDOWN
+            assert f"`{upstream.repo}`" in IRODORI_LARGE_NOTICE_MARKDOWN
+        assert "listed in `README.md`" not in IRODORI_LARGE_NOTICE_MARKDOWN
 
     def test_the_mit_lines_legal_texts_carry_nothing_of_gemma(self) -> None:
         for text in PIPELINE.root_files.values():

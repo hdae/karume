@@ -48,8 +48,8 @@ from _shared.container_read import (
     open_container,
     read_asset_declarations,
 )
-from _shared.licenses import apache_license_2_0
-from _shared.upstream import assert_upstream_provenance
+from _shared.licenses import apache_license_2_0, license_markdown
+from _shared.upstream import assert_upstream_provenance, hf_upstreams
 from karume.dist import (
     Artifact,
     DistError,
@@ -65,8 +65,9 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
-from moss.card import MOSS_SUPPORTED_PIPELINE, render_moss_model_card
-from moss.sources import SOURCE
+from karume.modelcard import notice_closing
+from moss.card import MOSS_BFL_NON_ENDORSEMENT, MOSS_SUPPORTED_PIPELINE, render_moss_model_card
+from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN
 
 #: The pipeline contract (ADR 0041 §2). The TS reader accepts `MOSS_PIPELINE_NAME` /
 #: `MOSS_PIPELINE_MAJOR` (`packages/models/src/moss/config.ts`).
@@ -249,23 +250,23 @@ MOSS_PIPELINE_CONFIG: Mapping[str, Any] = {
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
-MOSS_NOTICE_MARKDOWN = """# NOTICE
+#: SPEC: docs/spec/distribution-cards.md#noticemd
+MOSS_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the MOSS-Image-SFT checkpoint listed in
-`README.md` (OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`),
+This repository redistributes a modified form of the MOSS-Image-SFT checkpoint `{SOURCE.repo}`
+(OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`),
 including two parts that the checkpoint bundles from other releases, both licensed under the
 Apache License, Version 2.0 as well:
 
-- Its text encoder is the Qwen3.5 text encoder of `Qwen/Qwen3.5-9B` (the Qwen team, Alibaba
-  Cloud), with its tokenizer. The license file of that release carries the copyright notice
-  "Copyright 2026 Alibaba Cloud".
+- Its text encoder is the Qwen3.5 text encoder of `{TEXT_ENCODER_ORIGIN.repo}`
+  ({hf_upstreams([TEXT_ENCODER_ORIGIN.repo])[0].author}), with its tokenizer. The license file of
+  that release carries the copyright notice "Copyright 2026 Alibaba Cloud".
 - Its VAE is the FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs): the decoder and
   `post_quant_conv` come from `black-forest-labs/FLUX.2-small-decoder`, and the latent
   batch-normalization statistics from the VAE of `black-forest-labs/FLUX.2-klein-4B`. Only the
   decode path is included here; the VAE encoder is not.
 
-This is not an official release of Black Forest Labs, and it is not endorsed by them; the Black
-Forest Labs and FLUX names and marks are used only to describe where the VAE weights come from.
+{MOSS_BFL_NON_ENDORSEMENT}
 
 The following changes were made:
 
@@ -287,7 +288,7 @@ The following changes were made:
   with the upstream code).
 - **f32 VAE decoder**: the FLUX.2 small decoder and `post_quant_conv` keep the source float32
   values. They are re-expressed as three graphs with a symbolic latent height and width, split
-  around the decoder's middle attention block; the nearest-neighbour ×2 upsampling is written as
+  around the decoder's middle attention block; the nearest-neighbor ×2 upsampling is written as
   a repetition (the same values). The latent batch-normalization statistics the decode path
   restores (the FLUX.2 [klein] 4B VAE's bfloat16 values, which the checkpoint holds widened to
   float32) are stored in the container as a mean and a standard deviation
@@ -304,7 +305,7 @@ The following changes were made:
   tokens, and the character-class and normalization tables of its pre-tokenizer) that the host
   uses to reproduce its token ids.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 
@@ -528,5 +529,8 @@ PIPELINE = Pipeline(
     repo_name=moss_repo_name,
     plan=moss_dist_plan,
     card_profiles={"moss-image": render_moss_model_card},
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": MOSS_NOTICE_MARKDOWN},
+    root_files={
+        "LICENSE.md": license_markdown(apache_license_2_0()),
+        "NOTICE.md": MOSS_NOTICE_MARKDOWN,
+    },
 )

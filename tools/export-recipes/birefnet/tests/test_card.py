@@ -425,7 +425,8 @@ class TestBirefnetStorageAttribution:
         prose = " ".join(card.split())
 
         assert (
-            "**No quantization**: the quant seat stores the source checkpoint's own values" in prose
+            "**No quantization**: the quant preset stores the source checkpoint's own values"
+            in prose
         )
         assert "  - `f16`: the checkpoint's own f16 values" in card
         assert "`f32`:" not in card

@@ -41,7 +41,7 @@ generation defaults from `google/gemma-4-12B-it` ({@link Gemma4Sources}).
 ## The q4_0 QAT line (`karume-gemma4-qat` — {@link QAT_Q4_0_PIPELINE})
 
 A second distribution of the same `gemma4/1` contract: E2B / E4B / 12B / 26B from Google's q4_0 QAT
-checkpoints, every text weight on its own 4-bit grid (int4 g32), each model but 26B with its QAT MTP
+checkpoints, every text weight on its own 4-bit grid (int4 g32), each model with its QAT MTP
 drafter. It runs {@link gemma4_plan} with another {@link Gemma4Line} — the graph, drafter,
 tokenizer and configuration checks are the regular line's; what differs is read from the line:
 
@@ -57,11 +57,11 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   `i4-fast` over the same storage ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_LINE_PINS` / `QAT_DRAFTER_PINS`);
-- 26B A4B: the `model` role alone (no drafter until one is pinned, so `speculative` is refused at
-  weights resolution; no vision), the reference seat and the parallel and fused seat (its routed
-  experts keep the sequential order in every seat), 12B's graph contract and dialect, its
-  expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
-  `gemma4.sources.QAT_LINE_PINS` (it is no drafter's target);
+- 26B A4B: the `model` and `drafter` roles (no vision), the reference seat and the parallel and
+  fused seat (its routed experts keep the sequential order in every seat), 12B's graph contract
+  and dialect, its expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
+  `gemma4.sources.QAT_LINE_PINS`; its drafter runs only with every expert resident (the runtime's
+  expert cache refuses `speculative`);
 - 12B's image input: a third graph, `vision` — the encoder-free embedder
   (`gemma4/export_vision.py`, series `gemma4-12b-vision`), one bf16 dtype, so every quant of 12B
   maps it — and `pipelineConfig.vision` ({@link gemma4_vision_config}). As with the drafter, it is a
@@ -106,7 +106,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from _shared.container_read import read_asset, read_asset_declarations
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from karume.container import ContainerFormatError
 from karume.dist import (
@@ -123,6 +123,7 @@ from karume.dist import (
     ir_graph,
     sha256_file,
 )
+from karume.modelcard import notice_closing
 from karume.ple import (
     PLE_FLOAT_BYTES,
     PLE_FLOAT_INDEX_SCHEMA,
@@ -144,6 +145,7 @@ from .card import (
     GEMMA4_MOE_MODELS,
     GEMMA4_PLE_MODELS,
     GEMMA4_QAT_DRAFTER_UPSTREAM,
+    GEMMA4_QAT_Q4_0_MEASUREMENTS,
     GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM,
     GEMMA4_UPSTREAM,
     GEMMA4_VISION_ROLE,
@@ -465,43 +467,19 @@ GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Model → the one sentence on speed its parallel and fused preset carries, after the drafter
-#: sentence. MUST: a model enters only with a measurement behind the sentence (the rule of
-#: {@link GEMMA4_QAT_Q4_0_SPEED_NOTE}: decode ms/token of `bf16` / `bf16-fast` interleaved in one
-#: process, the protocol recorded beside the entry). Measured 2026-11-19 with the workbench's
-#: `gemma4-bench` entry (greedy, one prompt, 96 new tokens, four rounds of the two presets
-#: interleaved, three chats per visit with the cold first one left out; the median decode ms/token
-#: of the eight warm chats; the same tokens in both presets and on every device), `bf16` →
-#: `bf16-fast`: RTX 3080 Ti (Node + Dawn, Vulkan; two runs) E2B 16.70 / 16.47 → 12.97 / 12.07 and
-#: E4B 32.23 / 29.68 → 18.28 / 21.35; RTX 5070 Ti (Chrome, D3D12) E2B 19.12 → 9.96 and E4B
-#: 32.71 → 16.57; Apple M2 (Chrome, Metal) E2B 65.36 → 60.77 and E4B 119.90 → 113.89 — the browser
-#: records with each adapter's own geometry table. Neither model's speculative decode (with the
-#: drafter) is measured, and both models ship a drafter (E4B's since 2026-11-26), so each sentence
-#: names the decode that is measured: "without the drafter" (E4B's by the maintainer's ruling of
-#: 2026-11-27). With the drafter sentence before it, each description is exactly at the manifest's
-#: limit of 200 characters.
-GEMMA4_SPEED_NOTE: Mapping[str, str] = {
-    "e2b": " Faster than bf16 on tested E2B devices without the drafter.",
-    "e4b": " Faster than bf16 on tested E4B devices without the drafter.",
-}
-
 
 def gemma4_quants(model: str) -> dict[str, Any]:
     """The model's quant table: the reference preset `bf16` ({@link GEMMA4_QUANTS}) and the parallel
     and fused preset over the same weights ({@link GEMMA4_PARALLEL_QUANTS}). A model that ships a
     drafter has the drafter sentence ({@link GEMMA4_DRAFTER_QUANT_NOTE}) added to every
-    description, and a model with a measured speed note ({@link GEMMA4_SPEED_NOTE}) has it added
-    to the parallel preset's last."""
+    description. What the parallel preset measured is a note on the card
+    (`gemma4.card.GEMMA4_MEASUREMENTS`), never part of a description."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
     for name, quant in GEMMA4_PARALLEL_QUANTS.items():
         quants[name] = {**quant, "session": copy.deepcopy(quant["session"])}
     if gemma4_has_drafter(model):
         for quant in quants.values():
             quant["description"] += GEMMA4_DRAFTER_QUANT_NOTE
-    note = GEMMA4_SPEED_NOTE.get(model)
-    if note is not None:
-        for name in GEMMA4_PARALLEL_QUANTS:
-            quants[name]["description"] += note
     return quants
 
 
@@ -2075,15 +2053,51 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return gemma4_plan(gemma4_sources(series_dir, model), model)
 
 
-#: The modification notice's opening and its list of the changes to the main models (Apache 2.0
-#: §4(b)); {@link gemma4_notice_markdown} adds the drafter paragraph of the models built.
-_GEMMA4_NOTICE_HEAD = """# NOTICE
+#: The license every Gemma 4 notice names, by its full title: the one spelling of the notices'
+#: openings ({@link gemma4_notice_opening} — this module's two lines and
+#: `gemma4_qat.distribution`'s mobile line).
+GEMMA4_NOTICE_LICENSE = "the Apache License, Version 2.0"
 
-This repository redistributes modified forms of `google/gemma-4-E2B-it` and
-`google/gemma-4-E4B-it`, which are licensed under the Apache License, Version 2.0 (see
-`LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`.
-The following changes were made:
+#: A space `textwrap` does not break at (it splits at ASCII whitespace only), put in place of the
+#: spaces a wrapped line must keep, then put back.
+_UNBROKEN = "\N{NO-BREAK SPACE}"
 
+#: The line between a notice's opening and its list of changes.
+GEMMA4_NOTICE_CHANGES_LEAD = "\nThe following changes were made:\n\n"
+
+#: What a Gemma 4 notice's closing says is not distributed (`karume.modelcard.notice_closing`).
+GEMMA4_NOT_DISTRIBUTED = "The original checkpoints are"
+
+
+def _spell_notice_list(items: Sequence[str]) -> str:
+    """`A` / `A and B` / `A, B and C`."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+# SPEC: docs/spec/distribution-cards.md#noticemd
+def gemma4_notice_opening(redistributed: str, *, several: bool = True) -> str:
+    """The opening of every Gemma 4 `NOTICE.md`: the title, then one paragraph naming what the
+    repository redistributes (`redistributed`, after "modified forms of", or "a modified form of"
+    when not `several`) and its license by its full title ({@link GEMMA4_NOTICE_LICENSE}) with
+    where its text is, wrapped like the rest of the notice (lines of at most 100 characters). The
+    license's title is kept on one line, so that it reads as one name in the text."""
+    form, verb = ("modified forms of", "are") if several else ("a modified form of", "is")
+    title = GEMMA4_NOTICE_LICENSE.replace(" ", _UNBROKEN)
+    paragraph = textwrap.fill(
+        f"This repository redistributes {form} {redistributed}, which {verb} licensed under"
+        f" {title} (see `LICENSE.md`). The models actually included are identified in"
+        " `README.md` and `karume.json`.",
+        width=100,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return f"# NOTICE\n\n{paragraph.replace(_UNBROKEN, ' ')}\n"
+
+
+#: The regular line's list of the changes to the main models (Apache 2.0 §4(b));
+#: {@link gemma4_notice_markdown} puts it after the opening that names the models built and before
+#: the drafter paragraph of the models built.
+_GEMMA4_NOTICE_CHANGES = """\
 - The **text decoder only** was extracted; the vision and audio towers were never read.
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors) in a states form suited to chunked prefill
@@ -2096,10 +2110,6 @@ The following changes were made:
   gathers.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
-"""
-
-_GEMMA4_NOTICE_TAIL = """
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
 
 
@@ -2122,8 +2132,9 @@ vocabulary, and the drafter reads the key/value states and the embedding table o
 instead of carrying its own. **The drafter's weights were quantized to int8 throughout**, linear
 layers included; its values are therefore not bit-identical to the source checkpoint.
 """
-    pairs = [f"`{GEMMA4_DRAFTER_UPSTREAM[model]}` for `{model}`" for model in drafters]
-    listed = ", ".join(pairs[:-1]) + " and " + pairs[-1]
+    listed = _spell_notice_list(
+        [f"`{GEMMA4_DRAFTER_UPSTREAM[model]}` for `{model}`" for model in drafters]
+    )
     # Wrapped like the rest of the notice (lines of at most 100 characters).
     opening = textwrap.fill(
         "For each model, this repository also redistributes a modified form of its"
@@ -2149,17 +2160,25 @@ def gemma4_notice_markdown(models: Sequence[str]) -> str:
 
     MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
     `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-    The drafter paragraph is therefore derived from the models built: a build of one model names
-    that model's assistant alone, never a drafter the build does not ship.
+    The opening and the drafter paragraph are therefore derived from the models built: a build of
+    one model names that model's checkpoint and assistant alone, never an upstream the build does
+    not ship.
 
-    MUST: **on the day a model is added to `GEMMA4_UPSTREAM`, a line naming it is added to the
-    opening too** — the §4(b) notice must state "the modifications of every redistributed
-    upstream", so a text left unchanged while the models grow lacks the notice for one model. That
-    prose cannot be derived by machine, so a check covers it instead
-    (`tests/test_distribution.py::TestGemma4LegalText` checks it against both the attribution table
-    and the manifest, and turns red the moment a second entry comes in).
+    MUST: **on the day a model of another kind joins the line, its changes are added to the list**
+    — the §4(b) notice must state "the modifications of every redistributed upstream", and the list
+    states those of E2B / E4B's text decoders (per-layer embeddings included). That prose cannot be
+    derived by machine, so a check covers the names instead
+    (`tests/test_distribution.py::TestGemma4LegalText` checks them against both the attribution
+    table and the manifest).
     """
-    return _GEMMA4_NOTICE_HEAD + _gemma4_notice_drafters(models) + _GEMMA4_NOTICE_TAIL
+    upstreams = [f"`{GEMMA4_UPSTREAM[model]}`" for model in models]
+    return (
+        gemma4_notice_opening(_spell_notice_list(upstreams), several=len(upstreams) > 1)
+        + GEMMA4_NOTICE_CHANGES_LEAD
+        + _GEMMA4_NOTICE_CHANGES
+        + _gemma4_notice_drafters(models)
+        + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
+    )
 
 
 def gemma4_root_files(models: Sequence[str]) -> dict[str, str]:
@@ -2170,12 +2189,13 @@ def gemma4_root_files(models: Sequence[str]) -> dict[str, str]:
     ruling of 2026-09-01); §4(a) requires "giving recipients of derivative works a copy of the
     license", and §4(b) "causing modified files to carry prominent notices stating that you changed
     them". The license text is the original shared across families
-    ({@link _shared.licenses.apache_license_2_0}), read **verbatim** — reformatting or replacing it
-    would make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
+    ({@link _shared.licenses.apache_license_2_0}), read **verbatim** and fenced as every
+    `LICENSE.md` is ({@link _shared.licenses.license_markdown}) — reformatting or replacing it would
+    make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
     `NOTICE.md` holds the §4(b) modification notice only ({@link gemma4_notice_markdown}).
     """
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": gemma4_notice_markdown(models),
     }
 
@@ -2251,8 +2271,8 @@ GEMMA4_QAT_Q4_0_VISION_MODELS: frozenset[str] = frozenset({"12b"})
 
 def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
     """Whether the model ships its QAT drafter (`gemma4.card.GEMMA4_QAT_DRAFTER_UPSTREAM`): every
-    model of the line but 26B, whose drafter is later work (ADR 0145 decision 1) — without the
-    role a load that asks for `speculative` fails at weights resolution."""
+    model of the line, 26B since its drafter was pinned (ADR 0145 decision 1 left it for later) —
+    without the role a load that asks for `speculative` fails at weights resolution."""
     return model in GEMMA4_QAT_DRAFTER_UPSTREAM
 
 
@@ -2297,13 +2317,14 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
 #: "every linear weight", and the embedder's are not int4 ({@link GEMMA4_QAT_Q4_0_STORAGE}).
 GEMMA4_QAT_Q4_0_VISION_NOTE = " Vision stays bf16."
 
-#: The reference seat's label and description for a model with routed experts and no drafter
-#: (26B — `gemma4.card.GEMMA4_MOE_MODELS`): the line's own say "drafter included", and its expert
-#: weights keep the grid's codes with f16 steps (`int4-sym-g-f16` — ADR 0145 decision 3).
+#: The reference seat's description for a model with routed experts (26B —
+#: `gemma4.card.GEMMA4_MOE_MODELS`; the label is the line's own, "drafter included"): its expert
+#: weights keep the grid's codes with f16 steps (`int4-sym-g-f16` — ADR 0145 decision 3). Naming
+#: the experts next to the line's own list would take 203 characters, past the manifest's 200, so
+#: the list is said in fewer words (190).
 GEMMA4_QAT_Q4_0_MOE_QUANT: Mapping[str, str] = {
-    "label": "QAT int4 grid",
-    "description": "The q4_0 QAT checkpoint's own 4-bit grid (packed int4, group 32) for every"
-    " linear weight and the embedding table, experts with f16 steps; GEMV and attention use the"
+    "description": "The q4_0 QAT checkpoints' own 4-bit grid (packed int4, group 32) for every"
+    " linear, embedding and drafter weight, experts with f16 steps; GEMV and attention use the"
     " reference summation order.",
 }
 
@@ -2333,26 +2354,6 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Model → the one sentence on speed its parallel and fused seat carries; the models with that seat.
-#: MUST: a model enters only with a measurement behind the sentence — decode ms/token of `i4` /
-#: `i4-fast`, with and without the drafter, interleaved in one process (2026-11-04, RTX 3080 Ti,
-#: Node + Dawn — `outputs/diag/gemma4-lines-2026-11-04/legA/`): `i4-fast` was faster than `i4` on
-#: every prompt and arm measured (two runs) — without the drafter E2B by 2.1–2.5× and E4B by
-#: 2.1–2.9×, with it both by 1.2–1.5×. 12B (2026-11-06, `outputs/diag/gemma4-12b-fast-2026-11-06/`,
-#: the same protocol): without the drafter by 1.9–2.1×; with it slower than `i4` with it, so its
-#: sentence says so. 26B (2026-11-10, `outputs/diag/forward-cost-2026-11-10/`; 12 GB cannot hold it
-#: resident, so decode ran under the exact expert cache — 64 slots per layer, every expert in the
-#: host tier, re-run after a miss — one process per arm, greedy, three prompts of 96 tokens with the
-#: same tokens in every arm, two rounds): one decode forward without a miss (median wall) took
-#: 24.6 / 25.7 ms with `i4` and 17.6 / 17.5 ms with `i4-fast`. It has no drafter, so there is no
-#: speculative arm.
-GEMMA4_QAT_Q4_0_SPEED_NOTE: Mapping[str, str] = {
-    "e2b": " Faster than i4 on the tested E2B device.",
-    "e4b": " Faster than i4 on the tested E4B device.",
-    "12b": " Faster than i4 on the tested 12B device, except when speculative.",
-    "26b": " Faster than i4 on the tested 26B device.",
-}
-
 #: How the seat's description spells the output head: the int4 head's parallel GEMV row exists for
 #: 12B and 26B only ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}).
 GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
@@ -2365,22 +2366,23 @@ GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
 
 def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
     """The line's quant table for `model`: the reference seat `i4` ({@link GEMMA4_QAT_Q4_0_QUANTS})
-    and, for a model with a measured speed note ({@link GEMMA4_QAT_Q4_0_SPEED_NOTE}), the parallel
-    and fused seat ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}) with that note."""
+    and, for a model whose `i4-fast` was measured (`gemma4.card.GEMMA4_QAT_Q4_0_MEASUREMENTS`, the
+    card's notes — MUST: a model gets the preset only with a measurement behind it), the parallel
+    and fused seat ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS})."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QAT_Q4_0_QUANTS.items()}
     if model in GEMMA4_MOE_MODELS:
         quants[GEMMA4_QAT_Q4_0_DTYPE].update(GEMMA4_QAT_Q4_0_MOE_QUANT)
     if gemma4_qat_q4_0_has_vision(model):
         quants[GEMMA4_QAT_Q4_0_DTYPE]["description"] += GEMMA4_QAT_Q4_0_VISION_NOTE
-    note = GEMMA4_QAT_Q4_0_SPEED_NOTE.get(model)
-    if note is not None:
-        for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
-            quants[name] = {
-                **quant,
-                "session": copy.deepcopy(quant["session"]),
-                "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model])
-                + note,
-            }
+    measured = {measurement.preset for measurement in GEMMA4_QAT_Q4_0_MEASUREMENTS.get(model, ())}
+    for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
+        if name not in measured:
+            continue
+        quants[name] = {
+            **quant,
+            "session": copy.deepcopy(quant["session"]),
+            "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model]),
+        }
     return quants
 
 
@@ -2471,8 +2473,8 @@ def gemma4_qat_q4_0_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 
 def _qat_q4_0_notice_sources() -> str:
     """The NOTICE's list of redistributed upstreams: per model its QAT checkpoint, its QAT drafter
-    when it ships one (26B ships none — {@link gemma4_qat_q4_0_has_drafter}) and its base model
-    (the tokenizer's source)."""
+    when it ships one ({@link gemma4_qat_q4_0_has_drafter}) and its base model (the tokenizer's
+    source)."""
     lines: list[str] = []
     for model in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM:
         drafter = GEMMA4_QAT_DRAFTER_UPSTREAM.get(model)
@@ -2487,20 +2489,17 @@ def _qat_q4_0_notice_sources() -> str:
 #: The line's modification notice (Apache 2.0 §4(b)). MUST: the text matches the distribution's
 #: content ({@link gemma4_notice_markdown}'s MUST — valid prose passes every machine check), and
 #: it names every upstream of the line's attribution tables (built from them — tests).
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN = (
-    """# NOTICE
-
-This repository redistributes modified forms of Google's Gemma 4 q4_0 quantization-aware-trained
-(QAT) checkpoints, of their QAT multi-token-prediction drafters and of the tokenizers of their base
-models, listed below, which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`).
-The models actually included are identified in `README.md` and `karume.json`.
-
-"""
+    gemma4_notice_opening(
+        "Google's Gemma 4 q4_0 quantization-aware-trained (QAT) checkpoints, of their QAT"
+        " multi-token-prediction drafters and of the tokenizers of their base models, listed below"
+    )
+    + "\n"
     + _qat_q4_0_notice_sources()
-    + """
-
-The following changes were made:
-
+    + "\n"
+    + GEMMA4_NOTICE_CHANGES_LEAD
+    + """\
 - For the E2B and E4B checkpoints, the **text decoder only** was extracted; their vision and audio
   towers were never read.
 - For the 12B checkpoint, the **text decoder and the encoder-free vision embedder** were extracted,
@@ -2529,9 +2528,8 @@ The following changes were made:
 - Each drafter's output head is the dense projection over the full vocabulary (a clustered sparse
   head an assistant checkpoint carries is not used), and each drafter reads the key/value states
   and the embedding table of its main model instead of carrying its own.
-
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
+    + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
 )
 
 
@@ -2539,7 +2537,7 @@ def gemma4_qat_q4_0_root_files() -> dict[str, str]:
     """The line's legal texts at the repository root ({@link gemma4_root_files}'s rule: the
     licence verbatim and the line's modification notice)."""
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN,
     }
 

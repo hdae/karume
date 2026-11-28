@@ -886,7 +886,7 @@ class TestBirefnetLegalText:
         the prose stays valid, so the other gates let it through.
         """
         license_text, _ = self._legal(tmp_path, checkpoint)
-        assert license_text == mit_license(BIREFNET_COPYRIGHTS[checkpoint])
+        assert license_text == "```text\n" + mit_license(BIREFNET_COPYRIGHTS[checkpoint]) + "```\n"
 
     def test_the_hr_repository_carries_only_the_upstream_copyrights(self, tmp_path: Path) -> None:
         license_text, notice = self._legal(tmp_path, BIREFNET_HR_CHECKPOINT)
@@ -1189,10 +1189,10 @@ class TestBirefnetStorageNotice:
         """HR's checkpoint itself is f16 — the only seat (f16) keeps the values."""
         notice = self._prose(self._notice(tmp_path, BIREFNET_HR_CHECKPOINT))
         assert "the checkpoint itself is stored in f16" in notice
-        # One seat, so it is stated in the singular ("every quant seat" would confuse readers of a
-        # repository with one seat).
+        # One preset, so it is stated in the singular ("every quant preset" would confuse readers
+        # of a repository with one preset).
         assert (
-            "**No quantization**: the quant seat stores the source checkpoint's own values"
+            "**No quantization**: the quant preset stores the source checkpoint's own values"
             in notice
         )
         assert "`f16`: the checkpoint's own f16 values" in notice

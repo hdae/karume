@@ -34,9 +34,18 @@ check made on that date, and moving a pin needs the check again.
 - **Training data** — the upstream cards list sets distributed for research purposes (DIS5K,
   COD10K, HRSOD, P3M-10k) and, for `lucida`,
   [ToonOut](https://huggingface.co/datasets/joelseytre/toonout) (CC-BY-4.0). None of it is
-  redistributed, and it attaches no condition to the MIT weights; the model card repeats it as a
-  caution and points to the upstream. Checked against the revisions used on 2026-11-26 (the lucida
+  redistributed, and it attaches no condition to the MIT weights; the model card quotes the
+  upstream cards on it (below) and repeats the caution. Checked against the revisions used on 2026-11-26 (the lucida
   card's `datasets` and caution line, and the ToonOut dataset card's `license: cc-by-4.0`).
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `ZhengPeng7/BiRefNet_HR` at `a7a562f6fd16021180f2f4348f4de003a2d3d1e1` — the training resolution
+    and the training set (`karume-birefnet-hr`).
+  - `egeorcun/lucida` at `6cbedc9722652dc9a3df91dd871f0c4f3334e922` — what the model is, its
+    training data and what the m35 variant is for (`karume-lucida`).
 
 ## Upstream copyright notices
 

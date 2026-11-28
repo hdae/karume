@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.paths import INPUTS_ROOT
 from _shared.upstream import assert_upstream_provenance, snapshot_revision
 from karume.dist import (
@@ -65,6 +65,7 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     DEPTH_ANYTHING_CONVT_DIFF,
@@ -418,11 +419,16 @@ def depth_anything_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: has shipped. The measured width of the ConvTranspose replacement is not hard-coded but taken
 #: from the card's spelling ({@link depth_anything.card.DEPTH_ANYTHING_CONVT_DIFF}) (the body and
 #: the card do not state different numbers).
+#: The checkpoints the notice names, by their repository IDs (every model of the attribution table
+#: — only Small can be shipped, so the fixed notice of the one pipeline names it).
+_DEPTH_ANYTHING_CHECKPOINTS = " and ".join(f"`{repo}`" for repo in DEPTH_ANYTHING_UPSTREAM.values())
+
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 DEPTH_ANYTHING_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the Depth Anything V2 checkpoint listed in
-`README.md`, which is licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The
-following changes were made:
+This repository redistributes a modified form of the Depth Anything V2 checkpoint
+{_DEPTH_ANYTHING_CHECKPOINTS}, which is licensed under the Apache License, Version 2.0 (see
+`LICENSE.md`). The following changes were made:
 
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors).
@@ -436,7 +442,7 @@ following changes were made:
   {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1.
 - **No quantization**: the stored weights are the source checkpoint's own f32 values.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 
@@ -455,7 +461,7 @@ PIPELINE = Pipeline(
     # distribution repository, so the original text is read once here regardless of how many
     # assemblies run (ADR 0092 decision 7).
     root_files={
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": DEPTH_ANYTHING_NOTICE_MARKDOWN,
     },
 )

@@ -25,10 +25,9 @@ after this release is the `later` item "The model cards and notices across repos
     lines, the in-place notice of `deberta/patch.py` and the Swin Transformer notice in the BiRefNet generator among
     them), and the corrected cards and notices were uploaded on 2026-11-26 on the maintainer's approval: the two
     BiRefNet repositories, the four Irodori repositories, `karume-sbv2-jvnv` and `karume-gemma4`. Left: the package
-    pins still name the revisions before these uploads, and move at the next release. An Irodori `NOTICE.md` is one
-    text for the three repositories of the MIT line (the pipeline's root files are fixed), so it says where a
-    component is stored only through `README.md`. The wording that differs between families is in the `later` item
-    "The model cards and notices across repositories".
+    pins still name the revisions before these uploads, and move at the next release. The generators now write an
+    Irodori `NOTICE.md` per repository of the MIT line, with the rest of the wording that differed between families
+    (not uploaded — the `later` item "The model cards and notices across repositories").
 - **Regular Gemma 4 `bf16-fast`** (perf-ledger K-110; published with `karume-gemma4` on 2026-11-20): the sha256 rows
   `e2b/bf16-fast` and `e4b/bf16-fast` of an environment other than the RTX 3080 Ti's, which has them (written only on
   the maintainer's OK). E2B's speculative decode is in the first item of `later`.
@@ -48,7 +47,30 @@ maintainer's ruling of 2026-11-06).
    [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md), the grouped `expert_linear` is perf-ledger K-104. The
    cache is built even if slow (the maintainer's ruling of 2026-11-09: a model whose experts do not fit in VRAM becomes
    possible in principle). Left:
-   - the drafter and vision of 26B;
+   - 26B's QAT MTP drafter (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`), which the recipe ships, with
+     every expert resident only: the expert cache keeps refusing `speculative`, and the two together are not planned
+     (the maintainer's ruling of 2026-11-27 — taken up later if needed). Left: the export's goldens, the distribution
+     rebuilt with it and its e2e, the run in Chrome on the RTX 5070 Ti (the VRAM headroom and the acceptance), and the
+     upload at the next release.
+     This machine checks the drafter on the 12-layer cut (`e2e_gemma4_26b_cut_drafter_test.ts`), where no draft is
+     accepted. When the mirror `models/karume-gemma4-qat` holds `26b/drafter`, these edits follow (each checked
+     against the staged distribution on 2026-11-27; no other test of the core and `models:gemma4` lanes, the
+     workbench or the playground changed outcome without a GPU):
+     - `e2e_gemma4_gemv_cases_test.ts`: `INTEGER_LINEARS` gains `"karume-gemma4-qat 26b drafter i4": 68` after the
+       26B model's row; `CASES_WITHOUT_A_GRAPH` loses `i4g32-n1024-k5632` and `i4g32-n2816-k1024` and the comment
+       above them; `SEQUENTIAL_AT_REORDER` gains, after the 12B drafter's row, `"karume-gemma4-qat 26b drafter i4":
+       ["i4 g32 1024×5632 ×3", "i4 g32 4096×1024 ×9", "i4 g32 8192×1024 ×27", "i4 g32 2816×1024 ×2",
+       "i4 g32 262144×1024 ×3"]`;
+     - `e2e_gemma4_qat_mirror_test.ts`: `MODELS` gains `"26b"` for ① and ②, and ③ – ⑤ loop over
+       `RESIDENT_MODELS = ["e2b", "e4b", "12b"]` (a 12 GB GPU does not hold 26B resident); `SEATS` gains
+       `"26b": [QUANT, "i4-fast"]`, `PRESENT` gains `"26b"`, and `SHAPES` gains `"26b"` with hidden 2816, no PLE,
+       product `gemma4-26b-product` and the slots `l28.k` / `l28.v` `[1, 8, 1032, 256]` and `l29.k` / `l29.v`
+       `[1, 2, C, 512]`; ① checks 26B's dialect `gemma4-unified` and no suppressed id; `ASSEMBLE` gains
+       `--model 26b`, and the header names 26B;
+     - `helpers/census-table.ts`: the 26B row's heading says, as 12B's does, that its drafter's rows are not derived
+       (no count changes); `helpers/gemma-mirror.ts`: the comment of `GEMMA4_QAT_MIRROR` names 26B A4B among the
+       models with their QAT drafters;
+   - 26B's vision: in the `later` item "Vision on E2B / E4B" (the maintainer's ruling of 2026-11-27);
    - the grouped `expert_linear` in a chat's decode in Chrome on the RTX 5070 Ti (its `kernel-check` identity passed
      there on 2026-11-19);
    - a depth sweep of self-speculation in Chrome (the Node sweep is research 2026-11-10 §7);
@@ -67,8 +89,8 @@ maintainer's ruling of 2026-11-06).
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): the workbench's `gemma4-bench`
     entry has a drafter arm (built 2026-11-26), and the numbers of its first record (one run, RTX 3080 Ti) are in
     perf-ledger K-110. Left: the Playground's gemma4-bench page still fixes `speculative` off, and whether E2B's
-    sentence on speed ("without the drafter" — `GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`)
-    changes is the maintainer's decision.
+    measurement notes on the card ("without the drafter" — `GEMMA4_MEASUREMENTS` in
+    `tools/export-recipes/gemma4/card.py`) gain a measurement with the drafter is the maintainer's decision.
   - **Small checks found while preparing 0.23.0 (filed 2026-11-19; none approved yet)**:
     - The Wan recipe has no build from published containers pinned by digest, which Anima's and Irodori's have: a
       rebuild needs the series, or series folders laid out from a mirror by hand (0.23.0 did the latter). Filed
@@ -238,6 +260,22 @@ maintainer's ruling of 2026-11-06).
        sending the file from the page (by hand for now — the maintainer's direction of 2026-11-26); and whether a
        record of the explore sets joined with a full record should count a skipped row as no observation, as it
        does now.
+     - Improvements to the benchmark page (filed 2026-11-27, the maintainer's request after a run in Chrome on the
+       RTX 5070 Ti lost its results to a page reload):
+       - Resume: a run that a reload or a closed tab interrupts continues from the cases already measured instead
+         of starting over (what caused that reload is not established; the dev server's hot reload is suspected).
+       - Fewer words and less specialist explanation; the page reworked around what the run shows:
+         1. the title "Karume Benchmark";
+         2. after a button to go on, a screen that shows the GPU and the environment and lets the collaborator
+            confirm or correct them (with a list of candidates);
+         3. an optional guide to the browser's WebGPU developer settings;
+         4. once started, one square per measured item, many at a time, coloured by state: a faster choice found
+            (blue), the default kept (green), running (white), failed (red).
+       - Conditions under which timing is steadier, held for the length of a run (filed 2026-11-28, the
+         maintainer's request): the page already holds a screen wake lock (`apps/benchmark/src/wake-lock.ts`) and
+         records whether it held and how long the tab was hidden; left are entering full screen for the run
+         (the Fullscreen API), showing before the start which of the conditions hold, and recording full screen
+         in the file beside the wake lock.
      - Per-adapter tables from sweeps beyond what has landed (the GEMV sweep and its derivation, the generator's
        `--gemv-records` and `--gemv-plan`, the K-88 skeleton forms as geometry-sweep candidates —
        [spec/geometry-profiles.md](spec/geometry-profiles.md)). Open:
@@ -311,14 +349,57 @@ maintainer's ruling of 2026-11-06).
     borrowed roles from the mirrors, or retire it with the experiment.
 
 - **The model cards and notices across repositories (filed 2026-11-24, the maintainer's request; after the 0.24.0
-  release)**: check that every distribution's README.md and NOTICE.md are written the same way (section order, how an
-  upstream is named and pinned, what is quoted and what is stated in the recipe's own words, where the reader is sent
-  for the upstream's own description) and write the rules down where the recipes can point at them. The 2.9B card set
-  one precedent: an upstream's statement that the recipe cannot measure is quoted verbatim, and the notice refers to the
-  upstream card for it. The profile of 2026-11-25 (`outputs/misc/card-notice-review-2026-11-25/`, untracked) found
-  wording that differs between families: `license_link` set by the Gemma 4 cards only, "apache-2.0" against
-  "Apache 2.0", fenced against unfenced licence texts, an upstream sentence shared through one constant in some
-  families and written twice in others. Each change is a new upload of that repository.
+  release)**. How a distribution repository's `README.md`, `NOTICE.md` and `LICENSE.md` are written is the spec
+  [distribution-cards](spec/distribution-cards.md); the rules every published repository satisfies are checked by
+  `tools/export-recipes/tests/test_dist_driver.py`.
+  - **Built on the maintainer's twelve rulings of 2026-11-27, not uploaded**: the generators of all nineteen
+    repositories follow the spec — license names, full-commit pins, the Gemma license link, the fenced primary text,
+    the upstream-card bullet, repository IDs in the notices, the publishers' spelling, one section order, the runtime
+    sentence, the `base_model` of fetched components, verbatim quotations of the upstream cards, and dated measurement
+    notes in place of measured preset descriptions. The sixteen outside Gemma 4 were built on 2026-11-27 (review
+    material `outputs/misc/cards-stage2-2026-11-27/`, untracked), the three Gemma 4 ones (the `gemma4` and
+    `gemma4_qat` recipes) on 2026-11-28: the mobile card's common sections, usage and tags, links in place of
+    code-font repository IDs, the notices opened through one helper that names the models a build holds, Google's QAT
+    note quoted on `karume-gemma4-qat`, and `karume-gemma4`'s attribution stating its int8 drafters (review material
+    `outputs/misc/cards-gemma4-2026-11-28/`, untracked).
+  - **Uploads**: each of the nineteen repositories needs one re-upload carrying every change. Where a preset
+    description moved into a note, the manifest changes too (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`,
+    `karume-irodori-v4.1-small-mf`, `karume-sbv2-jvnv`, `karume-wan2.2` and the three Gemma 4 repositories), so those
+    mirrors are rebuilt first; `karume-gemma4-qat`'s rebuild also brings 26B's drafter (item 1 of `next`), staged
+    with the new texts at `outputs/misc/local-dist/karume-gemma4-qat`. The package pins move at the next release.
+  - **Needs a ruling** (left as it was; each has legal weight or rests on a fact not read):
+    - Upstream statements left in the recipe's words, because their source at the pinned commit is not the Hub card:
+      `karume-depth-anything-v2`'s line that upstream licenses Base and Large **cc-by-nc-4.0** (their cards were not
+      read); `karume-birefnet-hr`'s line that several datasets the BiRefNet repository draws on are distributed for
+      research purposes (from the GitHub README, which has no pinned commit here); `karume-lucida`'s explanation that
+      the m35 variant has `Normalize` folded into its first convolution (from a table cell of the upstream card);
+      `karume-anima-2.9b`'s summary of the upstream's recommended steps and guidance (numbers, not a sentence);
+      `karume-gemma4-qat-mobile`'s note that each tokenizer is that of "Google's glitch-token fixes of 2026-11-03, which
+      the mobile repository has not received" (the fixes and their date are the upstream's commit history — the
+      commits titled "Remediate 233 / 219 glitch tokens" — which no card of it states; that the mobile repository's
+      `tokenizer.json` is the older file is the recipe's own check of the digests).
+    - The NVIDIA notice of the Anima texts writes bare URLs; it is ruled wording (rulings 39 a / 40 a, 2026-10-29).
+    - The changes bullet cites no clause on the MIT, Gemma and CircleStone cards; whether to cite one is a legal call.
+    - `base_model_relation` is decided per family (derived in birefnet, from every stored dtype on the regular
+      Gemma 4 card, `quantized` elsewhere); unifying it needs SBV2's source dtypes, which were not read.
+    - `karume-wan2.2`'s `base_model` leaves out the Wan2.1 checkpoint its two text assets come from: it is not a model
+      Wan2.2 derives from, and the attribution section states it.
+    - The measurement notes give the GPU of the August measurements as the development machine's at the time (NVIDIA
+      GeForce RTX 3080 Ti); their records name no device, except ADR 0026's. The SBV2 notes measured on a voice of
+      another distribution name it "another Style-Bert-VITS2 JP-Extra voice". The q4_0 QAT E2B / E4B notes of
+      2026-11-04 name the RTX 3080 Ti under Node with Dawn as the recipe's comment recorded the run; the records
+      themselves (`outputs/diag/gemma4-lines-2026-11-04/legA/`) name no device.
+    - Preset labels that rank quality ("Highest fidelity (f16 synthesis)", "Balanced") are labels, not descriptions,
+      and were left.
+  - **Left as they were, outside the published texts**: the local umT5 intake card changed only through the shared
+    helpers; the notice of the Anima evaluation distribution (`anima/eval_dist.py`) lists `OFFICIAL_MODELS`.
+  - **Left as they were in the Gemma 4 texts**: `karume-gemma4-qat`'s `## Long context` states its measurements
+    (research 2026-11-05 and 2026-11-06) with the device and without the dates — a family section, not a preset
+    description.
+  - **Proposals**: v4-Large's preset timing and the listening behind its default (ADR 0151, 2026-11-14) as measurement
+    notes on its card; the dates of `karume-gemma4-qat`'s long-context measurements in its section; the mobile E2B
+    `i4-fast` measurement of the same B570 run as E4B's (research 2026-09-26-gemma-flag-bench) as a note — its
+    description never carried one, so none was added.
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
@@ -431,7 +512,8 @@ maintainer's ruling of 2026-11-06).
 - **Vision on E2B / E4B** (later by the maintainer's ruling of 2026-11-07, and moved out of `next` on 2026-11-26:
   heavy work and not a priority; ADR [0144](decisions/0144-gemma4-12b-vision.md), Context: E2B and E4B have a real
   vision tower and causal attention, and need the product graph's input for image vectors but not the marking of which
-  rows are one image). 12B's vision shipped with 0.18.0.
+  rows are one image). 12B's vision shipped with 0.18.0. 26B's vision goes with these two (the maintainer's ruling of
+  2026-11-27: low priority, 12B's vision is enough for now).
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
   - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
     one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed). No scoring run since the schema 4 / 5 reader (local `inputs/`

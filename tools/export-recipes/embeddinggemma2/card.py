@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the EmbeddingGemma 2 distribution — a pure function derived by
 machine from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the
 sections) live in `karume.modelcard`. What lives here is **the facts specific to EmbeddingGemma 2**
 only: attribution (source, license) and what this pipeline's card says.
@@ -26,19 +28,29 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
-from _shared.upstream import hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
+from embeddinggemma2.sources import PIN
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model). The TypeScript family
@@ -103,15 +115,19 @@ EMBEDDINGGEMMA2_UPSTREAM: Mapping[str, str] = {"text": "google/embeddinggemma-2"
 #: License (the README front matter of the pinned snapshot says `license: apache-2.0` —
 #: `embeddinggemma2.sources.PIN`; not gated).
 EMBEDDINGGEMMA2_LICENSE = "apache-2.0"
-EMBEDDINGGEMMA2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: The sentence of the upstream card (its "Ethics & Safety" section, at the pinned revision) on the
-#: use policy, **verbatim, with upstream's own link**. The card and `NOTICE.md` quote this one
-#: value: the sentence is upstream's statement, so it is quoted and not paraphrased, and the policy
-#: is upstream's document, which can change, so it is linked and not copied.
-EMBEDDINGGEMMA2_USE_POLICY_SENTENCE = (
-    "Deployments must adhere to the"
-    " [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy)."
+#: The sentence of the upstream card on the use policy, **verbatim, with upstream's own link**: the
+#: sentence is upstream's statement, so it is quoted and not paraphrased (the maintainer's ruling of
+#: 2026-11-27 — `NOTICE.md` keeps one line stating it and refers to the card), and the policy is
+#: upstream's document, which can change, so it is linked and not copied.
+EMBEDDINGGEMMA2_USE_POLICY_QUOTE = UpstreamQuote(
+    repo=PIN.repo,
+    revision=PIN.revision,
+    sections=("Ethics & Safety",),
+    paragraphs=(
+        "Deployments must adhere to the"
+        " [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy).",
+    ),
 )
 
 #: The storage of the upstream checkpoint's weights (BF16). The card states that the default preset
@@ -191,13 +207,35 @@ EMBEDDINGGEMMA2_MODEL_ROLE = "model"
 #: distribution's own limit is `pipelineConfig.maxTokens`.
 EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS = 8192
 
-#: The upstream model card's statement on precision (pinned revision, "Run inference in `bfloat16`
-#: or `float32`. Do not use `float16`." — its activations exceed float16's range). The card pairs
-#: it with what this repository's presets compute in ({@link _precision_lines}).
-EMBEDDINGGEMMA2_PRECISION_STATEMENT = (
-    "upstream says to run the model in bfloat16 or float32, never float16: its activations exceed"
-    " float16's range, and float16 returns NaN or silently degraded embeddings"
+#: The upstream model card's statement on precision, quoted verbatim (the card at the pinned
+#: revision, its "4. Numerical Precision" section). The card pairs it with what this repository's
+#: presets compute in ({@link _precision_lines}).
+EMBEDDINGGEMMA2_PRECISION_QUOTE = UpstreamQuote(
+    repo=PIN.repo,
+    revision=PIN.revision,
+    sections=("4. Numerical Precision",),
+    paragraphs=(
+        "Run inference in `bfloat16` or `float32`. Do not use `float16`.",
+        "EmbeddingGemma 2's activation range exceeds the dynamic range of `float16`. In `float16`"
+        " the model returns NaN or silently degraded embeddings rather than raising an error, so"
+        " the failure is easy to miss.",
+    ),
 )
+
+#: Every quotation of an upstream card this card writes (checked against the cached card by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (
+    EMBEDDINGGEMMA2_PRECISION_QUOTE,
+    EMBEDDINGGEMMA2_USE_POLICY_QUOTE,
+)
+
+
+def _revision(repo: str) -> str:
+    """The commit the stored weights of `repo` were exported from (`embeddinggemma2.sources.PIN` —
+    every container's provenance is checked against it at assembly)."""
+    if repo != PIN.repo:
+        raise ValueError(f"{repo} is not the pinned source {PIN.repo} — no commit to name")
+    return PIN.revision
 
 
 def _metadata(manifest: Mapping[str, Any]) -> CardMetadata:
@@ -229,6 +267,9 @@ def _metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         # soon as any stored weight differs from the checkpoint's, default or not
         # (`_gemma4_relation`).
         license=EMBEDDINGGEMMA2_LICENSE,
+        # The license page the upstream card links beside its Apache 2.0 (its header names it, as
+        # Gemma 4's cards do — `_shared.upstream.GEMMA_LICENSE_PAGE`).
+        license_link=GEMMA_LICENSE_PAGE,
         tags=(EMBEDDINGGEMMA2_PIPELINE_TAG, "sentence-similarity", "webgpu", "embedding", "gemma"),
     )
 
@@ -395,18 +436,19 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
     if vision is None and audio is None:
         opening = [
-            f"A text embedding distribution: the **text tower** of `{upstream}`, with its mean"
+            f"A text embedding distribution: the **text tower** of {hf_link(upstream)}, with its"
+            " mean"
             " pooling and",
         ]
-        runs = "a string in, a unit vector out."
+        runs = "A string goes in and a unit vector comes out."
         graphs = "  of the prompt you name, tokenizes on the host and runs one graph."
         scope = list(_TEXT_ONLY_SCOPE)
     elif audio is None:
         opening = [
             "A text and image embedding distribution: the **text and vision towers** of",
-            f"`{upstream}`, with the mean pooling and",
+            f"{hf_link(upstream)}, with the mean pooling and",
         ]
-        runs = "a text, an image or both in, a unit vector out."
+        runs = "A text, an image or both go in and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes on the host, runs the vision tower once per image"
             " and the text graph once."
@@ -415,9 +457,9 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     elif vision is None:
         opening = [
             "A text and audio embedding distribution: the **text and audio towers** of",
-            f"`{upstream}`, with the mean pooling and",
+            f"{hf_link(upstream)}, with the mean pooling and",
         ]
-        runs = "a text, an audio or both in, a unit vector out."
+        runs = "A text, an audio or both go in and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes and computes the log-mel frames on the host, runs"
             " the audio tower once per audio and the text graph once."
@@ -426,9 +468,9 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
     else:
         opening = [
             "A text, image and audio embedding distribution: the **text, vision and audio towers**",
-            f"of `{upstream}`, with the mean pooling and",
+            f"of {hf_link(upstream)}, with the mean pooling and",
         ]
-        runs = "text, images and audio in any mix, a unit vector out."
+        runs = "Text, images and audio go in, in any mix, and a unit vector comes out."
         graphs = (
             "  of the prompt you name, tokenizes (and computes an audio's log-mel frames) on the"
             " host, runs a tower once per image or audio and the text graph once."
@@ -438,16 +480,17 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         *opening,
-        "L2 normalisation, converted into the WebGPU inference runtime **Karume**'s container",
+        "L2 normalization, converted into the WebGPU inference runtime **Karume**'s container",
         "format (a `.krm` part sequence whose first part carries the graph and model descriptors).",
-        f"Runs as-is in the browser and in Deno — {runs}",
+        RUNTIME_SENTENCE,
+        runs,
         "",
         "- **The tokenizer and the prompts ship with the weights.** `embed()` prepends the prefix",
         graphs,
         f"- **Output**: a unit vector of {dimensions[0]} values. The model was trained with",
         "  Matryoshka Representation Learning, so a shorter vector of"
         f" {_spell(dimensions[1:])} values can be asked for:",
-        "  the leading values, re-normalised to unit length.",
+        "  the leading values, re-normalized to unit length.",
         *_input_length(config["maxTokens"]),
         *scope,
         "- Not readable by transformers or sentence-transformers (it's a different container with",
@@ -563,10 +606,12 @@ def _precision_lines(manifest: Mapping[str, Any]) -> list[str]:
                     f" {quant['session']} — this card states that every preset computes in f32"
                 )
     stored = " or ".join(EMBEDDINGGEMMA2_STORAGES[dtype][0] for dtype in _stored_dtypes(manifest))
-    return [
-        f"- **Precision**: {EMBEDDINGGEMMA2_PRECISION_STATEMENT}. Every preset of this repository",
-        f"  computes in f32 over the stored {stored} weights.",
-    ]
+    return quotation(
+        EMBEDDINGGEMMA2_PRECISION_QUOTE,
+        f"- **Precision**: every preset of this repository computes in f32 over the stored {stored}"
+        " weights; the upstream model card",
+        indent="  ",
+    )
 
 
 def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
@@ -578,17 +623,15 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         *_storage_lines(manifest),
         "",
         # A paragraph between the two lists: CommonMark joins two adjacent lists of one marker.
-        "The upstream model, its licence and what was changed:",
+        "The upstream model, its license and what was changed:",
         "",
     ]
     for name in manifest["models"]:
         repo = EMBEDDINGGEMMA2_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed **Apache 2.0**"
-            f" ([full text]({EMBEDDINGGEMMA2_LICENSE_TEXT_LINK}); a verbatim copy is in"
-            " `LICENSE.md`)."
+            f"- **`{name}`**: {pinned(repo, _revision(repo))}, licensed"
+            f" **{EMBEDDINGGEMMA2_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
-    upstream = EMBEDDINGGEMMA2_UPSTREAM[manifest["defaultModel"]]
     weights_change = (
         [
             "  checkpoint's bf16 values unchanged in `bf16`, and an int8-quantized copy (`i8`) was",
@@ -629,8 +672,8 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         )
     )
     lines += [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
-        "  tower was extracted and re-expressed, with the mean pooling and the L2 normalisation,",
+        f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the text",
+        "  tower was extracted and re-expressed, with the mean pooling and the L2 normalization,",
         "  as one graph in the Karume container format; the sliding-window attention mask is a",
         "  band declared on the attention, applied from the token positions; the weights keep the",
         *weights_change,
@@ -638,15 +681,13 @@ def _base_weights(manifest: Mapping[str, Any]) -> list[str]:
         *audio_change,
         "  No retraining and no fine-tuning.",
         *_precision_lines(manifest),
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model card, and this",
-        f"  repository does not restate it: read [{upstream}](https://huggingface.co/{upstream})",
-        "  before using it.",
-        '- **The upstream use policy**: the upstream model card states, under "Ethics & Safety":',
-        "",
-        f"  > {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}",
-        "",
-        "  The policy is upstream's document: read it at that link. It is not reproduced here.",
+        *quotation(
+            EMBEDDINGGEMMA2_USE_POLICY_QUOTE,
+            "- **The upstream use policy** (upstream's document, not reproduced here — read it at"
+            " the link): the upstream model card",
+            indent="  ",
+        ),
+        *upstream_cards([hf_link(repo) for repo in _metadata(manifest).base_model]),
     ]
     return lines
 

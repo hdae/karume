@@ -60,7 +60,7 @@ from _shared.container_read import (
     read_asset,
     read_asset_declarations,
 )
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
@@ -78,10 +78,11 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from karume.modelcard import HF_OWNER, notice_closing
 from wan import umt5_tokenizer
 from wan.card import WAN22_CARD, WanCard, render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES, WAN22_TEXT_MODEL
+from wan.sources import SOURCES, WAN22_MODELS, WAN22_TEXT_MODEL
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
@@ -465,8 +466,7 @@ WAN22_QUANTS: Mapping[str, Any] = {
         },
         "label": "int8 transformer, int8 activations, online attention",
         "description": "The int8 transformer with per-token int8 activations and attention"
-        " computed online: the scores are never stored, so the long clips run faster on the same"
-        " weights as the s16 preset.",
+        " computed online: the scores are never stored; the same weights as the s16 preset.",
     },
     # The int8 VAE decoder (ADR 0133 decision 6): the reference preset — the transformer and the
     # VAE decoder in int8 storage with an empty `session`, the control of the E2E difference floor
@@ -491,8 +491,7 @@ WAN22_QUANTS: Mapping[str, Any] = {
         },
         "label": "int8 transformer and VAE, int8 activations, online attention",
         "description": "The online-attention preset with the VAE decoder's weights in int8 and"
-        " its 3-D convolutions computed on per-pixel int8 activations (integer dot products) —"
-        " the fastest decode.",
+        " its 3-D convolutions computed on per-pixel int8 activations (integer dot products).",
     },
 }
 
@@ -533,11 +532,12 @@ WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: MUST: the text matches the contents of the distribution — as values it is plausible prose, so
 #: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
 #: shipping.
-WAN22_NOTICE_MARKDOWN = """# NOTICE
+#: SPEC: docs/spec/distribution-cards.md#noticemd
+WAN22_NOTICE_MARKDOWN = f"""# NOTICE
 
-This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in
-`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
-following changes were made:
+This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint
+`{SOURCES[WAN22_MODELS[0]].repo}` (Wan-AI, licensed under the Apache License, Version 2.0 — see
+`LICENSE.md`). The following changes were made:
 
 - The weights were converted into the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors).
@@ -591,20 +591,21 @@ following changes were made:
   VAE decoder; computation runs in float32.
 - **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
   encoder of `google/umt5-xxl` (this checkpoint's `text_encoder` folder holds the same encoder
-  rounded to bfloat16), converted to int8, from the separate repository `karume-umt5-xxl` at a
-  pinned commit (with the size and the SHA-256 of every part); the changes made to it are listed in
-  that repository's own `NOTICE.md`.
+  rounded to bfloat16), converted to int8, from the separate repository
+  `{HF_OWNER}/{UMT5_REPO_NAME}` at a pinned commit (with the size and the SHA-256 of every part);
+  the changes made to it are listed in that repository's own `NOTICE.md`.
 - The umT5-XXL outputs of a fixed set of prompts are included as a precomputed asset, for use
   without the text encoder. They were computed with the umT5-XXL encoder of the Wan2.1 T2V 1.3B
-  checkpoint (the same encoder) in bfloat16 and are stored as float32.
-- The tokenizer of the Wan2.1 T2V 1.3B checkpoint (its files are identical to the `tokenizer`
+  checkpoint `{SOURCES[WAN22_TEXT_MODEL].repo}` (the same encoder) in bfloat16 and are stored as
+  float32.
+- The tokenizer of that checkpoint (its files are identical to the `tokenizer`
   folder of this checkpoint) was converted into one JSON table (vocabulary, scores, added tokens
   and the whitespace set), together with lookup tables for the upstream prompt cleaning (evaluated
   from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database, including a
   translation of ftfy's mojibake-detection pattern) that the host uses to reproduce the cleaning or
   to reject a prompt.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
 
 
@@ -1349,7 +1350,7 @@ def wan_references(_model: str) -> tuple[CrossRepoReference, ...]:
 
 
 #: The original text of the upstream license (Apache 2.0 — ADR 0092 decision 7).
-_APACHE_LICENSE = apache_license_2_0()
+_APACHE_LICENSE = license_markdown(apache_license_2_0())
 
 #: The `--pipeline wan-ti2v` entry (Wan2.2 TI2V 5B → `karume-wan2.2`; the driver merges it into the
 #: core's PIPELINES), bundling the generation table {@link WAN22}. Attribution (upstream

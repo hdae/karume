@@ -145,6 +145,26 @@ describe("the case table", () => {
     assertEquals(uncovered(exceptions, GEMV_CASES), ["bf16 g* 8960×2560"]);
   });
 
+  it("has a case for every linear of 26B A4B's QAT MTP drafter, the shapes 12B's drafter shares named for both", () => {
+    // [n, k] of the drafter's linears at i4 g32, as its checkpoint holds them ([out, in]); the
+    // embedding table is the output head (n 262144, k 1024).
+    const drafter26b = [
+      [1024, 5632], // pre_projection
+      [4096, 1024], // q (sliding)
+      [1024, 4096], // o (sliding)
+      [8192, 1024], // gate / up, q (full)
+      [1024, 8192], // down, o (full)
+      [2816, 1024], // post_projection
+      [262144, 1024], // lm_head
+    ] as const;
+    for (const [n, k] of drafter26b) {
+      const { source } = caseOf(`i4g32-n${n}-k${k}`);
+      assert(source.includes("26B A4B"), source);
+      // 12B's drafter has the same shapes but at its projections (its hidden width is 3840)
+      assertEquals(source.includes("12B"), n !== 2816 && k !== 5632, source);
+    }
+  });
+
   it("gives every case a unique id spelled from its shape, a source and the sweep's row counts", () => {
     assertEquals(new Set(GEMV_CASES.map(({ id }) => id)).size, GEMV_CASES.length);
     for (const gemvCase of GEMV_CASES) {

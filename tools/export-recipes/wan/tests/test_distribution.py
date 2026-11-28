@@ -60,7 +60,7 @@ from karume.dist import (
 )
 from karume.emit import stored_model
 from karume.ir import IrInitializer, IrShared, IrStorage
-from karume.modelcard import FileRefKey
+from karume.modelcard import MEASUREMENTS_LEAD, FileRefKey
 from karume.pipeline import publish_model
 from wan import umt5_tokenizer
 from wan.card import (
@@ -78,6 +78,7 @@ from wan.distribution import (
     WAN22,
     WAN22_I8_SERIES,
     WAN22_PIPELINE,
+    WAN22_QUANTS,
     WAN22_REPO_NAME,
     WAN22_SERIES,
     WAN_CONTAINER_ROLES,
@@ -520,7 +521,7 @@ class TestLayout:
         out_dir, _ = assembled
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "**The text encoder is referenced, not stored here.**" in prose
-        assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
+        assert f"`hdae/{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "for use without the text encoder" in prose
         assert "ftfy's mojibake-detection pattern" in prose
         assert "text encoder is not distributed" not in prose
@@ -1031,15 +1032,16 @@ class TestTheModelCard:
         lines = _card(manifest).splitlines()
         title = lines.index("# Wan2.2 TI2V 5B — Karume")
         assert lines[title + 2] == (
-            "This is an unofficial conversion of Wan-AI/Wan2.2-TI2V-5B-Diffusers for Karume."
-            " It is not affiliated with or endorsed by Wan-AI."
+            "This is an unofficial conversion of Wan-AI/Wan2.2-TI2V-5B-Diffusers and"
+            " google/umt5-xxl for Karume. It is not affiliated with or endorsed by Wan-AI and"
+            " Google."
         )
 
     def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         upstream = SOURCES[_TI2V]
-        assert f"base_model: {upstream.repo}" in card
+        assert f"base_model:\n  - {upstream.repo}\n  - google/umt5-xxl\n" in card
         assert f"license: {upstream.license}" in card
         assert f"at commit `{upstream.revision}`" in card
 
@@ -1069,7 +1071,7 @@ class TestTheModelCardOnTheTextEncoder:
     def test_it_names_the_repository_and_the_commit_it_borrows_from(self, assembled) -> None:
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
-        link = f"[`{_UMT5_REPO}`](https://huggingface.co/{_UMT5_REPO})"
+        link = f"[{_UMT5_REPO}](https://huggingface.co/{_UMT5_REPO})"
         assert f"referenced from {link}" in card
         assert f"at commit `{_UMT5_REVISION[:16]}…` of {link}" in card
         assert "stored in this repository" not in card
@@ -1105,7 +1107,8 @@ class TestTheModelCardOnTheTextEncoder:
         size = sum(ref["size"] for ref in parts)
         prose = " ".join(_card(changed).split())
         assert (
-            f"includes the text encoder ({size / (1 << 30):.2f} GiB from `{_UMT5_REPO}`)" in prose
+            f"includes the text encoder ({size / (1 << 30):.2f} GiB from"
+            f" [{_UMT5_REPO}](https://huggingface.co/{_UMT5_REPO}))" in prose
         )
 
     def test_it_names_the_declared_limits_when_every_quant_declares_them(self, assembled) -> None:
@@ -1663,8 +1666,7 @@ class TestTheWan22Distribution:
         )
         assert model["quants"][_ONLINE]["description"] == (
             "The int8 transformer with per-token int8 activations and attention computed online:"
-            " the scores are never stored, so the long clips run faster on the same weights as the"
-            " s16 preset."
+            " the scores are never stored; the same weights as the s16 preset."
         )
         int8_vae = {
             **seat,
@@ -1732,7 +1734,9 @@ class TestTheWan22Distribution:
 
     def test_the_repository_ships_the_apache_license_and_the_wan22_notice(self, assembled) -> None:
         out_dir, _ = assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "modified form of the Wan2.2 TI2V 5B checkpoint" in prose
         assert "Apache License, Version 2.0" in prose
@@ -1760,7 +1764,7 @@ class TestTheWan22Distribution:
         assert "so only that slice is stored" in prose
         assert "The VAE encoder is not included." not in prose
         assert "**The text encoder is referenced, not stored here.**" in prose
-        assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
+        assert f"`hdae/{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "umT5-XXL encoder of the Wan2.1 T2V 1.3B checkpoint" in prose
         # A copy of the 2.1 sentences with facts that differ for 2.2 does not remain.
         assert "float16 transformer" not in prose
@@ -2000,7 +2004,7 @@ class TestTheWan22ModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         upstream = SOURCES[_TI2V]
         assert "# Wan2.2 TI2V 5B — Karume" in card
-        assert f"base_model: {upstream.repo}" in card
+        assert f"base_model:\n  - {upstream.repo}\n" in card
         assert f"at commit `{upstream.revision}`" in card
         assert f'repo: "hdae/{WAN22_REPO_NAME}"' in card
         assert "await Ti2vPipeline.fromPretrained(" in card
@@ -2091,6 +2095,30 @@ class TestTheWan22ModelCard:
         assert "float16 transformer" not in prose
         assert "second, int8 copy" not in prose
         assert "the transformer shipped only in int8" in prose
+
+    def test_the_quant_table_is_followed_by_what_two_presets_measured(self, assembled) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a measurement is a note
+        naming its device and date, never part of a preset's description."""
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split("\n")
+        start = card.index(MEASUREMENTS_LEAD)
+        on = "(NVIDIA GeForce RTX 3080 Ti, Node with Dawn, 2026-10-23)."
+
+        assert card[start + 2 : start + 4] == [
+            f"- `{_ONLINE}` — one transformer pass at 121 frames (27,280 tokens) took 21.7 s"
+            f" against 24.2 s for `{_PRACTICAL}` the same morning {on}",
+            f"- `{_CONV8}` — over 8 clips at 1280 × 704 with 33 frames and 50 steps, the VAE"
+            f" decode took 87 s against 168 s for `{_ONLINE}`, and the whole clip 533 s against"
+            f" 611 s {on}",
+        ]
+        assert card[start + 5].startswith("### ")
+
+    def test_no_preset_description_states_a_measurement(self) -> None:
+        measured = re.compile(r"\b(faster|fastest|slower|quicker|measured)\b", re.IGNORECASE)
+        for name, quant in WAN22_QUANTS.items():
+            assert measured.search(quant["description"]) is None, name
+        for measured_preset in WAN22_CARD.measurements["ti2v-5b"]:
+            assert measured_preset.preset in WAN22_QUANTS
 
     def test_it_names_the_measured_resources_and_what_was_not_measured(self, assembled) -> None:
         out_dir, _ = assembled

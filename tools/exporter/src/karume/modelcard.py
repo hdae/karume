@@ -1,6 +1,8 @@
 """**Generic rendering components** of the distribution's model card (`README.md`) — pure
 functions derived mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 HF reads the YAML frontmatter of `README.md` as the model's machine-readable metadata (the last
 piece of ADR 0037 §3's "a form that can be uploaded as an HF repository as is"). Licence and
 provenance are by decision not written into the manifest (ADR 0038 §6), so that responsibility
@@ -14,7 +16,8 @@ explain and what to spell out in the usage section are family-specific facts, so
 
 NOTE: the rendering components ({@link frontmatter} / {@link introduction} / {@link models} /
 {@link quants} / {@link model_sections} / {@link render} / {@link require_pipeline} /
-{@link default_model} / {@link knob} / {@link from_pretrained}) are **the public surface for
+{@link default_model} / {@link knob} / {@link from_pretrained} / {@link hf_link} /
+{@link pinned}) are **the public surface for
 recipes** (ADR 0065 stage 6). Since `card.py`, outside the wheel, calls them by name, keeping
 private names would make "calling across private" the default. Only the components closed within
 this module keep a leading `_` ({@link _base_model} and the like).
@@ -58,6 +61,7 @@ assets changed" is the premise of reassembly). Dicts from JSON keep insertion or
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -79,6 +83,7 @@ _SHA_DIGITS = 16
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
 
 
+# SPEC: docs/spec/distribution-cards.md#front-matter
 @dataclass(frozen=True)
 class CardMetadata:
     """**Facts not in the manifest** that go into the frontmatter (the area ADR 0038 §6 took out
@@ -106,9 +111,12 @@ class CardMetadata:
     #: Written only **when one of the 4 values is factually right** (otherwise left to the Hub's
     #: inference).
     base_model_relation: str | None = None
-    #: The 2 fields HF reads only with `license: other`. A distribution that has an SPDX
-    #: identifier **does not have them** (listing them empty reads as "an unnamed custom licence").
+    #: The name of a custom license: written only with `license: other`, the one case HF reads it
+    #: (listing it beside an SPDX identifier reads as "an unnamed custom license").
     license_name: str | None = None
+    #: The license's page: written with `license: other`, and beside an SPDX identifier only as the
+    #: link the upstream card itself writes (the Gemma license page of Google's Gemma 4 and
+    #: EmbeddingGemma 2 cards) — a card does not add a page its upstream does not name.
     license_link: str | None = None
 
 
@@ -117,10 +125,150 @@ class CardMetadata:
 #: search must not take it for the upstream's own release. {@link introduction} fills it in.
 #: A sentence an upstream licence requires in its own words (anima's, MOSS-Image's) is kept as it
 #: is, beside this one — this sentence does not stand in for a licence clause.
+#: SPEC: docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence
 UNOFFICIAL_CONVERSION_NOTICE = (
     "This is an unofficial conversion of {upstream} for Karume."
     " It is not affiliated with or endorsed by {author}."
 )
+
+
+#: **The runtime sentence**, the same words in every card's "What is this" section (maintainer's
+#: ruling of 2026-11-27): the runtimes a distribution runs in. Node has no WebGPU of its own, so the
+#: sentence says that one is passed in (the runtime's `acquireGpu({ gpu })`). A card writes it as a
+#: line of its own, so that the one constant is found whole wherever the paragraph wraps.
+#: SPEC: docs/spec/distribution-cards.md#what-is-this
+RUNTIME_SENTENCE = (
+    "Runs in the browser, in Node (with a WebGPU implementation passed in) and in Deno."
+)
+
+
+#: A full commit of an HF repository (40 lower-case hex digits).
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def hf_link(repo: str) -> str:
+    """An HF repository as a card links it: the repository ID as plain link text."""
+    return f"[{repo}](https://huggingface.co/{repo})"
+
+
+# SPEC: docs/spec/distribution-cards.md#naming-and-pinning-an-upstream
+def pinned(repo: str, revision: str) -> str:
+    """An upstream with the commit the stored bytes were taken from:
+    `[<owner>/<name>](https://huggingface.co/<owner>/<name>) at commit `<40 hex digits>``.
+
+    MUST: the revision is the full commit — a branch, a tag or a shortened commit does not pin the
+    bytes, and a reader copies it as it is.
+    """
+    if _COMMIT.fullmatch(revision) is None:
+        raise ValueError(f"{repo}: {revision!r} is not a full commit (40 lower-case hex digits)")
+    return f"{hf_link(repo)} at commit `{revision}`"
+
+
+#: The clause of the Apache License 2.0 that asks for the notice of the changes (§4(b) — "cause any
+#: modified files to carry prominent notices stating that You changed the files"), as a card cites
+#: it in its changes bullet ({@link changes_made_here}).
+APACHE_MODIFICATION_CLAUSE = "Apache 2.0 §4(b)"
+
+#: The sentence every `NOTICE.md`'s closing paragraph opens with.
+NOTICE_CLOSING = "No retraining and no fine-tuning were performed."
+
+
+# SPEC: docs/spec/distribution-cards.md#noticemd
+def notice_closing(not_distributed: str = "The original checkpoint is") -> str:
+    """The closing paragraph of `NOTICE.md`: {@link NOTICE_CLOSING}, then what of the upstream
+    is not distributed here (`not_distributed` is the subject and its verb: "The original
+    checkpoint is", "The original checkpoints are")."""
+    return f"{NOTICE_CLOSING} {not_distributed} not distributed here."
+
+
+#: Where the Apache License 2.0 text lives (the text `LICENSE.md` copies — Apache 2.0 §4(a)).
+APACHE_LICENSE_TEXT_URL = "https://www.apache.org/licenses/LICENSE-2.0"
+
+#: What follows "licensed **apache-2.0**" on a card's line for weights whose license is the
+#: primary text of `LICENSE.md`: when the license was read, where the text lives, and the copy.
+APACHE_LICENSE_REFERENCE = (
+    f"(as of retrieval; [full text]({APACHE_LICENSE_TEXT_URL}) — a verbatim copy is in"
+    " `LICENSE.md`)"
+)
+
+
+# SPEC: docs/spec/distribution-cards.md#license-statements
+def changes_made_here(clause: str | None = None) -> str:
+    """The head of every card's changes bullet, which sums the changes up and points at the
+    notice that lists them in full: `- **Changes made here** (listed in full in `NOTICE.md`, per
+    <clause>):` — `clause` is the clause of the license that asks for the notice of the changes,
+    where it has one ({@link APACHE_MODIFICATION_CLAUSE})."""
+    cited = "" if clause is None else f", per {clause}"
+    return f"- **Changes made here** (listed in full in `NOTICE.md`{cited}):"
+
+
+# SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
+def upstream_cards(links: Sequence[str]) -> list[str]:
+    """The bullet that ends every card's attribution section (maintainer's ruling of 2026-11-27):
+    what the model can and cannot do is the upstream's to say, so the card sends the reader to
+    the card of every upstream it redistributes instead of restating it. `links` are Markdown
+    links to those cards (the `base_model` repositories, and the pages of works not on the Hub),
+    each listed once, in order.
+
+    MUST: no upstream is left out — a card that names one of its upstreams' cards only would read
+    as if that card covered the others.
+    """
+    if not links:
+        raise ValueError("no upstream card to send the reader to")
+    cards = "the upstream model card" if len(links) == 1 else "the upstream model cards"
+    return [
+        "- **What the model can and cannot do** — capabilities, limitations, intended use,"
+        f" evaluations and safety guidance — is documented on {cards}, and this repository does"
+        f" not restate it: read {_spell_list(links)} before using it."
+    ]
+
+
+@dataclass(frozen=True)
+class UpstreamQuote:
+    """A statement of an upstream's model card, quoted verbatim (maintainer's ruling of
+    2026-11-27): what an upstream states and the recipe cannot measure — a legal statement, its
+    training data, its intended use — is quoted with its source, never reworded.
+
+    `paragraphs` are the card's own words at `revision`, each one paragraph or list item of it with
+    its line breaks folded into spaces; `sections` are the headings they stand under, the card's
+    title included, spelled without their emphasis and leading emoji (empty when they precede the
+    first heading).
+    """
+
+    repo: str
+    revision: str
+    sections: tuple[str, ...]
+    paragraphs: tuple[str, ...]
+
+    @property
+    def source(self) -> str:
+        """The quoted card at its commit, as a plain-text link."""
+        if _COMMIT.fullmatch(self.revision) is None:
+            raise ValueError(f"{self.repo}: {self.revision!r} is not a full commit")
+        return f"[{self.repo}](https://huggingface.co/{self.repo}/blob/{self.revision}/README.md)"
+
+
+# SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
+def quotation(quote: UpstreamQuote, lead: str, *, indent: str = "") -> list[str]:
+    """`{lead} ({source}) states, under "<section>":`, a blank line and the paragraphs as one
+    blockquote, its lines indented by `indent` (a list item's continuation).
+
+    `lead` names the card ("the upstream model card", "Its card"); the source is the card's
+    README at the commit quoted.
+    """
+    if not quote.paragraphs:
+        raise ValueError(f"{quote.repo}: a quotation without a paragraph")
+    under = (
+        ""
+        if not quote.sections
+        else ", under " + _spell_list([f'"{section}"' for section in quote.sections])
+    )
+    lines = [f"{lead} ({quote.source}) states{under}:", ""]
+    for index, paragraph in enumerate(quote.paragraphs):
+        if index:
+            lines.append(f"{indent}>")
+        lines.append(f"{indent}> {paragraph}")
+    return lines
 
 
 @dataclass(frozen=True)
@@ -288,6 +436,7 @@ def _base_model(base_models: Sequence[str]) -> list[str]:
     return ["base_model:", *(f"  - {model}" for model in base_models)]
 
 
+# SPEC: docs/spec/distribution-cards.md#front-matter
 def frontmatter(metadata: CardMetadata) -> list[str]:
     return [
         "---",
@@ -308,6 +457,7 @@ def frontmatter(metadata: CardMetadata) -> list[str]:
     ]
 
 
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
 def models(manifest: Mapping[str, Any]) -> list[str]:
     """The list of models the repository carries (the axis that first became machine-readable in
     v2 — ADR 0041 decision 2)."""
@@ -424,11 +574,88 @@ def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[
     }
 
 
+@dataclass(frozen=True)
+class Measurement:
+    """What one preset measured: its speed, or the quality heard or seen, with the device and the
+    date (maintainer's ruling of 2026-11-27). A preset's description says what the preset is; a
+    measurement is a note under the quant table, because another device or a later build can
+    measure otherwise.
+
+    `statement` is the result as one clause, without a final period. `device` is the GPU (with the
+    runtime where it was recorded), or what ran the measurement instead (a simulation). `date` is
+    the day of the measurement, `YYYY-MM-DD`. `subject` names what was measured when it was not
+    this model (another voice of the same architecture), else `None`.
+    """
+
+    preset: str
+    statement: str
+    device: str
+    date: str
+    subject: str | None = None
+
+
+#: The line that opens the measurement notes under a quant table.
+MEASUREMENTS_LEAD = (
+    "Measured with these presets, each on the device and at the date named (another device or a"
+    " later build may measure otherwise):"
+)
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
+def measurements(model: Mapping[str, Any], measured: Sequence[Measurement]) -> list[str]:
+    """The measurement notes of one model: a blank line, {@link MEASUREMENTS_LEAD}, a blank line and
+    one bullet per measurement, in the order given; nothing when none applies.
+
+    A measurement of a preset the model does not ship is left out: a note on a preset the
+    repository does not carry would describe what it cannot ship. The families' tests check that
+    each table names presets of the family.
+
+    MUST: a measurement without a device or a date fails — a note that names neither is the very
+    claim this format replaces.
+    """
+    lines: list[str] = []
+    for measurement in measured:
+        if measurement.preset not in model["quants"]:
+            continue
+        if not measurement.device.strip() or _DATE.fullmatch(measurement.date) is None:
+            raise ValueError(
+                f"the measurement of `{measurement.preset}` names no device or no YYYY-MM-DD date"
+            )
+        on = "" if measurement.subject is None else f"on {measurement.subject}; "
+        lines.append(
+            f"- `{measurement.preset}` — {measurement.statement}"
+            f" ({on}{measurement.device}, {measurement.date})."
+        )
+    return [] if not lines else ["", MEASUREMENTS_LEAD, "", *lines]
+
+
+def model_measurements(
+    manifest: Mapping[str, Any], table: Mapping[str, Sequence[Measurement]]
+) -> Sequence[Measurement]:
+    """The measurements of the manifest's model from a recipe's `table` (model name → what its
+    presets measured), for `quants(measured=…)`; none when the table does not name the model.
+
+    MUST: a manifest of several models fails when the table names one of them — `quants` is given
+    one model's notes, and passing them to every model's table would state one model's
+    measurements of the others.
+    """
+    named = [name for name in manifest["models"] if name in table]
+    if named and len(manifest["models"]) != 1:
+        raise ValueError(
+            f"measurements of {named} in a manifest of several models {list(manifest['models'])}"
+        )
+    return table[named[0]] if named else ()
+
+
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
 def quants(
     model: Mapping[str, Any],
     *,
     abbreviations: Mapping[str, str] | None = None,
     host_assets: Mapping[FileRefKey, int] = {},
+    measured: Sequence[Measurement] = (),
 ) -> list[str]:
     """The quant table (ADR 0074 preset names + ADR 0075 display fields + the download size per
     preset).
@@ -450,6 +677,9 @@ def quants(
     apply** (where the source of truth for sha256 is, the dtype vocabulary, `shared/`,
     cross-repository references). Putting them on a distribution they do not apply to would be a
     claim that is not a fact, so the conditions are read from the manifest.
+
+    `measured` is what the recipe measured of this model's presets ({@link measurements}), written
+    after those notes.
     """
     default = model["defaultQuant"]
     lines = [
@@ -494,13 +724,14 @@ def quants(
             "A path under `shared/` is one this model shares byte for byte with another model in"
             " this repository (it is fetched and cached once)."
         )
+    # SPEC: docs/spec/distribution-cards.md#naming-and-pinning-an-upstream
     for repo, revision in _borrowed(refs):
         lines.append(
-            f"Some components are fetched from [`{repo}`](https://huggingface.co/{repo}) at commit"
+            f"Some components are fetched from {hf_link(repo)} at commit"
             f" `{revision[:_SHA_DIGITS]}…` — those bytes are identical to this model's own, so they"
             " are not stored here a second time."
         )
-    return lines
+    return [*lines, *measurements(model, measured)]
 
 
 #: **The steps to pin a revision**, added to the source side of `fromPretrained` (one set shared
@@ -511,6 +742,7 @@ def quants(
 #: reader who did not pin breaks one day without warning — the pin is placed, commented out,
 #: **right next to** the default line, so removing the comment is all it takes (splitting the
 #: sample in two would make it unclear which one is recommended).
+#: SPEC: docs/spec/distribution-cards.md#usage
 REVISION_PIN_COMMENT: tuple[str, ...] = (
     "  // Pin a commit for reproducible builds — without it you track `main`, and a future",
     "  // repo update (renamed files, new manifest format) may break your app.",
@@ -565,6 +797,7 @@ def render(sections: Sequence[Sequence[str]]) -> str:
     return "\n".join(line for section in sections for line in section) + "\n"
 
 
+# SPEC: docs/spec/distribution-cards.md#sections-and-their-order
 def model_sections(
     manifest: Mapping[str, Any],
     per_model: Sequence[ModelSection],

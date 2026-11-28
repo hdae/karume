@@ -100,6 +100,47 @@ export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): bool
   entryPointOf(mount) === "gemma.Pipeline" &&
   manifest.models[model]?.weights["drafter"] !== undefined;
 
+/** What the page's MTP drafter switch and its expert cache slots field take, as chosen. */
+export type DrafterOrExpertCacheInput = {
+  /** The model has a drafter ({@link hasDrafter}). */
+  readonly drafterAvailable: boolean;
+  /** The drafter switch was turned on (on this model or on one chosen before it). */
+  readonly drafterChosen: boolean;
+  /** The model has routed experts (`hasExpertCache`). */
+  readonly expertCacheAvailable: boolean;
+  /** The slots field as typed. */
+  readonly expertSlotsText: string;
+};
+
+/** Which of the two a selection has on, and which control is off because of the other. */
+export type DrafterOrExpertCache = {
+  /** Whether the load builds the drafter (`speculative`). */
+  readonly speculative: boolean;
+  /** The drafter switch is off and disabled: the expert cache has slots. */
+  readonly drafterOffForExpertCache: boolean;
+  /** The slots field is disabled: the drafter is on. */
+  readonly expertCacheOffForDrafter: boolean;
+};
+
+/**
+ * The MTP drafter and the expert cache exclude each other: speculative decoding runs only with
+ * every expert resident (the pipeline refuses `speculative` with `expertCache`), so the page lets
+ * one be on at a time and disables the other's control. The cache counts as on once its field
+ * holds text, a count being typed included, so the drafter cannot slip in between two keystrokes.
+ * When both were chosen — the drafter on another model, then a model with the cache whose field
+ * still holds slots — the cache is the one on: its field stays enabled to clear, while a drafter
+ * switch disabled in the on position could not be turned off.
+ */
+export const drafterOrExpertCache = (input: DrafterOrExpertCacheInput): DrafterOrExpertCache => {
+  const expertCacheOn = input.expertCacheAvailable && input.expertSlotsText.trim() !== "";
+  const speculative = input.drafterAvailable && input.drafterChosen && !expertCacheOn;
+  return {
+    speculative,
+    drafterOffForExpertCache: input.drafterAvailable && expertCacheOn,
+    expertCacheOffForDrafter: input.expertCacheAvailable && speculative,
+  };
+};
+
 /**
  * Whether the model has the image embedder's weights, i.e. whether the page loads with `vision` and
  * shows the attach control (ADR 0144; every preset then maps them). The regular entry point only.

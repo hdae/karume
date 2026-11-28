@@ -58,6 +58,14 @@ check made on that date, and moving a pin needs the check again. "Reviewed by th
 - **Fixed prompts** — `prompts.py` quotes three prompt texts verbatim from the
   HF model card and the upstream user guide; the fourth (the negative) is the
   empty string.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `black-forest-labs/FLUX.2-small-decoder` at `a3efc24f613ef42d9428af62fdbd6f5fd8856c4a` and
+    `black-forest-labs/FLUX.2-klein-4B` at `e7b7dc27f91deacad38e78976d1f2b499d76a294` — the pointers
+    to Black Forest Labs' usage policies (the sentences of the VAE block's attribution row).
 
 ## Upstream inventory
 

@@ -1,3 +1,4 @@
+import { hasExpertCache } from "@karume/gemma4-app-support/settings";
 import { type Manifest, parseManifest } from "@karume/hub";
 import type { ChatMessage } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
@@ -5,6 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   type ChatForm,
   defaultModelKey,
+  drafterOrExpertCache,
   effectiveModelKey,
   gemmaModelChoices,
   chatSpeculative,
@@ -179,10 +181,89 @@ describe("hasDrafter", () => {
   });
 
   it("is true for the q4_0 QAT line, which the regular entry point reads with its drafters", () => {
-    const line = gemmaManifest(["e2b", "e4b", "12b"], { withDrafter: true });
-    for (const model of ["e2b", "e4b", "12b"]) {
+    const line = gemmaManifest(["e2b", "e4b", "12b", "26b"], { withDrafter: true });
+    for (const model of ["e2b", "e4b", "12b", "26b"]) {
       expect(hasDrafter(line, { mount: "gemma4-qat", model })).toBe(true);
     }
+  });
+});
+
+describe("drafterOrExpertCache", () => {
+  // 26B of the q4_0 QAT line with its drafter: both controls are available.
+  const line = gemmaManifest(["e2b", "26b"], { withDrafter: true });
+  const key = { mount: "gemma4-qat", model: "26b" } as const;
+  const both = {
+    drafterAvailable: hasDrafter(line, key),
+    expertCacheAvailable: hasExpertCache(key),
+  };
+
+  it("has both controls available on 26B with its drafter", () => {
+    expect(both).toEqual({ drafterAvailable: true, expertCacheAvailable: true });
+  });
+
+  it("disables the slots field while the drafter is on, and loads the drafter", () => {
+    expect(drafterOrExpertCache({ ...both, drafterChosen: true, expertSlotsText: "" })).toEqual({
+      speculative: true,
+      drafterOffForExpertCache: false,
+      expertCacheOffForDrafter: true,
+    });
+  });
+
+  it("turns the drafter off and disables its switch once the slots field holds text, a count being typed included", () => {
+    for (const expertSlotsText of ["64", "fitted", "1", " 6"]) {
+      expect(drafterOrExpertCache({ ...both, drafterChosen: false, expertSlotsText })).toEqual({
+        speculative: false,
+        drafterOffForExpertCache: true,
+        expertCacheOffForDrafter: false,
+      });
+    }
+  });
+
+  it("keeps the cache when both were chosen, so its field stays enabled to clear", () => {
+    expect(drafterOrExpertCache({ ...both, drafterChosen: true, expertSlotsText: "64" })).toEqual({
+      speculative: false,
+      drafterOffForExpertCache: true,
+      expertCacheOffForDrafter: false,
+    });
+  });
+
+  it("leaves both enabled with neither on, a blank field counting as empty", () => {
+    for (const expertSlotsText of ["", "  "]) {
+      expect(drafterOrExpertCache({ ...both, drafterChosen: false, expertSlotsText })).toEqual({
+        speculative: false,
+        drafterOffForExpertCache: false,
+        expertCacheOffForDrafter: false,
+      });
+    }
+  });
+
+  it("disables nothing on a model with only one of the two", () => {
+    // 12B: a drafter, no routed experts (slots typed on 26B before stay in the field)
+    expect(
+      drafterOrExpertCache({
+        drafterAvailable: true,
+        drafterChosen: true,
+        expertCacheAvailable: false,
+        expertSlotsText: "64",
+      }),
+    ).toEqual({
+      speculative: true,
+      drafterOffForExpertCache: false,
+      expertCacheOffForDrafter: false,
+    });
+    // A model with routed experts and no drafter (the mirror before 26B's drafter)
+    expect(
+      drafterOrExpertCache({
+        drafterAvailable: false,
+        drafterChosen: true,
+        expertCacheAvailable: true,
+        expertSlotsText: "",
+      }),
+    ).toEqual({
+      speculative: false,
+      drafterOffForExpertCache: false,
+      expertCacheOffForDrafter: false,
+    });
   });
 });
 

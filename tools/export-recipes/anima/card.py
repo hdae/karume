@@ -1,5 +1,7 @@
 """The model card (`README.md`) of the Anima distribution — pure functions over the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The generic rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. This module holds only **Anima-specific facts**: attribution (base model,
 licence, the origin of baked-in LoRAs) and what this pipeline's card says.
@@ -11,25 +13,32 @@ that do not exist** in the manifest.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 
-from _shared.upstream import hf_upstreams
+from _shared.upstream import UPSTREAM_AUTHORS, hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
     Upstream,
+    UpstreamQuote,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -65,12 +74,6 @@ ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 #: Title of the extra repository (karume-anima-extra — third-party fine-tunes).
 ANIMA_EXTRA_TITLE = "Anima Extra — Karume"
 
-#: The front matter of the 2.9B repository (karume-anima-2.9b). The model it converts is on the
-#: Hub, so that repository is its `base_model` (the relation stays `quantized`: re-encoded, an int8
-#: series beside it). The license is the CircleStone one the upstream card states for a derivative
-#: model, linked to the text this repository bundles, as for the other two.
-ANIMA_2_9B_METADATA = replace(ANIMA_METADATA, base_model=("Gazingstars123/Anima-2.9B",))
-
 #: Title of the 2.9B repository.
 ANIMA_2_9B_TITLE = "Anima 2.9B — Karume"
 
@@ -93,11 +96,27 @@ class UpstreamModel:
     #: Permission fields of the origin page (checked at the source — retrieved on
     #: {@link PERMISSIONS_RETRIEVED} below).
     permissions: tuple[tuple[str, str], ...]
-    #: The commit of the source repository the file was read at (`None` = not recorded — the
-    #: rows written before this field). A third party's repository may replace its file under the
-    #: same name, so its row pins the bytes the conversion read.
+    #: The commit of the source repository the file was read at (an HF source — the card pins it).
+    #: A repository may replace its file under the same name, so the row pins the bytes the
+    #: conversion read.
     revision: str | None = None
+    #: The model version of a source that has no commits (a Civitai page — the version the file
+    #: was matched to, THIRD_PARTY_NOTICES.md); `None` for an HF source.
+    version: str | None = None
 
+
+#: The commit of `circlestone-labs/Anima` the official single-file checkpoints were read at (its
+#: `main` at fetch time, from the HF cache's `refs/main` — THIRD_PARTY_NOTICES.md).
+ANIMA_SINGLE_FILE_REVISION = "f973fc41ec7545364ac9776c2440285f43ff2a30"
+
+#: The commit of `circlestone-labs/Anima-Base-v1.0-Diffusers` the base model and the shared
+#: components (text encoder, VAE, tokenizers) were read at (fetched 2026-08-16 into the HF cache —
+#: THIRD_PARTY_NOTICES.md).
+ANIMA_BASE_REVISION = "073c3a9db359c31ad0e8aa268d15775473c2176c"
+
+#: The commit of `Gazingstars123/Anima-2.9B` the layer expansion and its card were read at
+#: (`inputs/anima/anima-2.9b-original/REVISION.txt`, fetched 2026-11-17).
+ANIMA_2_9B_REVISION = "9f9cb502dbae7a616c3cc5a530633427fe735665"
 
 #: Date the permission fields were checked at the source (shown "as of" in the card — the facts
 #: may change later).
@@ -109,41 +128,46 @@ PERMISSIONS_RETRIEVED = "2026-08-22"
 UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     "anima-turbo-v1.1": UpstreamModel(
         title="Anima Turbo v1.1",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.1.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-v1.0": UpstreamModel(
         title="Anima Base v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
         file=None,
         permissions=(),
+        revision=ANIMA_BASE_REVISION,
     ),
     "anima-aesthetic-v1.1": UpstreamModel(
         title="Anima Aesthetic v1.1",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.1.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     # The v1.0 generation is distributed alongside (maintainer ruling of 2026-09-01 — preferences
     # between versions differ for this family; an instance of ADR 0077's "the latest is not
     # necessarily better").
     "anima-turbo-v1.0": UpstreamModel(
         title="Anima Turbo v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-turbo-v1.0.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-aesthetic-v1.0": UpstreamModel(
         title="Anima Aesthetic v1.0",
-        author="circlestone_labs",
+        author=UPSTREAM_AUTHORS["circlestone-labs"],
         source="https://huggingface.co/circlestone-labs/Anima",
         file="anima-aesthetic-v1.0.safetensors",
         permissions=(),
+        revision=ANIMA_SINGLE_FILE_REVISION,
     ),
     "anima-wai-v1.0": UpstreamModel(
         title="WAI-ANIMA v1.0 (base 1.0)",
@@ -156,6 +180,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDerivatives", "true"),
             ("allowDifferentLicense", "true"),
         ),
+        version="2983680",
     ),
     "anima-copycat-20260610": UpstreamModel(
         title="copycat-anima 20260610",
@@ -168,6 +193,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDerivatives", "true"),
             ("allowDifferentLicense", "false"),
         ),
+        version="3020450",
     ),
     # Anima-2.9B (a layer expansion with its own repository, karume-anima-2.9b). It is on the Hub,
     # so there are no permission fields; its card states the CircleStone license for a derivative
@@ -175,11 +201,11 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     # (`inputs/anima/anima-2.9b-original/REVISION.txt`).
     "anima-2.9b-preview-v1": UpstreamModel(
         title="Anima-2.9B preview v1",
-        author="Gazingstars123",
+        author=UPSTREAM_AUTHORS["Gazingstars123"],
         source="https://huggingface.co/Gazingstars123/Anima-2.9B",
         file="Anima-2.9B-preview-v1.safetensors",
         permissions=(),
-        revision="9f9cb502dbae7a616c3cc5a530633427fe735665",
+        revision=ANIMA_2_9B_REVISION,
     ),
 }
 
@@ -233,6 +259,11 @@ NVIDIA_NOTICE = (
     "Built on NVIDIA Cosmos."
 )
 
+#: The HF license identifier of the NVIDIA Open Model License Agreement (the `license_name` that
+#: `nvidia/Cosmos-Predict2-2B-Text2Image` writes with `license: other` — THIRD_PARTY_NOTICES.md),
+#: the card's name for the second text of `LICENSE.md`.
+NVIDIA_LICENSE_NAME = "nvidia-open-model-license"
+
 #: The accepted set of the `resolution` knob in one line (**a fact absent from the manifest** — the
 #: source of truth of the accepted set is `packages/models/src/anima/resolution.ts`, and per ADR
 #: 0038 §2 it is not written into the manifest). Step = spatial compression 8 × patch 2; the lower
@@ -271,8 +302,8 @@ def _official_overview(manifest: Mapping[str, Any]) -> list[str]:
         "The official CircleStone **Anima** models —"
         f" [{base_model}](https://huggingface.co/{base_model}) and its official variants —",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- The default model is `{model_name}` — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default.",
@@ -303,8 +334,8 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
         "Community fine-tunes of the CircleStone **Anima** base model"
         f" ([{base_model}](https://huggingface.co/{base_model})),",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
-        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno.",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
@@ -327,7 +358,7 @@ ANIMA_2_9B_UPSTREAM_RECOMMENDATION = "28–50 steps at guidance 3.5–5"
 #: "Overview" and "Training/Dataset", read 2026-11-24). What was trained is the author's statement
 #: and cannot be measured from the weights, so the card quotes it rather than rewording it; the
 #: block count is the one part this recipe states itself (read from the checkpoint's header).
-#: `test_card.py` compares the quotes with the local copy of that file when it is present.
+#: The driver's test compares the quotes with the local copy of that file when it is present.
 ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
     "Anima-2.9B is a fine-tune and layer-expansion of"
     " [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima). The base Anima"
@@ -337,10 +368,23 @@ ANIMA_2_9B_UPSTREAM_DESCRIPTION = (
     " spent on 1024px",
 )
 
+#: {@link ANIMA_2_9B_UPSTREAM_DESCRIPTION} with its source: the card at the commit the conversion
+#: read.
+ANIMA_2_9B_QUOTE = UpstreamQuote(
+    repo="Gazingstars123/Anima-2.9B",
+    revision=ANIMA_2_9B_REVISION,
+    sections=("Overview", "Training/Dataset"),
+    paragraphs=ANIMA_2_9B_UPSTREAM_DESCRIPTION,
+)
+
+#: Every upstream statement this family's cards quote (the driver's test checks each against the
+#: quoted card at its commit).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (ANIMA_2_9B_QUOTE,)
+
 
 def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
     defaults = default_model(manifest)["pipelineConfig"]["defaults"]
-    base_model = ANIMA_2_9B_METADATA.base_model[0]
+    base_model = _anima_metadata(manifest).base_model[0]
     return [
         "## What is this",
         "",
@@ -348,13 +392,11 @@ def _2_9b_overview(manifest: Mapping[str, Any]) -> list[str]:
         "CircleStone **Anima** base model by a third party — its transformer deepened from 28 to",
         "40 blocks of the same width (about 2.9B parameters) — converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
-        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
-        "Deno.",
+        "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
-        'Its card (at the revision listed under "Models and their origins" below) describes it',
-        "as follows:",
+        *quotation(ANIMA_2_9B_QUOTE, "Its card"),
         "",
-        *(line for quote in ANIMA_2_9B_UPSTREAM_DESCRIPTION for line in (f"> {quote}", "")),
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
         "  what makes the **negative prompt take effect**. The default is inside the upstream",
@@ -481,10 +523,55 @@ def _upstream_model(name: str) -> UpstreamModel:
     return upstream
 
 
-def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
-    """Origins per model (**only the models in this repository**, listed from the manifest).
+#: The URL prefix of an HF repository (a source under it is named by its repository ID).
+_HF_URL = "https://huggingface.co/"
 
-    MUST: the list comes from the manifest — holding the origin table independently of the
+
+def _source(upstream: UpstreamModel) -> str:
+    """Where a model was converted from, as a plain-text link, with what pins its bytes: the
+    commit of an HF source, the version of a source without commits (nothing is guessed for a row
+    that records neither)."""
+    if upstream.source.startswith(_HF_URL):
+        repo = upstream.source.removeprefix(_HF_URL)
+        return hf_link(repo) if upstream.revision is None else pinned(repo, upstream.revision)
+    link = f"[{upstream.source.removeprefix('https://')}]({upstream.source})"
+    return link if upstream.version is None else f"{link} (version `{upstream.version}`)"
+
+
+#: The changes this repository made, as the attribution section sums them up (the notice lists
+#: them in full — `anima.distribution`); the same for the three repositories, whose notices add only
+#: what their models are.
+ANIMA_CHANGES = (
+    f"{changes_made_here()} conversion into the Karume container",
+    "  format, and an int8-quantized series of the transformer beside the bf16 one; the bf16",
+    "  series of every component keeps the upstream BF16 values unchanged. No retraining and no",
+    "  fine-tuning.",
+)
+
+
+def _model_lines(name: str) -> list[str]:
+    """One model of the repository: what it is, who made it, and where it was converted from (with
+    its pin), followed by the permissions its source page lists when it has any."""
+    upstream = _upstream_model(name)
+    converted = "" if upstream.file is None else f"`{upstream.file}` of "
+    permissions = (
+        f" Permissions listed on the source page (as of {PERMISSIONS_RETRIEVED}):"
+        if upstream.permissions
+        else ""
+    )
+    return [
+        f"- **`{name}`** — {upstream.title}, by {upstream.author}: {converted}"
+        f"{_source(upstream)}.{permissions}",
+        *(f"  - `{key}`: {value}" for key, value in upstream.permissions),
+    ]
+
+
+def _attribution(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
+    """The attribution section: where each model of the repository comes from, then the license
+    terms — the **combination** of the upstream redistribution terms and the third-party
+    fine-tunes' permissions — the changes and the upstream cards.
+
+    MUST: the models come from the manifest — holding the origin table independently of the
     assembly arguments means that the day the repository is assembled with one model left out, a
     card carrying "the attribution of a model that is not included" goes out.
 
@@ -493,43 +580,11 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
     orders in the same card (it actually happened — `anima-copycat-…` came first and was pointed
     out, 2026-08-22). The manifest order is the assembly order itself, with the default model
     first, and it is also the order recommended to the reader.
+
+    The Attribution Notice is also shown verbatim in the card (the display requirement of §3(b)),
+    and the statement of the rights grant in the latter half of §3(a)
+    ({@link RIGHTS_GRANT_STATEMENT}) is emitted from the same single constant as `NOTICE.md`.
     """
-    lines = [
-        "## Models and their origins",
-        "",
-        *intro,
-    ]
-    for name in manifest["models"]:
-        upstream = _upstream_model(name)
-        lines += [
-            "",
-            f"### `{name}` — {upstream.title}",
-            "",
-            f"- **Author**: {upstream.author}",
-            f"- **Source**: {upstream.source}",
-        ]
-        if upstream.file is not None:
-            at = "" if upstream.revision is None else f" (revision `{upstream.revision}`)"
-            lines.append(f"- **Converted from**: `{upstream.file}`{at}")
-        if upstream.permissions:
-            lines += [
-                "",
-                f"Permissions listed on the source page (as of {PERMISSIONS_RETRIEVED}):",
-                "",
-                *(f"- `{key}`: {value}" for key, value in upstream.permissions),
-            ]
-    return lines
-
-
-def _base_license(manifest: Mapping[str, Any]) -> list[str]:
-    """Licence section — the **combination** of the upstream redistribution terms and the
-    third-party fine-tunes' permissions.
-
-    The Notice text is also shown verbatim in the card (the same reason as on the turbo side — the
-    display requirement of §3(b)). The statement of the rights grant in the latter half of §3(a)
-    ({@link RIGHTS_GRANT_STATEMENT}) is also emitted from the same single constant as `NOTICE.md`.
-    """
-    # Manifest order, as in the origins section (the same MUST — no two orders in one card).
     fine_tunes = [name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions]
     same_license = [
         name
@@ -537,13 +592,17 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         if dict(UPSTREAM_MODELS[name].permissions).get("allowDifferentLicense") == "false"
     ]
     lines = [
-        "## License",
+        "## Base weights and attribution",
         "",
-        "Every model here derives from the CircleStone Anima base model and stays under the",
-        "CircleStone Labs Non-Commercial License v1.2 (non-commercial use only). This",
-        "repository ships `LICENSE.md` (the full text of that license, followed by the NVIDIA",
-        "Open Model License Agreement) and `NOTICE.md` (these attribution notices plus the list",
-        "of modifications).",
+        *intro,
+        "",
+        *(line for name in manifest["models"] for line in _model_lines(name)),
+        "",
+        "Every model here derives from the CircleStone Anima base model and is licensed",
+        f"**{ANIMA_METADATA.license_name}** v1.2 (non-commercial use only). This repository ships",
+        "`LICENSE.md` (the full text of that license, followed by the text of",
+        f"**{NVIDIA_LICENSE_NAME}**) and `NOTICE.md` (these attribution notices plus the list of",
+        "modifications).",
         "",
         RIGHTS_GRANT_STATEMENT,
         "",
@@ -572,46 +631,105 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
         " approved or",
         "  validated by CircleStone Labs LLC.",
+        *ANIMA_CHANGES,
+        *upstream_cards(_upstream_card_links(manifest)),
     ]
     return lines
 
 
-#: Introduction of the origins section (the facts differ per repository — official / extra).
+def notice_upstreams(models: Sequence[str]) -> list[str]:
+    """How `NOTICE.md` names the upstreams of `models` (`anima.distribution.notice_markdown`): each
+    HF source and the base model's Diffusers repository by its repository ID in code font, a
+    source without one by its title and page address — the upstreams `base_model` and the house
+    sentence name, in the same order."""
+    off_hub = [
+        f"{upstream.title} (`{upstream.source.removeprefix('https://')}`)"
+        for upstream in (_upstream_model(name) for name in models)
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    repos = [
+        upstream.source.removeprefix(_HF_URL)
+        for upstream in (_upstream_model(name) for name in models)
+        if upstream.source.startswith(_HF_URL)
+    ]
+    return [
+        *off_hub,
+        *(f"`{repo}`" for repo in dict.fromkeys([*repos, *ANIMA_METADATA.base_model])),
+    ]
+
+
+def _upstream_card_links(manifest: Mapping[str, Any]) -> list[str]:
+    """Links to the card of every redistributed upstream: the source page of each model that is
+    not on the Hub (manifest order), then the `base_model` repositories."""
+    off_hub = [
+        f"[{upstream.source.removeprefix('https://')}]({upstream.source})"
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    return [*off_hub, *(hf_link(repo) for repo in _anima_metadata(manifest).base_model)]
+
+
+#: Introduction of the attribution section (the facts differ per repository).
+#: Where the shared components come from (the text encoder, VAE and tokenizers of the base model's
+#: Diffusers repository, at the commit they were read at).
+_SHARED_COMPONENTS = (
+    "The text encoder, VAE and tokenizers are those of"
+    f" {pinned(ANIMA_METADATA.base_model[0], ANIMA_BASE_REVISION)}"
+)
 OFFICIAL_ORIGINS_INTRO = (
     "Each model below is an official CircleStone release — the Anima base model itself or an",
-    "official variant of it. The text encoder, VAE and tokenizers are shared across them.",
+    "official variant of it.",
+    f"{_SHARED_COMPONENTS}, shared across them.",
 )
 EXTRA_ORIGINS_INTRO = (
-    "Each model below is a community fine-tune of the CircleStone Anima base model. The text",
-    "encoder, VAE and tokenizers are shared with the official repository",
+    "Each model below is a community fine-tune of the CircleStone Anima base model.",
+    f"{_SHARED_COMPONENTS}, shared with the official repository",
     "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
     "cross-repository references in `karume.json`.",
 )
 ANIMA_2_9B_ORIGINS_INTRO = (
     "The model below is a third party's layer expansion of the CircleStone Anima base model,",
-    "not an official CircleStone release. The text encoder, VAE and tokenizers are the official",
-    "ones, shared with the official repository",
+    "not an official CircleStone release.",
+    f"{_SHARED_COMPONENTS} (the official ones), shared with the official repository",
     "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
     "cross-repository references in `karume.json`.",
 )
 
 
 def _introduction(manifest: Mapping[str, Any], title: str) -> list[str]:
-    """The title and the house sentence over the models this repository holds (manifest order).
+    """The title and the house sentence: the models whose source is not on the Hub by their titles
+    and authors (the community fine-tunes, manifest order), then the `base_model` repositories with
+    their publishers ({@link _anima_metadata} — the sentence follows the front matter).
 
-    The models are named by their titles — the fine-tunes are not on the Hub. An official model is
-    CircleStone's (the publisher of the base model's account); a community fine-tune (one with
-    permissions listed on its source page, as {@link _base_license} reads them) is its author's.
     The §3(d) non-endorsement sentence of the License section stays as the licence words it; this
     one does not replace it.
     """
-    licensor = hf_upstreams(ANIMA_METADATA.base_model)[0].author
-    upstreams: list[Upstream] = []
-    for name in manifest["models"]:
-        upstream = _upstream_model(name)
-        author = upstream.author if upstream.permissions else licensor
-        upstreams.append(Upstream(upstream.title, author))
-    return introduction(title, upstreams)
+    off_hub = [
+        Upstream(upstream.title, upstream.author)
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if not upstream.source.startswith(_HF_URL)
+    ]
+    return introduction(title, [*off_hub, *hf_upstreams(_anima_metadata(manifest).base_model)])
+
+
+def _anima_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
+    """The front matter of the repository the manifest describes: `base_model` lists the HF
+    repository each model was converted from (manifest order) and the base model's Diffusers
+    repository, the source of the text encoder, VAE and tokenizers every model runs — stored here
+    or fetched from `karume-anima`. A model whose source is not on the Hub (a community fine-tune)
+    has no repository to list; the house sentence names it by its title ({@link _introduction}).
+
+    The relation stays `quantized` (re-encoded, an int8 series beside the bf16 one), and the
+    license is the CircleStone one, linked to the text the repository bundles.
+    """
+    repos = [
+        upstream.source.removeprefix(_HF_URL)
+        for upstream in (_upstream_model(name) for name in manifest["models"])
+        if upstream.source.startswith(_HF_URL)
+    ]
+    return replace(
+        ANIMA_METADATA, base_model=tuple(dict.fromkeys([*repos, *ANIMA_METADATA.base_model]))
+    )
 
 
 def render_base_card(
@@ -629,13 +747,11 @@ def render_base_card(
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_METADATA),
+            frontmatter(_anima_metadata(manifest)),
             _introduction(manifest, ANIMA_OFFICIAL_TITLE),
             _official_overview(manifest),
             [""],
-            _origins(manifest, OFFICIAL_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, OFFICIAL_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],
@@ -658,13 +774,11 @@ def render_extra_card(
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_METADATA),
+            frontmatter(_anima_metadata(manifest)),
             _introduction(manifest, ANIMA_EXTRA_TITLE),
             _extra_overview(manifest),
             [""],
-            _origins(manifest, EXTRA_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, EXTRA_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],
@@ -685,20 +799,18 @@ def render_2_9b_card(
 ) -> str:
     """The `README.md` body of the 2.9B repository's distribution (Anima-2.9B).
 
-    The house sentence names the repository the card converts, from its `base_model`
-    ({@link ANIMA_2_9B_METADATA}) — its author, not CircleStone, whose non-endorsement the License
-    section states in the licence's words.
+    The house sentence names the repositories of its `base_model` ({@link _anima_metadata}) — the
+    model's author and CircleStone, the source of the shared components; the License section
+    states CircleStone's non-endorsement in the licence's words besides.
     """
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
-            frontmatter(ANIMA_2_9B_METADATA),
-            introduction(ANIMA_2_9B_TITLE, hf_upstreams(ANIMA_2_9B_METADATA.base_model)),
+            frontmatter(_anima_metadata(manifest)),
+            _introduction(manifest, ANIMA_2_9B_TITLE),
             _2_9b_overview(manifest),
             [""],
-            _origins(manifest, ANIMA_2_9B_ORIGINS_INTRO),
-            [""],
-            _base_license(manifest),
+            _attribution(manifest, ANIMA_2_9B_ORIGINS_INTRO),
             [""],
             models(manifest),
             [""],
