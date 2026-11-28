@@ -5,7 +5,7 @@ import { recordRun, type WorkbenchRecord } from "@karume/sweep-app-support/recor
 import { describe, expect, it } from "vite-plus/test";
 
 import { durationText } from "../src/estimate.ts";
-import { afterRunNotes, beforeRunNotes, deviceView } from "../src/notes.ts";
+import { afterRunNotes, beforeRunNotes, deviceView, gemvClassText } from "../src/notes.ts";
 import { planBenchmark } from "../src/plan.ts";
 import { hiddenLog } from "../src/visibility.ts";
 import {
@@ -190,5 +190,42 @@ describe("afterRunNotes", () => {
     );
     const [again] = afterRunNotes(unsteady);
     expect(again).toContain("please run the page once more at another time");
+  });
+
+  /** The run's records with the GEMV record's data steady and timed as `timing`. */
+  const steadyTimed = async (timing: { unit: string; quantized: boolean }) =>
+    (await records(false)).map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              gpuTiming: { ...record.data.gpuTiming, ...timing },
+              steadiness: { class: "steady" as const, groups: 40, unsteadyGroups: 1, share: 0.025 },
+            },
+          }
+        : record,
+    );
+
+  it("says a steady GEMV record is enough only when the derivation reads it so: timed in ns, not rounded (faults: rounded, the wall clock, raw ticks)", async () => {
+    const gemvOf = (made: readonly WorkbenchRecord[]) => {
+      const found = made.find((record) => isGemvData(record.data));
+      if (found === undefined) throw new Error("no GEMV record");
+      return found;
+    };
+    const steady = await steadyTimed({ unit: "ns", quantized: false });
+    expect(gemvClassText(gemvOf(steady))).toBe("steady: one record is enough for a table");
+    const rounded = await steadyTimed({ unit: "ns", quantized: true });
+    expect(gemvClassText(gemvOf(rounded))).toBe(
+      "its GPU timestamps were rounded: no GEMV evidence, whatever its class",
+    );
+    expect(afterRunNotes(rounded)[0]).toMatch(/rounded the GPU timestamps to 100 µs/);
+    const wall = await steadyTimed({ unit: "wall", quantized: false });
+    expect(gemvClassText(gemvOf(wall))).toBe(
+      "timed without GPU timestamps: no GEMV evidence, whatever its class",
+    );
+    expect(afterRunNotes(wall)[0]).toMatch(/^The GEMV part of this result will not be accepted/);
+    const ticks = await steadyTimed({ unit: "deno-raw-tick", quantized: false });
+    expect(gemvClassText(gemvOf(ticks))).toContain("a table needs a second record");
   });
 });

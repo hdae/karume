@@ -119,9 +119,13 @@ own rules, predicates and exclusions of `@karume/runtime/tune` (nothing restated
   break-even margin of at least the margin and a re-timing of the reference within the bar (`gemvReadingIsEvidence`),
   counted at the default margin, ×1.065 (`GEMV_MARGIN`), and at the lowest one, ×1.03 (`GEMV_LOWEST_MARGIN`), side
   by side. Beside the count the page states the run's class, `gemvSteadiness` over the finished GEMV cases'
-  summaries (the class of the record they merge into): steady — "this run alone is enough for a table"; unsteady —
-  more than 20 % of its groups spread beyond ×1.05, "please run the page once more at another time — a table needs
-  two such runs"; unclassified — fewer than 20 groups so far, too few to tell.
+  summaries (the class of the record they merge into), read as the derivation will read that record
+  (`gemvRecordReading` of `@karume/runtime/tune`, the derivation's own test: the finished cases' timing as the merge
+  states it — the first's unit, rounded when any was): GPU timestamps the derivation refuses — rounded (`quantized`
+  not `false`) or none (the wall clock) — "no evidence for a table, however steady its timings"; steady and in ns —
+  "this run alone is enough for a table"; steady in another unit (Deno's raw ticks) — "a table needs a second such
+  run"; unsteady — more than 20 % of its groups spread beyond ×1.05, "please run the page once more at another time —
+  a table needs two such runs"; unclassified — fewer than 20 groups so far, too few to tell.
 - **Tile geometry**: of the classes the finished cases belong to (`geometryCaseClass`, the field the derivation reads a
   case in), those in which one candidate is at least `GEOMETRY_MIN_SPEEDUP` (×1.05) faster than the default, with the
   default's output, in every case of the class measured so far, none of those cases dropped from the ratio material
@@ -160,11 +164,13 @@ device a second record —, so the count is no promise of a table.
   again". When that download throws, the page says so and offers the file with "Download the result". A run a
   cancel, a device loss or an error stopped keeps what was measured and offers it with a button, marked as
   incomplete; it is not downloaded by itself. A run that measured nothing offers nothing.
-- After a run whose GEMV record reports quantized GPU timing (its `gpuTiming.quantized` is not `false`, which the
-  GEMV derivation refuses), the page says in plain words that the GEMV part will not be accepted as evidence: the
-  browser rounded the timestamps to 100 µs, which moves the short GEMV kernels' timings by more than the differences
-  looked for; in Chrome `chrome://flags/#enable-webgpu-developer-features` stops the rounding. When a geometry record
-  is in the file too, it says that part is still used (`afterRunNotes` in `notes.ts`). Otherwise, after a run whose GEMV
+- After a run whose GEMV record's timing the GEMV derivation refuses (`gemvTimingRefusal`), the page says in plain
+  words that the GEMV part will not be accepted as evidence: for quantized GPU timing (its `gpuTiming.quantized` is not
+  `false`) that the browser rounded the timestamps to 100 µs, which moves the short GEMV kernels' timings by more than
+  the differences looked for, and that in Chrome `chrome://flags/#enable-webgpu-developer-features` stops the
+  rounding; for a record timed without GPU timestamps, that the wall clock adds a delay that moves from pass to pass.
+  When a geometry record is in the file too, it says that part is still used (`afterRunNotes` in `notes.ts`).
+  Otherwise, after a run whose GEMV
   record states itself unsteady (its `steadiness`), the page asks in plain words for one more run at another time
   (another day is best) and both files: two such runs are what makes a table; after one that states too few groups for a
   class (a short trial), it says so.
@@ -182,9 +188,11 @@ workbench's.
   checked before anything is written. A target that exists, or two records that would take one name (the same file
   given twice), refuse the whole command: nothing is overwritten and nothing is written.
 - An incomplete file's records are written too, with a line that says why the run stopped.
-- Beside each GEMV record it writes, the line says the class the record states: steady (one record is enough for a
-  table), unsteady (a table needs a second record of the device), too few groups for a class (read as unsteady), or
-  no class stated (a record written before the records stated one).
+- Beside each GEMV record it writes, the line says how the derivation will read it (`gemvClassText`, by
+  `gemvRecordReading` as the page's line): rounded GPU timestamps or none (no GEMV evidence, whatever its class), or
+  else the class the record states — steady and in ns (one record is enough for a table), steady in another unit (a
+  table needs a second record), unsteady (a table needs a second record of the device), too few groups for a class
+  (read as unsteady), or no class stated (a record written before the records stated one).
 - Exit code 0 when every record was written; 1 for a file that cannot be read, is no bundle, or would overwrite; 2 for
   a command line without a file.
 

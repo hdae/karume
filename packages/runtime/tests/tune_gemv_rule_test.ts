@@ -17,8 +17,10 @@ import {
   GEMV_STEADY_MAX_SHARE,
   GEMV_STEADY_MIN_GROUPS,
   gemvBreakEven,
+  gemvRecordReading,
   gemvRoundsGap,
   gemvSteadiness,
+  gemvTimingRefusal,
 } from "../tune.ts";
 import { gemvMarginOf } from "../src/tune/gemv-rule.ts";
 
@@ -117,6 +119,39 @@ describe("the margin a derivation takes (gemvMarginOf)", () => {
   it("refuses a margin below 1, NaN and infinity (faults: each)", () => {
     for (const margin of [0.99, Number.NaN, Number.POSITIVE_INFINITY]) {
       assertThrows(() => gemvMarginOf(margin), Error, "at least 1");
+    }
+  });
+});
+
+describe("how the derivation reads a record by its class and timing (gemvRecordReading)", () => {
+  const steady = { class: "steady" } as const;
+
+  it("reads a steady record timed in ns, not rounded, by the rule of one steady record", () => {
+    assertEquals(gemvRecordReading(steady, { unit: "ns", quantized: false }), "one-record");
+  });
+
+  it("reads a steady record in Deno's raw ticks, and an unsteady or classless one, by the rule of two records", () => {
+    assertEquals(
+      gemvRecordReading(steady, { unit: "deno-raw-tick", quantized: false }),
+      "two-record",
+    );
+    for (const other of ["unsteady", "unclassified"] as const) {
+      assertEquals(
+        gemvRecordReading({ class: other }, { unit: "ns", quantized: false }),
+        "two-record",
+      );
+    }
+  });
+
+  it("refuses rounded timestamps and the wall clock whatever the class, as the record's parser does (faults: quantized, wall, quantized absent)", () => {
+    assertEquals(gemvTimingRefusal({ unit: "ns", quantized: true }), "quantized");
+    assertEquals(gemvTimingRefusal({ unit: "ns" }), "quantized");
+    assertEquals(gemvTimingRefusal({ unit: "wall", quantized: false }), "wall-clock");
+    for (const timing of [
+      { unit: "ns", quantized: true },
+      { unit: "wall", quantized: false },
+    ]) {
+      assertEquals(gemvRecordReading(steady, timing), "refused");
     }
   });
 });

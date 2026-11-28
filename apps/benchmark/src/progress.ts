@@ -17,7 +17,9 @@ import {
   GEMV_STEADY_MIN_GROUPS,
   type GemvSteadiness,
   type GemvSweepCaseSummary,
+  type GemvRecordTiming,
   type GemvSweepPhase,
+  gemvRecordReading,
   gemvSteadiness,
   GEOMETRY_MIN_SPEEDUP,
   type GeometrySweepPhase,
@@ -73,6 +75,11 @@ export type ProgressState = {
    * record they merge into: `gemvSteadiness`).
    */
   readonly gemvSummaries: readonly GemvSweepCaseSummary[];
+  /**
+   * The GPU timing of the finished GEMV cases as the record they merge into states it: the unit of
+   * the first, quantized when any one is (the merge's rule). Absent before the first finishes.
+   */
+  readonly gemvTiming?: { readonly unit: string; readonly quantized: boolean };
   /** The per-case records of the finished geometry cases. */
   readonly geometryRecords: readonly GeometrySweepReport[];
   readonly deviceLost?: { readonly reason: string; readonly message: string };
@@ -179,6 +186,10 @@ const finish = (
         gemv: plus(state.patterns.gemv, gemvPatterns(summaries, rows, gpuTiming.unit)),
       },
       gemvSummaries: [...state.gemvSummaries, ...summaries],
+      gemvTiming: {
+        unit: state.gemvTiming?.unit ?? gpuTiming.unit,
+        quantized: (state.gemvTiming?.quantized ?? false) || gpuTiming.quantized,
+      },
     };
   }
   const geometryRecords = [...state.geometryRecords, record.report];
@@ -287,14 +298,26 @@ const ratio = (value: number): string => `×${value.toFixed(2)}`;
 const ratio3 = (value: number): string => `×${value.toFixed(3)}`;
 
 /**
- * What the GEMV run's class says to the person who runs it: steady — this run is enough for a
- * table; unsteady — run the page once more at another time; no class yet — too few groups so far.
+ * What the GEMV run's class says to the person who runs it, read as the derivation will read the
+ * record (`gemvRecordReading`, its timing included): steady and timed in ns — this run is enough
+ * for a table; timestamps the derivation refuses (rounded, or none) — no GEMV evidence, however
+ * steady; steady but not in ns — a table needs a second run; unsteady — run the page once more at
+ * another time; no class yet — too few groups so far. `timing` is absent before a GEMV case finished
+ * (then no group has a class either), and a steady class without it claims nothing.
  */
-export const steadinessLine = (steadiness: GemvSteadiness): string => {
+export const steadinessLine = (
+  steadiness: GemvSteadiness,
+  timing: GemvRecordTiming | undefined,
+): string => {
   const counted = `${steadiness.unsteadyGroups} of ${steadiness.groups} groups spread beyond ${ratio(GEMV_STEADY_GROUP_SPREAD)}`;
+  if (timing !== undefined && gemvRecordReading(steadiness, timing) === "refused") {
+    return "This browser's GPU timestamps are rounded (or missing), so the GEMV part of this run is no evidence for a table, however steady its timings (see the note at the end)";
+  }
   switch (steadiness.class) {
     case "steady":
-      return `The GPU's timings held steady in this run (${counted}): this run alone is enough for a table`;
+      return timing !== undefined && gemvRecordReading(steadiness, timing) === "one-record"
+        ? `The GPU's timings held steady in this run (${counted}): this run alone is enough for a table`
+        : `The GPU's timings held steady in this run (${counted}), but its timestamps are not in ns: a table needs a second such run`;
     case "unsteady":
       return `The GPU's timings moved during this run (${counted}, more than ${Math.round(GEMV_STEADY_MAX_SHARE * 100)} %): please run the page once more at another time — a table needs two such runs`;
     case "unclassified":
@@ -309,14 +332,14 @@ export const steadinessLine = (steadiness: GemvSteadiness): string => {
  */
 export const patternLines = (
   plan: BenchmarkPlan,
-  state: Pick<ProgressState, "patterns" | "gemvSummaries">,
+  state: Pick<ProgressState, "patterns" | "gemvSummaries" | "gemvTiming">,
 ): string[] => {
   const { patterns } = state;
   return plan.sweeps.flatMap(({ sweep }) =>
     sweep === "gemv"
       ? [
           `GEMV: ${patterns.gemv.atMargin} of ${patterns.gemv.of} shapes measured so far have a kernel that beats today's choice by ${ratio3(GEMV_MARGIN)} times its timing noise (${patterns.gemv.atLowest} by ${ratio3(GEMV_LOWEST_MARGIN)})`,
-          steadinessLine(gemvSteadiness(state.gemvSummaries)),
+          steadinessLine(gemvSteadiness(state.gemvSummaries), state.gemvTiming),
         ]
       : [
           `Tile geometry: ${patterns.geometry.found} of ${patterns.geometry.of} classes measured so far have a geometry at least ${ratio(GEOMETRY_MIN_SPEEDUP)} faster than the default in every case`,

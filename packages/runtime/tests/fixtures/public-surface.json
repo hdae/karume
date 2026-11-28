@@ -773,6 +773,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvRecordTiming",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvReferenceRefusal",
         "kind": "typeAlias"
       },
@@ -1113,6 +1117,10 @@
         "kind": "function"
       },
       {
+        "name": "gemvRecordReading",
+        "kind": "function"
+      },
+      {
         "name": "gemvReferenceRefusal",
         "kind": "function"
       },
@@ -1162,6 +1170,10 @@
       },
       {
         "name": "gemvTableCandidate",
+        "kind": "function"
+      },
+      {
+        "name": "gemvTimingRefusal",
         "kind": "function"
       },
       {

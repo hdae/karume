@@ -175,9 +175,12 @@ import {
   GEMV_STEADY_MIN_GROUPS,
   gemvBreakEven,
   gemvMarginOf,
+  gemvRecordReading,
   gemvRoundsGap,
   type GemvSteadiness,
   gemvSteadiness,
+  gemvTimingRefusal,
+  isGemvTimestampUnit,
 } from "./gemv-rule.ts";
 import { ROUNDS } from "./measurement.ts";
 
@@ -463,12 +466,13 @@ const parseGemvSweepRecord = (
   const timing = objectAt(record.gpuTiming, `${where} gpuTiming`);
   // The wall clock adds the submit-to-completion floor, which moves per pass; quantized timestamps
   // move a small dispatch's minimum by a whole step
-  if (timing.unit !== "ns" && timing.unit !== "deno-raw-tick") {
+  const { unit } = timing;
+  if (!isGemvTimestampUnit(unit)) {
     throw new Error(
       `${where}: gpuTiming.unit is ${JSON.stringify(timing.unit)} (must be ns or deno-raw-tick — a wall-clock record is not read)`,
     );
   }
-  if (timing.quantized !== false) {
+  if (gemvTimingRefusal(timing) === "quantized") {
     throw new Error(
       `${where}: gpuTiming.quantized is ${JSON.stringify(timing.quantized)} (quantized timestamps are not read)`,
     );
@@ -550,7 +554,7 @@ const parseGemvSweepRecord = (
     date: stringAt(record, "date", where),
     candidateSet,
     ...(userAgent === undefined ? {} : { userAgent }),
-    unit: timing.unit,
+    unit,
     steadiness: gemvSteadiness(spreads),
     adapter,
     ...(geometryProfile === undefined ? {} : { geometryProfile }),
@@ -1652,7 +1656,7 @@ const unjudgedReason = (reason: string): string =>
 
 /** Whether the rule of one steady record reads a record: steady by its summaries, timestamps in ns. */
 const readsSteady = (source: GemvSweepSource): boolean =>
-  source.steadiness.class === "steady" && source.unit === "ns";
+  gemvRecordReading(source.steadiness, { unit: source.unit, quantized: false }) === "one-record";
 
 /** ns per ms: a record read by the rule of one steady record times in ns. */
 const NS_PER_MS = 1e6;

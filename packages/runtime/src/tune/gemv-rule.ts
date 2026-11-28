@@ -108,6 +108,43 @@ export const gemvSteadiness = (
   };
 };
 
+/** A record's GPU timing as it states it (`gpuTiming`: its unit and whether it looked quantized). */
+export type GemvRecordTiming = { readonly unit?: unknown; readonly quantized?: unknown };
+
+/** Whether a record's unit is a GPU timestamp's the derivation reads (`ns`, or Deno's raw ticks). */
+export const isGemvTimestampUnit = (unit: unknown): unit is "ns" | "deno-raw-tick" =>
+  unit === "ns" || unit === "deno-raw-tick";
+
+/**
+ * Why the GEMV derivation reads no group of a record for its timing (undefined: none): `wall-clock`
+ * — its unit is no GPU timestamp (`ns` or Deno's `deno-raw-tick`), so the submit-to-completion floor,
+ * which moves per pass, is in every time; `quantized` — its timestamps were rounded to a step that
+ * moves a small dispatch's minimum by a whole step (anything but `quantized: false`). Pure.
+ */
+export const gemvTimingRefusal = (
+  timing: GemvRecordTiming,
+): "wall-clock" | "quantized" | undefined => {
+  if (!isGemvTimestampUnit(timing.unit)) return "wall-clock";
+  if (timing.quantized !== false) return "quantized";
+  return undefined;
+};
+
+/**
+ * How the GEMV derivation reads a record, from its class and its timing — the one test the
+ * derivation and a reader of one record (the benchmark page, its unpacking command) share:
+ * `one-record` — steady and timed in ns: the rule of one steady record reads it, one such record is
+ * enough; `two-record` — unsteady, without a class, or timed in Deno's raw ticks (the length of its
+ * passes in ms is not known): it is evidence only beside a second record; `refused` — its timing
+ * ({@link gemvTimingRefusal}): no group of it is evidence, however steady. Pure.
+ */
+export const gemvRecordReading = (
+  steadiness: Pick<GemvSteadiness, "class">,
+  timing: GemvRecordTiming,
+): "one-record" | "two-record" | "refused" => {
+  if (gemvTimingRefusal(timing) !== undefined) return "refused";
+  return steadiness.class === "steady" && timing.unit === "ns" ? "one-record" : "two-record";
+};
+
 /**
  * A row's gap: its second-smallest positive round ÷ its smallest (rounds clamped to 0 left out);
  * undefined with fewer than two positive rounds. Pure.

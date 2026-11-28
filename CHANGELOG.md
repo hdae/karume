@@ -26,8 +26,9 @@ measurements in `docs/research/`.
   per page load or process with `gemvSweepSession`, and the time since its start). All these fields are optional, so the
   record stays `karume-gemv-sweep/4` and the records taken before them read as they did. The numbers of the rule they
   serve are exported with it (`GEMV_MARGIN`, `GEMV_LOWEST_MARGIN`, `GEMV_STEADY_MIN_GROUPS`, `GEMV_STEADY_MAX_SHARE`,
-  `GEMV_STEADY_GROUP_SPREAD`, `GEMV_MIN_PASS_MS`, `gemvRoundsGap`, `gemvBreakEven`). The workbench and the benchmark
-  page make the session when they start.
+  `GEMV_STEADY_GROUP_SPREAD`, `GEMV_MIN_PASS_MS`, `gemvRoundsGap`, `gemvBreakEven`), with how the derivation reads a
+  record by its class and timing (`gemvRecordReading`, `gemvTimingRefusal`, `GemvRecordTiming`), which the benchmark
+  page shares. The workbench and the benchmark page make the session when they start.
 - `@karume/runtime/tune`: the GEMV sweep's `explore` candidate set (`runGemvSweep({ candidateSet: "explore" })`), a
   short run of `full`'s row counts. Twelve sentinel cases of the whole case table (`gemvSentinels`,
   `GEMV_SENTINEL_COUNT`: the case nearest to all, then again and again the one farthest from those chosen —
@@ -104,9 +105,12 @@ measurements in `docs/research/`.
   and, under the new rule, `tableChoice` and `evidence`.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
   (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group),
-  at ×1.065 and at ×1.03 side by side, beside the run's class — steady, "this run alone is enough for a table";
+  at ×1.065 and at ×1.03 side by side, beside the run's class as the derivation will read the record
+  (`gemvRecordReading`: rounded or missing GPU timestamps are no evidence, however steady) — steady in ns, "this run
+  alone is enough for a table";
   unsteady, "please run the page once more at another time"; too few groups so far —, and a note after an unsteady
-  run asks for a second one. `unpack.ts` says each GEMV record's class beside the file it writes. The GEMV priors of
+  run asks for a second one. `unpack.ts` says beside the file it writes how the derivation will read each GEMV
+  record (the same test). The GEMV priors of
   the time left are 28 and 16 s (were 27 and 15: the re-timing and the ×1.03 carry add about 4 % to a GEMV case).
 - `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
   the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
