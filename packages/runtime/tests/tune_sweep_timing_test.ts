@@ -132,6 +132,8 @@ type FakeTiming = {
   readonly wallMs?: (pass: FakePass) => number;
   /** The pipeline keys whose pipeline cannot be made (absent: none). */
   readonly failingPipelines?: ReadonlySet<string>;
+  /** Whether the device is lost when a pass is submitted (absent: never lost). */
+  readonly lose?: (pass: FakePass) => boolean;
 };
 
 /** A compute pass while it is encoded. */
@@ -172,6 +174,10 @@ const fakeTimingDevice = (
   const counts = new Map<string, { readonly all: number; readonly timed: number }>();
   let lastTimed: LoggedPass | undefined;
   let lastSubmitted: LoggedPass | undefined;
+  let loseDevice: (info: GPUDeviceLostInfo) => void = () => undefined;
+  const lost = new Promise<GPUDeviceLostInfo>((settle) => {
+    loseDevice = settle;
+  });
   const createBuffer = (descriptor: GPUBufferDescriptor) => ({
     size: descriptor.size,
     destroy: (): void => undefined,
@@ -220,10 +226,17 @@ const fakeTimingDevice = (
       passes.push(logged);
       if (pass.timed) lastTimed = logged;
       lastSubmitted = logged;
+      // Test-only boundary: the loss info is a plain object (GpuContext reads its message alone)
+      if (timing.lose?.(fake) === true) {
+        loseDevice({
+          reason: "unknown",
+          message: "lost by the test",
+        } as unknown as GPUDeviceLostInfo);
+      }
     }
   };
   const device = {
-    lost: new Promise<GPUDeviceLostInfo>(() => {}),
+    lost,
     features: new Set(["timestamp-query"]),
     destroy: (): void => undefined,
     pushErrorScope: (): void => undefined,
@@ -1214,6 +1227,37 @@ describe("the GEMV sweep's references: the device table's choices and their re-t
       // The other references' passes read times
       assertEquals(rowAt(result.rows, 1, "parallel-l4").retimingUnread, undefined);
     }
+  });
+
+  it("marks the references whose rounds finished before the device was lost, rather than leaving them as rows of a record before the re-timing (fault: the re-timing loop stops at the loss and marks nothing)", async () => {
+    const plan = one("staged-l2");
+    const baselineKey = keyOfName(plan, plan.baseline.name);
+    const control = await sweep([plan], byKey(times));
+    const last = timedOf(control.passes).filter(({ key }) => key === baselineKey).length - 1;
+    // Lost on the baseline's re-timing pass, the first of the references' passes once more
+    const { result } = await withContext(
+      {
+        gpuNs: byKey(times),
+        lose: (pass) => pass.key === baselineKey && pass.timed && pass.timedIndex === last,
+      },
+      async (context) => ({
+        result: await sweepGemvCase(context, PLE_CASE, [plan], {
+          rounds: 2,
+          tolerance: WIDE,
+          quickLookMargin: QUICK_LOOK_MARGIN,
+        }),
+      }),
+    );
+    for (const name of ["parallel-l4", "staged-l2"]) {
+      const row = rowAt(result.rows, 1, name);
+      assertEquals(
+        [row.error, row.retimingUnread, row.retimedPerDispatch, row.rounds?.length],
+        [undefined, "lost", undefined, 2],
+        name,
+      );
+    }
+    // A candidate that is no reference is not re-timed, so it carries no marker
+    assertEquals(rowAt(result.rows, 1, "parallel-l8").retimingUnread, undefined);
   });
 });
 

@@ -74,6 +74,12 @@ export type GemvSweepGemmChoice = {
 /** The choice of a row: a member of the GEMV family, or the GEMM as a reference. */
 export type GemvSweepChoice = GemvSweepFamilyChoice | GemvSweepGemmChoice;
 
+/**
+ * Why a reference's pass once more after the rounds read no time ({@link GemvSweepRow.retimingUnread}):
+ * a negative timestamp difference (clamped to 0), a difference of 0, or a device lost before it.
+ */
+export type GemvRetimingUnread = "clamped" | "zero" | "lost";
+
 /** One measured kernel: a candidate, or the baseline, of a case at a row count. */
 export type GemvSweepRow = {
   readonly caseId: string;
@@ -140,12 +146,12 @@ export type GemvSweepRow = {
   readonly retimedPerDispatch?: number;
   /**
    * A reference whose extra pass after the rounds read no time: `clamped` when its timestamp
-   * difference was negative (kept as 0), `zero` when it was 0. The rule of one steady record reads
-   * no evidence against such a reference (its re-timing tested nothing), where a record written
-   * before the re-timing existed — neither field — is read untested. Never beside
-   * {@link retimedPerDispatch}.
+   * difference was negative (kept as 0), `zero` when it was 0, `lost` when the device was lost
+   * after its rounds and before that pass. The rule of one steady record reads no evidence against
+   * such a reference (its re-timing tested nothing), where a record written before the re-timing
+   * existed — neither field — is read untested. Never beside {@link retimedPerDispatch}.
    */
-  readonly retimingUnread?: "clamped" | "zero";
+  readonly retimingUnread?: GemvRetimingUnread;
   readonly wallNsPerDispatch?: number;
   /** The baseline's `perDispatch` ÷ this row's (above 1: faster than the baseline). */
   readonly speedupVsBaseline?: number;

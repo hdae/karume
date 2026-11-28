@@ -456,7 +456,7 @@ measures nothing and changes no default value.
   re-timing, or its inverse, is above margin × the two gaps — a reference whose time moved within the group by more
   than the bar a gain must clear can account for such a gain by itself (no record of today repeats a kernel within a
   group, so this reads only records taken from 2026-11-28 on; a record without the re-timing has nothing to test). A
-  reference whose re-timed pass read no time (`retimingUnread`: clamped, or 0) tested nothing, so no reading against
+  reference whose re-timed pass read no time (`retimingUnread`: clamped, 0, or the device lost before it) tested nothing, so no reading against
   it is evidence (its reading's `retime` is `unread`).
   - *At M = 1* a candidate qualifies when its check held, at least one steady record's reading of it against its class's
     reference (the default's choice, its row in the same group — its time need not repeat in a second record) is

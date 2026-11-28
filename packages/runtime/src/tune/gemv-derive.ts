@@ -168,6 +168,7 @@ import {
 import {
   GEMV_SWEEP_FORMAT,
   type GemvSweepChoice,
+  type GemvRetimingUnread,
   type GemvSweepFamilyChoice,
   type GemvSweepRow,
 } from "./gemv-report.ts";
@@ -232,8 +233,8 @@ type RowObservation = {
   readonly rounds?: readonly number[];
   /** A reference's pass once more after the rounds ÷ `reps` (a record of 2026-11-28 on). */
   readonly retimedPerDispatch?: number;
-  /** A reference whose pass once more read no time (clamped or 0): no evidence is read against it. */
-  readonly retimingUnread?: "clamped" | "zero";
+  /** A reference whose pass once more read no time (clamped, 0, or the device lost): no evidence is read against it. */
+  readonly retimingUnread?: GemvRetimingUnread;
   readonly identicalToBaseline?: boolean;
   readonly withinBand?: boolean;
   readonly screened?: true;
@@ -308,8 +309,8 @@ const optionalAt = <T>(
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 const isString = (value: unknown): value is string => typeof value === "string";
 const isTrue = (value: unknown): value is true => value === true;
-const isRetimingUnread = (value: unknown): value is "clamped" | "zero" =>
-  value === "clamped" || value === "zero";
+const isRetimingUnread = (value: unknown): value is GemvRetimingUnread =>
+  value === "clamped" || value === "zero" || value === "lost";
 /** A row's rounds: finite times of at least 0 (a clamped round is 0). */
 const isRounds = (value: unknown): value is number[] =>
   Array.isArray(value) &&

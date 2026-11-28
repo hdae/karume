@@ -43,9 +43,10 @@
  *    or the wall clock. Then every reference that finished its rounds is timed once more, in plan
  *    order (its row's `retimedPerDispatch`): a reference whose time moved within the group shows
  *    there, which the rule of one steady record reads. A pass that reads no time (its timestamp
- *    difference negative, clamped, or 0) is marked so (`retimingUnread`), not left without a value:
- *    then the rule reads the reference's group as no evidence, where a record written before the
- *    re-timing existed has nothing to test.
+ *    difference negative, clamped, or 0) is marked so (`retimingUnread`), not left without a value,
+ *    and so is a reference whose rounds finished before the device was lost (`lost`): then the rule
+ *    reads the reference's group as no evidence, where a record written before the re-timing existed
+ *    has nothing to test.
  * Interleaving puts every kernel under the device states the row count went through, so a heating
  * device slows them alike instead of whichever was measured last; how far the state moved is the
  * spread of the baseline's rounds (the summary's `baselineSpread`). There is no per-kernel warm-up
@@ -111,6 +112,7 @@ import {
   GEMV_SWEEP_NOT_MEASURED,
   type GemvSweepCaseEntry,
   type GemvSweepCaseSummary,
+  type GemvRetimingUnread,
   type GemvSweepGates,
   type GemvSweepReport,
   type GemvSweepRow,
@@ -756,9 +758,10 @@ export const sweepGemvCase = async (
     const references = gemvPlanReferences(plan);
     /**
      * The re-timed pass of each reference that finished its rounds: per dispatch, or why it read no
-     * time (a negative timestamp difference, clamped to 0, or a difference of 0).
+     * time (a negative timestamp difference, clamped to 0, a difference of 0, or a device lost
+     * before it).
      */
-    const retimed = new Map<Kernel, number | "clamped" | "zero">();
+    const retimed = new Map<Kernel, number | GemvRetimingUnread>();
     const step = (phase: GemvSweepPhase, done: number, total: number): void =>
       hooks.onStep?.({ caseId: gemvCase.id, m, phase, done, total });
     /** The kernels in `kind` now. */
@@ -964,8 +967,14 @@ export const sweepGemvCase = async (
       for (const kernel of retiming) {
         if (abortRequested()) return undefined;
         const { state } = kernel;
-        if (gpu.lost !== undefined) break;
-        if (state.kind === "calibrated" && state.samples.length === settings.rounds) {
+        const finished = state.kind === "calibrated" && state.samples.length === settings.rounds;
+        // A reference whose rounds finished before the device was lost is marked: its row would
+        // otherwise read as one of a record before the re-timing, untested
+        if (gpu.lost !== undefined) {
+          if (finished) retimed.set(kernel, "lost");
+          continue;
+        }
+        if (finished) {
           try {
             const sample = await measurePass(context, state.ready, state.reps);
             const value = (sample.gpu ?? sample.wallNs) / state.reps;

@@ -495,7 +495,7 @@ describe("the re-timed reference", () => {
   });
 
   it("makes a group no evidence when the re-timed pass read no time, while a row of a record before the re-timing is read untested (fault: the marker read as no re-timing at all)", () => {
-    for (const unread of ["clamped", "zero"] as const) {
+    for (const unread of ["clamped", "zero", "lost"] as const) {
       const derivation = derive([
         record("a.json", [
           {
