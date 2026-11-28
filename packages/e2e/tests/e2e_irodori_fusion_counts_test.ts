@@ -93,8 +93,8 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  *   the window, which the pair form does not accept, so that one site stays plain (23 = 24 − 1).
  *   The fused kernel performs the same f32 operations in the same order (the WAV sha256 rows of
  *   `e2e_irodori_wav_test.ts` held on the RTX 3080 Ti with it — 2026-10-24).
- * - adaln 0: ADALN_RULE's leading op is `layer_norm`, but the DiT normalises with `rms_norm` (87)
- *   and has no `layer_norm` at all.
+ * - adaln 0: ADALN_RULE's leading op is `layer_norm`, but the DiT normalises with `rms_norm` (49;
+ *   87 with the 38 of `dit_context`, split out of it) and has no `layer_norm` at all.
  * - silu 17: the timestep MLP's 5 + one per block (12). The remaining 12 sigmoids are the gates of
  *   `mul(v, sigmoid(u))` (not applied to themselves, so not SiLU).
  * - **rowBlockAttention 12**: every decomposed attention of the 12 blocks (`bmm → reshape →
@@ -279,7 +279,9 @@ const SMALL_COUNTS: Readonly<Record<string, Partial<FusionCounts>>> = {
  *   (26 × q / k); speaker silu 14 and rope 27 (14 × 2 − the first use of the tables, as on
  *   v4-small); duration silu 6; the DiT silu 29 (the head's 5 + 24), rope 47 (24 × 2 − 1),
  *   rowBlockAttention 24 and identityExpand 48 (24 × 2, the pair swallowed by each fused
- *   attention).
+ *   attention). Its backbone normalises with `rms_norm` (v4-small's with `layer_norm`), and its
+ *   52 adjacent `rms_norm → add` pairs stay unfused: their width, 1152, is not one rmsNormAdd
+ *   takes (not a multiple of 256 — perf-ledger K-121), so rmsNormAdd stays 0 there.
  */
 const IRODORI_VARIANT_COUNTS: Readonly<
   Record<(typeof IRODORI_VARIANTS)[number], Readonly<Record<string, Partial<FusionCounts>>>>
@@ -304,8 +306,8 @@ for (const name of IRODORI_VARIANTS) {
   const available = mirrorPresent(mirror);
   if (!available) {
     console.warn(
-      `[karume] ${mirror.pathname} (or a mirror it references) has no karume.json, so its Irodori` +
-        " fusion hit counts SKIP (build it with dist.py in tools/export-recipes)",
+      `[karume] ${mirror.pathname} has no karume.json, so its Irodori fusion hit counts SKIP` +
+        " (build it with dist.py in tools/export-recipes)",
     );
   }
   test.skipIf(!available)(

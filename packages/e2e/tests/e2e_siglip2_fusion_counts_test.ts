@@ -33,7 +33,8 @@ const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
  * pooling head's) and the pooling head's query: base **53** (12 layers: 4 × 13 + 1), so400m
  * **113** (27 layers: 4 × 28 + 1). Nothing else: the tower normalises with `layer_norm` straight into a `linear` (adaLN wants the modulation chain
  * after the norm), and its `linear → gelu_tanh → linear` pairs would fold only into an i8a8 linear
- * (the linear prologue under `linearCompute: "a8"`), which no preset sets.
+ * (the linear prologue, which needs `linearCompute: "a8"` and i8 storage): the distribution stores
+ * f32 only, so even `"a8"` folds none, and no preset sets it.
  */
 const EXPECTED: Readonly<Record<string, number>> = { base: 53, so400m: 113 };
 
