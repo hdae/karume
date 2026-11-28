@@ -138,6 +138,20 @@ measurements in `docs/research/`.
   time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
   record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
   needs the field).
+- `@karume/runtime`: the split-K linear, which only the private Session key `LINEAR_SPLIT_K` selects, is now the split
+  of the GEMM skeleton — the reference GEMM's kernel over one slice of the K tiles, then the existing combine —
+  instead of one thread per output, and takes every weight storage the GEMM reads under f32 compute (f16, bf16,
+  int8, int4, int2 as well as f32); its slices are whole K tiles, so a tile count the slice count does not divide is
+  cut too. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
+  the reference's grid is under-filled (Gemma 4 prefill's narrow projections), and is up to 1.33 times slower where
+  the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change. The workbench's
+  `kernel-check` entry runs a fifteenth check, `linear-splitk`.
+- `@karume/runtime`: the memory estimate counts a linear's node temporaries from the dispatch program execution
+  builds, which it builds only for a linear that has such temporaries — the a8 linear's quantized activations and
+  scales (the same numbers as before) and, under the private key, the split-K linear's partial sums; every other
+  linear is counted as before. An a8 linear on a per-channel int8 weight whose `k` passes the i32 reduction
+  guard now fails the estimate with execution's message, where the estimate returned a number and the Session failed
+  at its first run.
 
 ## [0.24.0] - 2026-11-25
 

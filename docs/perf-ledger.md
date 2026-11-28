@@ -641,3 +641,15 @@ sliding layers (band 512) see at most 1,025 of 8,192 keys per row.
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |
 | 🚧 | K-114 | Skip the ①QK and ③PV tiles that lie entirely outside the band (the band's counterpart of K-19, which zeroes the K iterations of tiles a mask hides entirely) | Filed 2026-11-22, **not measured**. The design investigation of 2026-11-22 estimates 0.36–0.59 s against 0.6–1.1 s at 8,192 tokens on the RTX 3080 Ti — an estimate, not a measurement (the measured times of today's plan are the timing table of `packages/models/src/embeddinggemma/pipeline.ts`). Before building: measure the share of ①QK and ③PV in an 8,192-token embed and set the kill line from it. Before adopting: every O word equal to the unskipped band plan (the twin of the `attention-band` check) over row blocks, GQA, M ≠ N, f16 score storage and bands at and above T |
+
+## 2026-11-28 Split-K as a split of the GEMM skeleton
+
+The split-K linear was one thread per output with no shared tile, 4 to 16 times slower than the reference GEMM on every
+shipped shape class (the recon of 2026-11-27). It is now the split of the GEMM skeleton — the same kernel over one slice
+of the K tiles per workgroup of the z axis, then the existing combine — and is faster than the reference where the
+reference's grid is under-filled ([research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)). It is still
+reachable only through the private key `LINEAR_SPLIT_K`.
+
+| Status | ID | Candidate | Preconditions / kill criterion |
+| ------ | --- | --------- | ------------------------------ |
+| 🚧 | K-115 | Select the split-K GEMM by level: with `linear` at `reorder`, a linear whose reference grid is under the adapter profile's thread target takes the split at the largest slice count that keeps the grid at or under the target, each slice at least 256 terms (design A of the recon of 2026-11-27) | Filed 2026-11-28. **Kernel ratios measured** (RTX 3080 Ti, f32 storage): Gemma 4 prefill at 768 rows, k / v 0.24–0.29 of the reference, q 0.73, down 0.76–0.84 at the best slice count; full grids (gate / up) 1.0–1.33, so a split there loses. End to end not measured (inference of the recon: about 8% of a 768-row chunk, 40–50 ms of TTFT at P = 1K on presets that declare `reorder`). Before adopting: the thread target per adapter class from sweep records, with no default-profile target; then a Session A/B of `@karume/runtime/tune` on Gemma 4 E2B / E4B prefill at `i4-fast` and `bf16-fast` (P = 1K and 4K, ABBA, minGain 1.05). **kill**: if that Session A/B does not adopt on any measured device, delete the split-K linear (kernel option, program, private key, tests, kernel check, glossary row) and record the reason here |

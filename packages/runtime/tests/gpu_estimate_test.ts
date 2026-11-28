@@ -43,6 +43,7 @@ import {
   a8LinearAfterDeadRegion,
   a8LinearCase,
   FUSED_WINDOW_CASES,
+  splitKLinearCase,
 } from "./helpers/fused-window-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
@@ -895,7 +896,7 @@ test.skipIf(!GPU_AVAILABLE)(
  * options the window needs, the estimate the same options and the device's limits.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "every rule's fused window and the a8 linear have the workspace of their slot table: the ten built-in rules, two external ones (the staged one also after a dead region, the single-dispatch one also binding an intermediate after one) and the a8 linear with and without a folded producer and after a dead region (real GPU)",
+  "every rule's fused window and the a8 and split-K linears have the workspace of their slot table: the ten built-in rules, two external ones (the staged one also after a dead region, the single-dispatch one also binding an intermediate after one), the a8 linear with and without a folded producer and after a dead region, and the split-K linear under its private key (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -909,6 +910,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => a8LinearCase(false),
         () => a8LinearCase(true),
         a8LinearAfterDeadRegion,
+        splitKLinearCase,
       ]) {
         const fused = make();
         const model = openGraph(fused.graph, fused.tensors);

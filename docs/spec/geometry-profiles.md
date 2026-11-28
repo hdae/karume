@@ -228,7 +228,9 @@ matched without a description: the predicted table of [the three levels](#the-th
   selection, the fusion pass and the recipe builder all read the same choices.
 - The memory estimate has no adapter and reads the default profile's. Of the choices, the fusion pass reads which
   shapes have a parallel row (the linear → `static_quantize` fusion) and a row's packed-activation flag (the packed
-  pairing); no size reads the sequential variants, a row's lanes, its staged flag or its row block. No registered
+  pairing), and under the private key `LINEAR_SPLIT_K` the linear selection reads which shapes have a parallel row
+  (a linear without one may take the split-K GEMM and its partial sums — [numerics](numerics.md)); no size reads the
+  sequential variants, a row's lanes, its staged flag or its row block. No registered
   table removes a parallel row of the default, moves a packed flag or adds a packed row. Each adds rows on shapes the
   default has none for — `nvidia-ampere` 11, `nvidia-blackwell` 20, `apple-metal-3` 13 and `apple-m5` 17 —, so on
   its adapter the Session's fusion plan differs from the estimate's where a linear of one of those shapes feeds a

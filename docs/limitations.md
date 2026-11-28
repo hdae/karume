@@ -712,7 +712,7 @@ applies), and so are the two quantization temporaries of linear i8a8 (ADR
 for the options it is given: a fusion or compute option the Session gets and the estimate does not is
 planned at the runtime default, and the windows it folds are counted unfused. It also has no adapter:
 it plans its fusions with the default geometry profile's GEMV choices, and a Session plans them with
-those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
+those of its adapter's table. The two differ in two places. The linear → `static_quantize` fusion folds
 a linear whose shape has a parallel row, and each embedded table has rows on shapes the default has
 none for: `nvidia-blackwell` (the RTX 5070 Ti's table) on 20 (5 of them bf16 linears of regular
 Gemma 4 E2B and E4B), `apple-metal-3` (the Apple M2's) on 13 (2 bf16; its 11 integer shapes are
@@ -737,7 +737,15 @@ at 1, 4 and 8 rows are the same step for step under both sets of choices, and so
 distributions at their `bf16`, `i4`, `i4-gemvpar` and `i4-fast` presets. That comparison was made with
 `nvidia-blackwell`'s choices; the shapes the other three tables add are bf16 ones, among those, or
 `apple-m5`'s int4 output head, which no `static_quantize` follows (the recipe inserts none around the
-head), so no Gemma 4 linear of theirs feeds a `static_quantize` either. A table
+head), so no Gemma 4 linear of theirs feeds a `static_quantize` either. The second place is the
+private split-K key (`LINEAR_SPLIT_K`): the estimate also resolves each linear's strategy with the
+default choices, and the split-K GEMM's entry comes after the GEMV family's, so a float-stored linear
+of 2 to 8 rows at `reorder` whose shape has a parallel row only in the adapter's table takes the
+split-K GEMM in the estimate and the parallel GEMV in the Session. The estimate then counts the
+split's partial sums (`slices · rows · N · 4` bytes) where the Session allocates none, an overcount:
+bf16 `1536 × 2048` at 4 rows under `nvidia-ampere`'s choices counts 196,608 bytes that the RTX 3080
+Ti's Session does not allocate (a core-lane test states it). No level, preset or profile selects the
+split, so only a Session built with the key is in this position. A table
 injected with `acquireGpu({ geometryProfile })` that names other parallel shapes is in the same
 position, and nothing checks it. The `unaccounted` field
 lists what is not counted, verbatim — ① fusion the options passed do not describe ② the quantization
@@ -751,9 +759,14 @@ model: ④ and ⑤ are outside it, and the checks that compare it with a device 
 MOSS-Image and Anima stage checks, gemma's `fitCapacity`; unchanged on 2026-11-11, when the numbers of
 several stages went down — ADR 0093 addendum).
 The estimate does not repeat every refusal of execution: a linear that execution rejects for its
-weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`,
-`k` over the i8a8 reduction guard) is counted and gets a number, and an external rule's dispatch is
-not checked for its workgroup counts or params. Such a Session fails at its first run.
+weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`)
+is counted and gets a number, so is a linear whose one dispatch execution refuses for its shape (a
+GEMM whose `m · k` or `n · k` passes u32), and an external rule's dispatch is not checked for its
+workgroup counts or params. Such a Session fails at its first run. A linear whose dispatch program
+holds node temporaries (the i8a8 path, and the split-K GEMM under its private key) is counted from
+that program, which the estimate builds as execution does, and only for such a linear: a program
+execution refuses to build fails the estimate with execution's class and message — a per-channel
+i8a8 linear whose `k` passes the reduction guard with `ExecutionError`.
 **The in-node temporaries of attention are counted** — the score S and the row statistics of the
 states form (the row statistics only for plans whose resolved attention form requires them; 0 bytes
 for plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization

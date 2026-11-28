@@ -13,6 +13,7 @@ import {
   checkGemvParallelRows,
   checkGemvSubgroup,
   checkIntegerGemv,
+  checkLinearSplitK,
   type CheckOptions,
   checkPlanesGemv,
   checkRmsNormPrefetch,
@@ -34,6 +35,7 @@ import {
   STATE_KV16_CASES,
   EXPERT_LINEAR_CASES,
   FUSION_TWIN_CASES,
+  LINEAR_SPLITK_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
 
@@ -203,6 +205,18 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkAttentionBand(gpu, options)],
       expectedCases: ATTENTION_BAND_CASES,
+    }),
+  },
+  // The split-K linear (the split of the GEMM skeleton, a private reorder strategy) against the
+  // reference GEMM of the same storage and geometry: one slice word for word, the FP64 and A/B bands
+  // at 2 to 16 slices, exact sums, the NaN row and each slice's term count (ADR 0147 decision 2).
+  {
+    id: "linear-splitk",
+    title: "Split-K linear",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: await checkLinearSplitK(gpu, options),
+      expectedCases: LINEAR_SPLITK_CASES,
     }),
   },
 ];

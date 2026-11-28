@@ -60,6 +60,7 @@ describe("kernelCheckRecord", () => {
       ["fusion-twins", "not-run"],
       ["attention-online-tiled", "not-run"],
       ["attention-band", "not-run"],
+      ["linear-splitk", "not-run"],
     ]);
     expect(record.checks[1]).toEqual({ id: "rms-subgroup32", verdict: "not-run" });
     expect(record.checks[0]).toEqual({
