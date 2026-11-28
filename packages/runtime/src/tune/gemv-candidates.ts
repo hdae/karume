@@ -24,7 +24,8 @@
  * (`executionKnobDefaults`). The packed-activation form is not measured: it reads the codes of the
  * quantizing producer, which the sweep does not run. What the derivation reads each group for
  * ({@link gemvGroupRole}) also decides which reorder candidates a run carries from its M = 1 group on
- * to M = 4 and 8 ({@link gemvCarriedFromM1}), with the derivation's threshold and steadiness bound.
+ * to M = 4 and 8 ({@link gemvCarriedFromM1}), with the derivation's lowest bar and the sweep's
+ * steadiness bound.
  *
  * NOTE: device-free. The device enters only through {@link GemvGates}.
  */
@@ -39,6 +40,7 @@ import {
   isFloatStorage,
   LINEAR_GEMV_PARALLEL_MAX_ROWS,
   LINEAR_GEMV_PARALLEL_ROWS,
+  type LinearGemvChoices,
   type LinearGemvParallelLanes,
   type LinearGemvParallelRows,
   linearGemvParallelRowsFits,
@@ -58,6 +60,7 @@ import type { NumericLevel } from "../runtime/numerics.ts";
 import type { NodePlan } from "../runtime/plan.ts";
 import { executionKnobDefaults } from "../runtime/session-options-check.ts";
 import { GEMV_CASES, type GemvCase } from "./gemv-cases.ts";
+import { GEMV_LOWEST_MARGIN } from "./gemv-rule.ts";
 
 /**
  * The candidate sets: `quick` (M = 1, a small identical grid), `full` (every row count a derivation
@@ -189,22 +192,24 @@ const linearNodePlan = (gemvCase: GemvCase, m: number): NodePlan => {
 };
 
 /**
- * What a Session with linear at `level` runs for the case at `m` rows with the default profile: the
- * selection's choice, with the knobs the level resolves to. Throws when the selection takes neither
- * the GEMV family nor — for a float-stored weight at M ≥ 2, which has no sequential GEMV — the GEMM
- * under f32 compute (a case outside the family's range).
+ * What a Session with linear at `level` runs for the case at `m` rows with the GEMV choices
+ * `linearGemv` (default: the default profile's): the selection's choice, with the knobs the level
+ * resolves to. Throws when the selection takes neither the GEMV family nor — for a float-stored
+ * weight at M ≥ 2, which has no sequential GEMV — the GEMM under f32 compute (a case outside the
+ * family's range).
  */
 export const gemvProfileChoice = (
   gemvCase: GemvCase,
   m: number,
   level: NumericLevel,
+  linearGemv: LinearGemvChoices = PROFILE.linearGemv,
 ): GemvCandidate => {
   const resolution = resolveLinearStrategy({
     plan: linearNodePlan(gemvCase, m),
     weightStorage: gemvCase.storage,
     groupSize: gemvCase.group,
     knobs: linearKnobsOf(executionKnobDefaults({ numerics: { ops: { linear: level } } })),
-    linearGemv: PROFILE.linearGemv,
+    linearGemv,
     packed: undefined,
     prologue: undefined,
   });
@@ -332,9 +337,13 @@ export type GemvM1Group = {
  * there. Its M = 1 row leaves it unadoptable when it
  * 1. has no time (screened by the quick look, or failed), or
  * 2. did not hold its check (outside the band, or a non-finite output), or
- * 3. is less than {@link GEMV_MIN_SPEEDUP} faster than the default's choice at `reorder` in a steady
- *    group (baseline spread at most {@link GEMV_STEADY_SPREAD}). The times of an unsteady group
- *    rule nothing out; without the default's time at M = 1 the gain is unknown.
+ * 3. is less than gemv-rule.ts's `GEMV_LOWEST_MARGIN` (×1.03) faster than the default's choice at
+ *    `reorder` in a steady group (baseline spread at most {@link GEMV_STEADY_SPREAD}). The times of an
+ *    unsteady group rule nothing out; without the default's time at M = 1 the gain is unknown. Each
+ *    rule of the derivation asks at least that much: the rule of one steady record its margin
+ *    (×1.065 by default, ×1.03 the lowest it is meant to be re-decided at) times two gaps of at
+ *    least 1, the rule of two records ×1.10 ({@link GEMV_MIN_SPEEDUP}) over the reference's
+ *    repeated fastest time, which is no slower than this group's.
  *
  * A row-blocked candidate (`choice.parallelRows`) has no row at M = 1: it is the form a parallel
  * row of its lanes takes at M ≥ 2, so it is read by the rows of that lane count — measured when the
@@ -384,7 +393,7 @@ const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
   const steady = first.baselineSpread !== undefined && first.baselineSpread <= GEMV_STEADY_SPREAD;
   if (!steady) return true;
   const reference = first.rows.find((one) => one.candidate === first.profile.reorder)?.perDispatch;
-  return reference === undefined || reference / row.perDispatch >= GEMV_MIN_SPEEDUP;
+  return reference === undefined || reference / row.perDispatch >= GEMV_LOWEST_MARGIN;
 };
 
 /**
@@ -392,7 +401,9 @@ const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
  * on the GEMV sweep records of two devices (2026-11-19, two runs each, the derivation's decisions
  * against those of the full records): carrying the fastest three leaves 0 of 116 decisions different
  * on the RTX 5070 Ti and 9 of 214 on the Apple M2, the fastest one 1 and 23 — a class often holds
- * several rows a few percent apart, and the derivation needs the same row in two records.
+ * several rows a few percent apart, and the derivation needs the same row in two records. NOTE: a
+ * replay under the rule of two records; it has not been run again under the rule of one steady
+ * record, which reads the row in one steady record.
  */
 export const GEMV_EXPLORE_CARRIED_ROWS = 3;
 
@@ -685,7 +696,23 @@ export type GemvMeasurementPlan = {
   readonly candidates: readonly GemvCandidate[];
   /** The candidates the default profile chooses at each level (by name). */
   readonly profile: { readonly exact: string; readonly reorder: string };
+  /**
+   * The candidates the device's table chooses at each level (by name; `profile`'s where the table
+   * holds the default's choices). Each is measured as a reference is: among `candidates` whatever
+   * the set or a narrowing names, unless it is the baseline or a kernel the sweep does not measure.
+   */
+  readonly table: { readonly exact: string; readonly reorder: string };
 };
+
+/**
+ * The names a plan measures whatever the set, its narrowing or the run's M = 1 group says, and the
+ * quick look never screens out: the baseline, the default profile's choice at `reorder` and the
+ * device table's choices at both levels — every reading of the derivation is against one of them.
+ */
+export const gemvPlanReferences = (
+  plan: Pick<GemvMeasurementPlan, "profile" | "table">,
+): ReadonlySet<string> =>
+  new Set([plan.profile.exact, plan.profile.reorder, plan.table.exact, plan.table.reorder]);
 
 /**
  * Narrows what a sweep measures of a set: the row counts and the candidates, by name (absent: all).
@@ -699,27 +726,49 @@ export type GemvSelection = {
 
 /**
  * The measurement plans of a case in a set, one per row count the set measures (and the selection
- * keeps), with the candidates the selection names and the reference at `reorder`.
+ * keeps), with the candidates the selection names, the reference at `reorder` and the choices of the
+ * device's table `table` (default: the default profile's, which adds nothing). A choice of the table
+ * that is no candidate of the set (a sequential variant outside the `quick` set's small grid) is
+ * taken from the `full` set's candidates on the same gates and measured after the set's.
  */
 export const gemvMeasurementPlans = (
   gemvCase: GemvCase,
   set: GemvCandidateSet,
   gates: GemvGates,
   selection: GemvSelection = {},
+  table: LinearGemvChoices = PROFILE.linearGemv,
 ): GemvMeasurementPlan[] =>
   gemvRowCountsIn(gemvCase, set)
     .filter((m) => selection.rows === undefined || selection.rows.includes(m))
     .map((m) => {
       const baseline = gemvBaseline(gemvCase, m);
       const reorder = gemvProfileChoice(gemvCase, m, "reorder").name;
+      const tableChoice = {
+        exact: gemvProfileChoice(gemvCase, m, "exact", table).name,
+        reorder: gemvProfileChoice(gemvCase, m, "reorder", table).name,
+      };
       const named = selection.candidates;
+      const kept = gemvCandidates(gemvCase, m, set, gates).filter(
+        ({ name }) =>
+          named === undefined ||
+          name === reorder ||
+          name === tableChoice.exact ||
+          name === tableChoice.reorder ||
+          named.includes(name),
+      );
+      const added = [...new Set([tableChoice.exact, tableChoice.reorder])].flatMap((name) =>
+        name === baseline.name || kept.some((candidate) => candidate.name === name)
+          ? []
+          : gemvCandidates(gemvCase, m, "full", gates).filter(
+              (candidate) => candidate.name === name,
+            ),
+      );
       return {
         m,
         baseline,
-        candidates: gemvCandidates(gemvCase, m, set, gates).filter(
-          ({ name }) => named === undefined || name === reorder || named.includes(name),
-        ),
+        candidates: [...kept, ...added],
         profile: { exact: baseline.name, reorder },
+        table: tableChoice,
       };
     });
 

@@ -1,6 +1,7 @@
 /**
  * The file a run leaves (`karume-benchmark/1`): the run's workbench records exactly as the
- * workbench writes them (`karume-workbench/1`, entries `gemv-sweep` and `geometry-sweep`), wrapped
+ * workbench writes them (`karume-workbench/1`, entries `gemv-sweep` and `geometry-sweep` — the
+ * geometry sweep once per candidate set, `explore` and `grid`), wrapped
  * with what the page knows of the run — when it ran, whether it ran to the end and why not, the
  * trial the URL asked for and whether the page was hidden. The reader (`unpack.ts`) gives every
  * record back as the file the workbench would have written, at the path it would have written it to.
@@ -248,17 +249,25 @@ export type RecordFile = {
 
 /**
  * Every record of a bundle as a file of the workbench: its path by the workbench's rule, stamped with
- * the moment the record was made (`recordedAt`), and its text by the shared record code.
+ * the moment the record was made (`recordedAt`), and its text by the shared record code. Two records
+ * of one bundle that would take one name (the geometry sweep's two sets ending within one second)
+ * take the workbench's own suffix for a name that is taken, `-1` after the stamp, in run order.
  */
-export const bundleRecordFiles = (bundle: Bundle): RecordFile[] =>
-  bundle.records.map((record) => ({
-    path: recordPath(
-      {
-        entryId: record.entry.id,
-        host: record.environment.host,
-        adapter: record.environment.adapter,
-      },
-      utcStamp(new Date(record.recordedAt)),
-    ),
-    text: recordText(record),
-  }));
+export const bundleRecordFiles = (bundle: Bundle): RecordFile[] => {
+  const taken = new Set<string>();
+  const files: RecordFile[] = [];
+  for (const record of bundle.records) {
+    const target = {
+      entryId: record.entry.id,
+      host: record.environment.host,
+      adapter: record.environment.adapter,
+    };
+    const stamp = utcStamp(new Date(record.recordedAt));
+    let attempt = 0;
+    while (taken.has(recordPath(target, stamp, attempt))) attempt += 1;
+    const path = recordPath(target, stamp, attempt);
+    taken.add(path);
+    files.push({ path, text: recordText(record) });
+  }
+  return files;
+};

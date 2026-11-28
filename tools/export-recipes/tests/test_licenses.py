@@ -24,8 +24,11 @@ from _shared.licenses import (
     CC_BY_SA_4_0_PATH,
     MIT_COPYRIGHT_PLACEHOLDER,
     MIT_LICENSE_PATH,
+    FurtherLicense,
     apache_license_2_0,
     cc_by_sa_4_0,
+    fenced,
+    license_markdown,
     mit_license,
 )
 
@@ -138,3 +141,33 @@ class TestMit:
         reads as valid prose."""
         with pytest.raises(ValueError, match="copyright lines are empty"):
             mit_license(copyright_lines)
+
+
+class TestLicenseMarkdown:
+    """`LICENSE.md`: every text fenced and verbatim, the further ones after a scoped heading."""
+
+    def test_a_text_sits_in_a_text_fence_byte_for_byte(self) -> None:
+        text = apache_license_2_0()
+
+        assert fenced(text) == "```text\n" + text + "```\n"
+
+    def test_a_text_without_a_final_line_break_gets_one_before_the_closing_fence(self) -> None:
+        assert fenced("last line") == "```text\nlast line\n```\n"
+
+    def test_a_text_holding_a_fence_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="cannot be fenced verbatim"):
+            fenced("a\n```\nb\n")
+
+    def test_the_primary_text_opens_the_file_and_each_further_text_follows_a_rule(self) -> None:
+        further = FurtherLicense(
+            license="Example License",
+            scope="the codec",
+            paragraph="It covers the codec.",
+            text="Example text.\n",
+        )
+
+        assert license_markdown("Primary.\n", [further]) == (
+            "```text\nPrimary.\n```\n"
+            "\n---\n\n## Example License — the codec\n\nIt covers the codec.\n\n"
+            "```text\nExample text.\n```\n"
+        )

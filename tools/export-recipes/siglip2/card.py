@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the SigLIP2 distribution — a pure function derived mechanically from
 the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. This module holds only **facts specific to SigLIP2**: attribution (source,
 license, citation) and what this pipeline's card says.
@@ -22,17 +24,24 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .measurements import map_head_diff_text, map_head_norm_text
@@ -59,11 +68,16 @@ SIGLIP2_UPSTREAM: Mapping[str, str] = {
     "so400m": "google/siglip2-so400m-patch14-384",
 }
 
+#: Model name → the commit of the upstream checkpoint the stored weights were taken from (the HF
+#: cache's `refs/main` when each was fetched — the local fetch record, THIRD_PARTY_NOTICES.md). The
+#: card pins every model at it.
+SIGLIP2_REVISIONS: Mapping[str, str] = {
+    "base": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+    "so400m": "e8e487298228002f3d8a82e0cd5c8ea9c567f57f",
+}
+
 SIGLIP2_LICENSE = "apache-2.0"
 
-#: Where the full text lives (the same text as `LICENSE.md` at the distribution repository's root —
-#: Apache 2.0 §4(a)).
-SIGLIP2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The measured range of the difference that replacing the MAP head (step ③ of `siglip2.patch`)
 #: introduces, as body text. It is **not bit-identical**, so the attribution section states it (a
@@ -113,8 +127,8 @@ def _siglip2_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "An image embedding distribution: the **vision tower** of SigLIP2, converted into the",
         "WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
-        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
-        "Deno.",
+        "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         "- One graph, one call: pixels in, `pooler_output` out — the pooled `[1,"
         f" {config['hiddenDim']}]` vector from the attention-pooling (MAP) head.",
@@ -143,12 +157,11 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = SIGLIP2_UPSTREAM[name]
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **{SIGLIP2_LICENSE}** (as of retrieval;"
-            f" [full text]({SIGLIP2_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: {pinned(repo, SIGLIP2_REVISIONS[name])}, licensed"
+            f" **{SIGLIP2_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): conversion"
+        f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} conversion"
         " into the Karume container format, vision tower only.",
         "  No retraining, no fine-tuning and **no quantization** — the weights are the source",
         "  checkpoint's own f32 values. Two rewrites were needed to export the graph: the patch",
@@ -157,6 +170,7 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  q/k/v projections, which is equivalent up to floating-point rounding"
         f" ({SIGLIP2_MAP_HEAD_DIFF}",
         f"  measured on the pooled vector, whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}).",
+        *upstream_cards([hf_link(repo) for repo in _siglip2_metadata(manifest).base_model]),
     ]
     return lines
 

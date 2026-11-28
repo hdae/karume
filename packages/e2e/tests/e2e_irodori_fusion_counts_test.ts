@@ -2,13 +2,18 @@
  * Fusion hit counts of the Irodori distribution graphs (no GPU — `planFusions` on part 0 only; the
  * shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`).
  *
- * MUST: the asset is `models/karume-irodori-v4-small/` (untracked local asset); where it is missing
- * the cases SKIP explicitly with a reason (ADR 0005).
+ * MUST: the assets are `models/karume-irodori-v4-small/` and the distributions built on it —
+ * `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` and `karume-irodori-v4-large`
+ * (untracked local assets); where one is missing its cases SKIP explicitly with a reason (ADR 0005).
  */
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { parseManifest } from "@karume/hub";
+import { IRODORI_SESSION_POLICY } from "../../models/src/irodori/admission.ts";
+import { resolveSessionOptions } from "../../models/src/session/options.ts";
+import { mirrorPresent, mirrorRoot } from "../../models/tests/helpers/mirror.ts";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import {
@@ -17,7 +22,15 @@ import {
   readContainerGraph,
 } from "../../runtime/tests/helpers/container-graph.ts";
 import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
-import { exists, fusionCounts, NONE, planDistributionFusions } from "./helpers/fusion-counts.ts";
+import {
+  boundFusionCounts,
+  exists,
+  fusionCounts,
+  NONE,
+  planDistributionFusions,
+  readDistributionGraph,
+  type SymbolBinding,
+} from "./helpers/fusion-counts.ts";
 
 const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 
@@ -207,3 +220,135 @@ test.skipIf(!IRODORI_AVAILABLE)(
     }
   },
 );
+
+/**
+ * The distributions built on v4-small: v4.1-small, its MeanFlow variant v4.1-small-mf and
+ * v4-Large. Each shares some containers with an earlier mirror through cross-repository
+ * references (v4.1-small: everything but `duration` and the i4 `dit`; v4.1-small-mf: everything
+ * but `dit` and `dit_context`; v4-Large: the two codec graphs), read here from the sibling mirror.
+ */
+const IRODORI_VARIANTS = [
+  "karume-irodori-v4.1-small",
+  "karume-irodori-v4.1-small-mf",
+  "karume-irodori-v4-large",
+] as const;
+
+/** The repo → local mirror map of the variants' cross-repository references (ADR 0038 §7). */
+const IRODORI_MIRRORS: ReadonlyMap<string, URL> = new Map(
+  ["karume-irodori-v4-small", "karume-irodori-v4.1-small"].map((name) => [
+    `hdae/${name}`,
+    mirrorRoot(name),
+  ]),
+);
+
+/** A binding of each graph's symbol (`dit_context` has none; the DiT at two S, as above). */
+const IRODORI_BINDINGS: Readonly<Record<string, readonly SymbolBinding[]>> = {
+  backbone: [{ T: 256 }],
+  text_proj: [{ T: 256 }],
+  caption_proj: [{ T: 512 }],
+  speaker: [{ S: 750 }],
+  duration: [{ T: 256 }],
+  dit: [{ S: 125 }, { S: 750 }],
+  dit_context: [{}],
+  codec_decoder: [{ S: 750 }],
+  codec_encoder: [{ T: 750 }],
+};
+
+/** The hits of the graphs v4-small and the two v4.1 distributions share in form (the cases above). */
+const SMALL_COUNTS: Readonly<Record<string, Partial<FusionCounts>>> = {
+  backbone: { rope: 50 },
+  text_proj: { silu: 1 },
+  caption_proj: { silu: 1 },
+  speaker: { silu: 8, rope: 15 },
+  duration: { silu: 5 },
+  dit: { silu: 17, rope: 23, rowBlockAttention: 12, identityExpand: 24 },
+  dit_context: {},
+  codec_decoder: {},
+  codec_encoder: {},
+};
+
+/**
+ * Per distribution and graph, on every preset (the Session options of the pipeline: `dit` and
+ * `dit_context` take the preset's — `i8-a8`: `linearCompute: "a8"`, which folds nothing here: the
+ * linear prologue folds a `gelu` node and the DiT has none — and every other graph the defaults):
+ *
+ * - **v4.1-small**: v4-small's counts above (its own `duration` and i4 `dit` included).
+ * - **v4.1-small-mf**: the same, but the DiT's silu is **19** — the interval embedding of a
+ *   MeanFlow step (`delta_embed`) adds a second two-SiLU MLP to the head (7 + 12 blocks).
+ * - **v4-Large** (24 DiT blocks, a 26-layer backbone, 14 speaker blocks): backbone rope 52
+ *   (26 × q / k); speaker silu 14 and rope 27 (14 × 2 − the first use of the tables, as on
+ *   v4-small); duration silu 6; the DiT silu 29 (the head's 5 + 24), rope 47 (24 × 2 − 1),
+ *   rowBlockAttention 24 and identityExpand 48 (24 × 2, the pair swallowed by each fused
+ *   attention).
+ */
+const IRODORI_VARIANT_COUNTS: Readonly<
+  Record<(typeof IRODORI_VARIANTS)[number], Readonly<Record<string, Partial<FusionCounts>>>>
+> = {
+  "karume-irodori-v4.1-small": SMALL_COUNTS,
+  "karume-irodori-v4.1-small-mf": { ...SMALL_COUNTS, dit: { ...SMALL_COUNTS.dit, silu: 19 } },
+  "karume-irodori-v4-large": {
+    backbone: { rope: 52 },
+    text_proj: { silu: 1 },
+    caption_proj: { silu: 1 },
+    speaker: { silu: 14, rope: 27 },
+    duration: { silu: 6 },
+    dit: { silu: 29, rope: 47, rowBlockAttention: 24, identityExpand: 48 },
+    dit_context: {},
+    codec_decoder: {},
+    codec_encoder: {},
+  },
+};
+
+for (const name of IRODORI_VARIANTS) {
+  const mirror = mirrorRoot(name);
+  const available = mirrorPresent(mirror);
+  if (!available) {
+    console.warn(
+      `[karume] ${mirror.pathname} (or a mirror it references) has no karume.json, so its Irodori` +
+        " fusion hit counts SKIP (build it with dist.py in tools/export-recipes)",
+    );
+  }
+  test.skipIf(!available)(
+    `the real ${name} graphs plan the same fusions on every preset`,
+    async () => {
+      const text = await readTextFile(new URL("karume.json", mirror));
+      const manifest: ContainerManifest = JSON.parse(text);
+      const parsed = parseManifest(text);
+      const expected = IRODORI_VARIANT_COUNTS[name];
+      for (const [model, entry] of Object.entries(parsed.models)) {
+        assertEquals(
+          Object.keys(entry.weights),
+          Object.keys(expected),
+          `${model}: the graphs planned`,
+        );
+        for (const [preset, quant] of Object.entries(entry.quants)) {
+          const ditOptions = resolveSessionOptions(
+            IRODORI_SESSION_POLICY,
+            quant.session,
+            {},
+            preset,
+          );
+          for (const [component, counts] of Object.entries(expected)) {
+            const storage = quant.weights[component];
+            const graph = await readDistributionGraph(
+              mirror,
+              manifest,
+              model,
+              component,
+              storage,
+              IRODORI_MIRRORS,
+            );
+            const options = component === "dit" || component === "dit_context" ? ditOptions : {};
+            for (const binding of IRODORI_BINDINGS[component]) {
+              assertEquals(
+                boundFusionCounts(graph, binding, options),
+                { ...NONE, ...counts },
+                `${model} ${preset} ${component}/${storage} ${JSON.stringify(binding)}`,
+              );
+            }
+          }
+        }
+      }
+    },
+  );
+}

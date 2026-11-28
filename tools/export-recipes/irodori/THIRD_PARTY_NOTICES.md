@@ -54,6 +54,18 @@ for but has no local record; the reason is given in the field.
 - **Codec implementation** — <https://github.com/facebookresearch/dacvae>, pinned at commit
   `414c20785fc3a28373073ea8ef7a1316eeeaca6e` (`dacvae/export.py`), imported from a local clone
   through `sys.path`; no copy lives here.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `Aratako/Irodori-TTS-v4.1-Small-MF` at `ccc78f5d480b6e51b69b2d5042a14c4da04fea6e` — how it was
+    distilled.
+  - `Aratako/Irodori-TTS-v4-Large` at `2e0c55428ce97268a507f1feeb2478f8d9148e8b` — the Gemma terms
+    and the ethical restrictions (`NOTICE.md` keeps one line on the Gemma terms and refers to the
+    card).
+  - `Aratako/Semantic-DACVAE-Japanese-32dim` at `47376ee24834d7a05a48ebabfe3cde29b3c5e214` — where
+    the codec comes from (the four repositories).
 
 ## Upstream inventory
 

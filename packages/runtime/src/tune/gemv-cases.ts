@@ -90,9 +90,12 @@ const E4B_DRAFTER_I8 = "Gemma 4 E4B drafter, i8";
 /** The drafter shapes the regular E2B and E4B drafters share (their inner width is 256). */
 const E_DRAFTERS_I8 = "Gemma 4 E2B / E4B drafter, i8";
 const G12B_DRAFTER = "Gemma 4 12B q4_0 QAT drafter, i4 g32";
+/** The drafter shapes the 12B and the 26B A4B q4_0 QAT drafters share (their inner width is 1024). */
+const G12B_G26B_DRAFTERS = "Gemma 4 12B / 26B A4B q4_0 QAT drafter, i4 g32";
 /** The drafter shapes the E2B and the E4B q4_0 QAT drafters share (their inner width is 256). */
 const E_DRAFTERS = "Gemma 4 E2B / E4B q4_0 QAT drafter, i4 g32";
 const G26B = "Gemma 4 26B A4B q4_0 QAT, i4 g32";
+const G26B_DRAFTER = "Gemma 4 26B A4B q4_0 QAT drafter, i4 g32";
 
 /**
  * The case table. The integer-storage cases come first, grouped by model in the order of the default
@@ -185,14 +188,15 @@ export const GEMV_CASES: readonly GemvCase[] = [
   shape("i4", 32, 3840, 8192, `${G12B}: o (full)`),
   shape("i4", 32, 3840, 15360, `${G12B}: down`),
   shape("i4", 32, 262144, 3840, `${G12B}: lm_head (tied embedding)`),
-  // The MTP drafter of the q4_0 QAT 12B (inner width 1024).
+  // The MTP drafter of the q4_0 QAT 12B (inner width 1024); the 26B A4B drafter shares its layers'
+  // shapes and its output head.
   shape("i4", 32, 1024, 7680, `${G12B_DRAFTER}: pre_projection`),
-  shape("i4", 32, 4096, 1024, `${G12B_DRAFTER}: q (sliding)`),
-  shape("i4", 32, 1024, 4096, `${G12B_DRAFTER}: o (sliding)`),
-  shape("i4", 32, 8192, 1024, `${G12B_DRAFTER}: gate / up, q (full)`),
-  shape("i4", 32, 1024, 8192, `${G12B_DRAFTER}: down, o (full)`),
+  shape("i4", 32, 4096, 1024, `${G12B_G26B_DRAFTERS}: q (sliding)`),
+  shape("i4", 32, 1024, 4096, `${G12B_G26B_DRAFTERS}: o (sliding)`),
+  shape("i4", 32, 8192, 1024, `${G12B_G26B_DRAFTERS}: gate / up, q (full)`),
+  shape("i4", 32, 1024, 8192, `${G12B_G26B_DRAFTERS}: down, o (full)`),
   shape("i4", 32, 3840, 1024, `${G12B_DRAFTER}: post_projection`),
-  shape("i4", 32, 262144, 1024, `${G12B_DRAFTER}: lm_head`),
+  shape("i4", 32, 262144, 1024, `${G12B_G26B_DRAFTERS}: lm_head`),
   // Gemma 4 26B A4B q4_0 QAT — the dense linears of the mixture of experts.
   shape("i4", 32, 8192, 2816, `${G26B}: q (full)`),
   shape("i4", 32, 4096, 2816, `${G26B}: q (sliding)`),
@@ -204,6 +208,9 @@ export const GEMV_CASES: readonly GemvCase[] = [
   shape("i4", 32, 2816, 8192, `${G26B}: o (full)`),
   shape("i4", 32, 2816, 2112, `${G26B}: down`),
   shape("i4", 32, 262144, 2816, `${G26B}: lm_head (tied embedding)`),
+  // The MTP drafter of the q4_0 QAT 26B A4B: its other shapes are the 12B drafter's above.
+  shape("i4", 32, 1024, 5632, `${G26B_DRAFTER}: pre_projection`),
+  shape("i4", 32, 2816, 1024, `${G26B_DRAFTER}: post_projection`),
   // Gemma 4 E2B (regular) as it ships: every linear in bf16 (ADR 0128). The shapes are the i4 g32
   // cases' and the output head's.
   shape("bf16", undefined, 8960, 1536, `${E2B_BF16}: per_layer_model_projection (35 layers × 256)`),

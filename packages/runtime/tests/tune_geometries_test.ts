@@ -382,8 +382,8 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
 });
 
 describe("the candidate sets", () => {
-  it("are quick+, quick, full and the evaluation set k88 (the evaluation set k85 is retired — its cases are the sweep's own and its grid is the i8a8 linear's full)", () => {
-    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k88"]);
+  it("are quick+, quick, full, the evaluation set k88 and the grid set (the evaluation set k85 is retired — its cases are the sweep's own and its grid is the i8a8 linear's full)", () => {
+    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k88", "grid"]);
     assertEquals(EVALUATION_SETS, ["k88"]);
   });
 });
@@ -402,7 +402,7 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
       const bases = distinct(
         PROFILES.map((profile) => gemmTileGeometry(gemmRowsGeometry(profile, rows))),
       );
-      const candidates = k88GemmCandidates(rows);
+      const candidates = k88GemmCandidates({ m: rows, n: 3072, k: 1024, batch: 1 });
       assertEquals(
         names(candidates),
         bases.flatMap((base) => [
@@ -440,7 +440,7 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
     const tile = gemmName(TILE);
     assert(tile !== defaultTile);
     assertEquals(
-      names(k88GemmCandidates(4096, tables)),
+      names(k88GemmCandidates({ m: 4096, n: 4096, k: 4096, batch: 1 }, tables)),
       [defaultTile, tile].flatMap((name) => [name, `${name}:tb-un`, `${name}:tas-tb-un`]),
     );
     const defaultConv = conv2dCandidate(conv2dProfileGeometry(DEFAULT_GEOMETRY_PROFILE, 64)).name;

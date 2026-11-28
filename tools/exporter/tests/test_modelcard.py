@@ -18,18 +18,26 @@ from typing import Any
 import pytest
 
 from karume.modelcard import (
+    MEASUREMENTS_LEAD,
+    NOTICE_CLOSING,
     UNOFFICIAL_CONVERSION_NOTICE,
     CardMetadata,
+    Measurement,
     Upstream,
     file_ref_key,
     from_pretrained,
     frontmatter,
     introduction,
+    measurements,
+    model_measurements,
     model_sections,
     models,
+    notice_closing,
+    pinned,
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 # ---- optional frontmatter fields ------------------------------------------------
@@ -75,6 +83,62 @@ class TestFrontmatterOptionalFields:
         assert "base_model_relation: quantized" in lines
         assert "license_name: owner-terms" in lines
         assert "license_link: https://example.invalid/terms" in lines
+
+    def test_it_writes_the_keys_in_one_order(self) -> None:
+        """The order every card's front matter has (docs/spec/distribution-cards.md#front-matter),
+        whichever optional fields are set."""
+        lines = frontmatter(
+            self._metadata(
+                base_model_relation="quantized",
+                license_name="owner-terms",
+                license_link="https://example.invalid/terms",
+            )
+        )
+        keys = [line.split(":")[0] for line in lines if line != "---" and not line.startswith(" ")]
+
+        assert lines[0] == lines[-1] == "---"
+        assert keys == [
+            "library_name",
+            "pipeline_tag",
+            "base_model",
+            "base_model_relation",
+            "license",
+            "license_name",
+            "license_link",
+            "tags",
+        ]
+
+
+class TestPinned:
+    """An upstream named with the full commit its bytes were taken from."""
+
+    def test_it_links_the_repository_and_names_the_full_commit(self) -> None:
+        assert pinned("owner/name", "0123456789abcdef0123456789abcdef01234567") == (
+            "[owner/name](https://huggingface.co/owner/name) at commit"
+            " `0123456789abcdef0123456789abcdef01234567`"
+        )
+
+    @pytest.mark.parametrize("revision", ["main", "0123456789abcdef", "A" * 40, "0" * 41])
+    def test_a_branch_or_a_shortened_commit_is_refused(self, revision: str) -> None:
+        with pytest.raises(ValueError, match="not a full commit"):
+            pinned("owner/name", revision)
+
+
+class TestUpstreamCards:
+    """The bullet that sends the reader to the card of every redistributed upstream."""
+
+    def test_it_names_one_card_in_the_singular_and_several_in_the_plural(self) -> None:
+        (one,) = upstream_cards(["[a/x](https://huggingface.co/a/x)"])
+        (two,) = upstream_cards(["[a/x](u)", "[b/y](v)", "[c/z](w)"])
+
+        assert "is documented on the upstream model card, and" in one
+        assert one.endswith("read [a/x](https://huggingface.co/a/x) before using it.")
+        assert "is documented on the upstream model cards, and" in two
+        assert two.endswith("read [a/x](u), [b/y](v) and [c/z](w) before using it.")
+
+    def test_a_card_without_an_upstream_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="no upstream card"):
+            upstream_cards([])
 
 
 class TestIntroduction:
@@ -415,7 +479,7 @@ class TestQuantsNotes:
         assert any(
             line.startswith(
                 "Some components are fetched from"
-                " [`hdae/karume-source`](https://huggingface.co/hdae/karume-source)"
+                " [hdae/karume-source](https://huggingface.co/hdae/karume-source)"
                 " at commit `9999999999999999…`"
             )
             for line in lines
@@ -439,6 +503,76 @@ class TestQuantsNotes:
 
         assert any(line.startswith("Weights ship as Karume container files") for line in lines)
         assert not any(line.startswith("A component stored as") for line in lines)
+
+
+class TestNoticeClosing:
+    """docs/spec/distribution-cards.md#noticemd — every notice closes with one wording."""
+
+    def test_it_says_no_training_was_done_and_what_is_not_distributed(self) -> None:
+        assert notice_closing() == (
+            "No retraining and no fine-tuning were performed. The original checkpoint is not"
+            " distributed here."
+        )
+        assert notice_closing("The original checkpoints are").startswith(NOTICE_CLOSING + " ")
+        assert notice_closing("The original checkpoints are").endswith(
+            " The original checkpoints are not distributed here."
+        )
+
+
+class TestMeasurementNotes:
+    """docs/spec/distribution-cards.md#presets-and-the-quant-tables — what a preset measured is a
+    note under the quant table naming the device and the date, never part of its description."""
+
+    _MEASURED = (
+        Measurement("w8", "one pass took 9.9 s against 21.8 s for `f16`", "GPU A", "2026-10-04"),
+        Measurement(
+            "f16", "a listening check heard no difference", "GPU B", "2026-08-12", "model Y"
+        ),
+    )
+
+    def test_they_follow_the_table_notes_as_a_list_naming_device_and_date(self) -> None:
+        lines = quants(_manifest()["models"]["zeta"], measured=self._MEASURED)
+        start = lines.index(MEASUREMENTS_LEAD)
+
+        assert lines[start - 1] == "" and lines[start + 1] == ""
+        assert lines[start + 2 :] == [
+            "- `w8` — one pass took 9.9 s against 21.8 s for `f16` (GPU A, 2026-10-04).",
+            "- `f16` — a listening check heard no difference (on model Y; GPU B, 2026-08-12).",
+        ]
+        assert lines[start - 2].startswith("A path under `shared/`")  # the last table note
+
+    def test_a_model_without_measurements_gets_no_lead(self) -> None:
+        assert MEASUREMENTS_LEAD not in quants(_manifest()["models"]["zeta"])
+        assert measurements(_manifest()["models"]["zeta"], ()) == []
+
+    def test_a_measurement_of_a_preset_the_model_does_not_ship_is_left_out(self) -> None:
+        """`alpha` ships `f16` only: the `w8` note would describe a preset it cannot ship."""
+        assert measurements(_manifest()["models"]["alpha"], self._MEASURED) == [
+            "",
+            MEASUREMENTS_LEAD,
+            "",
+            "- `f16` — a listening check heard no difference (on model Y; GPU B, 2026-08-12).",
+        ]
+        assert measurements(_manifest()["models"]["alpha"], self._MEASURED[:1]) == []
+
+    def test_a_one_model_manifest_gets_its_models_measurements(self) -> None:
+        manifest = _manifest()
+        del manifest["models"]["alpha"]
+
+        assert model_measurements(manifest, {"zeta": self._MEASURED}) == self._MEASURED
+        assert model_measurements(manifest, {"alpha": self._MEASURED}) == ()
+
+    def test_measurements_of_one_model_of_several_fail(self) -> None:
+        """The same notes under every model's table would state `zeta`'s measurements of
+        `alpha`."""
+        with pytest.raises(ValueError, match="manifest of several models"):
+            model_measurements(_manifest(), {"zeta": self._MEASURED})
+        assert model_measurements(_manifest(), {"omega": self._MEASURED}) == ()
+
+    @pytest.mark.parametrize(("device", "date"), [("", "2026-10-04"), ("GPU A", "October 2026")])
+    def test_a_measurement_without_a_device_or_a_date_fails(self, device: str, date: str) -> None:
+        with pytest.raises(ValueError, match="no device or no YYYY-MM-DD date"):
+            measurements(_manifest()["models"]["zeta"], (Measurement("w8", "fast", device, date),))
 
 
 class TestQuantsSection:
@@ -683,7 +817,7 @@ class TestTheSameNameFromAnotherOrigin:
 
         assert f"| {total} ({total} shared) |" in _row(lines, "f16")
         notes = [line for line in lines if line.startswith("Some components are fetched from")]
-        assert [line.split("`")[1] for line in notes] == repos
+        assert [line.split("[")[1].split("]")[0] for line in notes] == repos
 
     def test_an_own_file_and_a_borrowed_file_with_the_same_path_are_both_counted(self) -> None:
         """The own repository's `alpha/front.krm` (512 B) and the borrowed source's path of the same

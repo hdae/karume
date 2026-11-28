@@ -88,7 +88,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from embeddinggemma2 import sources as upstream_sources
 from embeddinggemma2.tokenizer import TOKENIZER_SERIES, TokenizerScriptError, assert_prompts
@@ -104,11 +104,12 @@ from karume.dist import (
     complete_quant_weights,
     ir_graph,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     EMBEDDINGGEMMA2_LICENSE,
     EMBEDDINGGEMMA2_MODEL_ROLE,
-    EMBEDDINGGEMMA2_USE_POLICY_SENTENCE,
+    EMBEDDINGGEMMA2_UPSTREAM,
     render_embeddinggemma2_model_card,
 )
 
@@ -1329,15 +1330,16 @@ def embeddinggemma2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
 #: On the day a tower or a storage is added or dropped ({@link EMBEDDINGGEMMA2_GRAPH_SERIES}), this
 #: text changes with it.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 EMBEDDINGGEMMA2_NOTICE_MARKDOWN = (
-    """# NOTICE
+    f"""# NOTICE
 
 This repository redistributes a modified form of `google/embeddinggemma-2`, which is licensed under
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
 
 - The **text tower, the vision tower and the audio tower** (each tower with its projection into
   the text tower's width) were extracted.
-- The text tower, together with the mean pooling and the L2 normalisation of the
+- The text tower, together with the mean pooling and the L2 normalization of the
   SentenceTransformer pipeline, was re-expressed as one graph in the Karume container format (a
   `.krm` part sequence whose first part carries the graph and model descriptors). The
   sliding-window attention mask was replaced by a band declared on the attention of each sliding
@@ -1368,13 +1370,14 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - The tokenizer ships as a compiled form of the checkpoint's `tokenizer.json`, and the prompt
   prefixes of its `config_sentence_transformers.json` are carried in `karume.json`.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+{notice_closing()}
 """
     + (
-        # The use policy: upstream's sentence quoted from the one value the card quotes too.
-        '\nThe upstream model card states, under "Ethics & Safety":\n\n'
-        f"> {EMBEDDINGGEMMA2_USE_POLICY_SENTENCE}\n\n"
-        "The policy is upstream's document: read it at that link. It is not reproduced here.\n"
+        # The use policy: one line stating it and referring to the upstream card, which the card
+        # quotes (the maintainer's ruling of 2026-11-27).
+        "\nDeployments of the model are subject to the use policy the upstream model card of"
+        f" `{EMBEDDINGGEMMA2_UPSTREAM['text']}` states (`README.md` quotes it); the policy is"
+        " upstream's document and is not reproduced here.\n"
     )
 )
 
@@ -1388,7 +1391,7 @@ def embeddinggemma2_root_files() -> dict[str, str]:
     only — the Gemma 4 distribution's form.
     """
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": EMBEDDINGGEMMA2_NOTICE_MARKDOWN,
     }
 

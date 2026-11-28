@@ -256,8 +256,8 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 98 },
   {
     path: "tools/export-recipes/sbv2/card.py",
-    why: "the Japanese TTS demo sentence of the generated card",
-    maxLines: 1,
+    why: "the Japanese TTS demo sentence of the generated card and the upstream card's license sentence it quotes verbatim with the heading it stands under",
+    maxLines: 3,
   },
   { path: "tools/export-recipes/sbv2/demo.py", why: TTS_INPUT, maxLines: 1 },
   { path: "tools/export-recipes/sbv2/README.md", why: TTS_INPUT, maxLines: 2 },

@@ -961,7 +961,9 @@ class TestTheMirror:
         dist.main(self._argv(roots))
 
         out_dir = roots / "local-dist" / NAME
-        assert (out_dir / LICENSE_FILENAME).read_text(encoding="utf-8") == apache_license_2_0()
+        assert (out_dir / LICENSE_FILENAME).read_text(encoding="utf-8") == (
+            "```text\n" + apache_license_2_0() + "```\n"
+        )
         notice = (out_dir / NOTICE_FILENAME).read_text(encoding="utf-8")
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "declares the license `apache-2.0`" in notice

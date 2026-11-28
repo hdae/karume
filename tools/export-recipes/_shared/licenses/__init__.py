@@ -1,6 +1,8 @@
 """License texts bundled at the root of a distribution repository (the `LICENSE.md` of
 `karume.dist.Pipeline.root_files`).
 
+SPEC: docs/spec/distribution-cards.md#licensemd
+
 ADR [0092](../../../../docs/decisions/0092-distribution-repos-and-sources.md) decision 7 —
 Apache-2.0 puts "the full text + the §4(b) modification notice", MIT "the full text + the
 copyright lines" and CC BY-SA 4.0 "the legal code + the §3(a) attribution and modification
@@ -11,12 +13,15 @@ The texts do not differ per family, so each family's recipe does not keep its ow
 MUST: **the texts are never reformatted**. The contents of the `.txt` files are passed byte for
 byte — the moment they are reformatted, rewrapped or given Markdown headings they are no longer
 "a copy of this license". Only MIT's copyright lines differ per rights holder, so that one block
-alone is inserted ({@link mit_license}). The text outside the insertion point is not touched.
+alone is inserted ({@link mit_license}). The text outside the insertion point is not touched. In
+`LICENSE.md` every text sits verbatim inside a fence ({@link license_markdown}), so that Markdown
+does not read its indentation, numbering and underlines as formatting.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 #: Where the texts live (relative to `Path(__file__)` — independent of the cwd and of where
@@ -69,3 +74,48 @@ def mit_license(copyright_lines: Sequence[str]) -> str:
         )
     template = MIT_LICENSE_PATH.read_text(encoding="utf-8")
     return template.replace(MIT_COPYRIGHT_PLACEHOLDER, "\n".join(copyright_lines))
+
+
+#: The fence a license text sits in (a plain-text code block: Markdown would otherwise read a
+#: text's indentation, numbering and underlines as lists, code and headings).
+FENCE_OPEN = "```text\n"
+FENCE_CLOSE = "```\n"
+
+
+def fenced(text: str) -> str:
+    """A license text inside a ```` ```text ```` fence, byte for byte.
+
+    A text without a final line break gets one, so that the closing fence stands on its own line
+    (the line break ends the text's last line; it is not part of the text).
+
+    MUST: a text holding three backticks in a row fails — the fence would close inside it, and the
+    rest of the license would be read as Markdown.
+    """
+    if "```" in text:
+        raise ValueError("the license text holds ``` — it cannot be fenced verbatim")
+    return FENCE_OPEN + text + ("" if text.endswith("\n") else "\n") + FENCE_CLOSE
+
+
+@dataclass(frozen=True)
+class FurtherLicense:
+    """A license text of `LICENSE.md` after the primary one: what it is and which components it
+    covers (its heading `## <license> — <scope>`), a paragraph saying so, and the text."""
+
+    license: str
+    scope: str
+    paragraph: str
+    text: str
+
+
+# SPEC: docs/spec/distribution-cards.md#licensemd
+def license_markdown(primary: str, further: Sequence[FurtherLicense] = ()) -> str:
+    """`LICENSE.md`: the primary license text fenced from the first byte, then each further text
+    after a `---` line, its heading and its paragraph, fenced the same way.
+
+    MUST: no text is touched ({@link fenced}) — the module doc's MUST.
+    """
+    return fenced(primary) + "".join(
+        f"\n---\n\n## {section.license} — {section.scope}\n\n{section.paragraph}\n\n"
+        + fenced(section.text)
+        for section in further
+    )

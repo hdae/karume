@@ -66,9 +66,9 @@ The workbench is private (not published) and is not part of the lanes: its tests
 
 | Entry | What it runs | Inputs |
 | --- | --- | --- |
-| `kernel-check` | The fourteen kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on the host's backend. Parameter `checks`: which of the fourteen (default: all). `pass` needs every check run and passed; a check the device cannot run is not available, never a pass. | Synthetic (built in memory); no distribution |
-| `gemv-sweep` | `runGemvSweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-gemv-sweep/4` record (`data`, [below](#the-gemv-sweeps-record)) through the per-case loop the `geometry-sweep` entry uses. Per case (a shape of the case table: the default profile's GEMV rows, the other integer-storage linears a decode token or a draft step of the Gemma 4 distributions runs at one row — the int2 and int4 output heads, the MTP drafters —, or a linear of regular Gemma 4 E2B / E4B in bf16) and row count: the baseline — what a Session at the level `exact` runs with the default profile —, the identical class (the sequential M = 1 variants, the row-block heights) and the reorder class (the parallel GEMV at each lane count, plain, staged and, where the device has the features, subgroup, at 1 to 8 rows, and at 4 and 8 rows its row-blocked form `staged-l<lanes>r<rows>` at each height of at most that many rows the kernel exists at), measured together; a bf16 case is measured at 1, 4 and 8 rows, its baseline past one row is the GEMM (`gemm`: such a weight has no sequential GEMV there, and no row-block height or subgroup candidate): a warm start on the baseline, a quick look at every kernel, the kernels that go on calibrated and checked, then rounds that each time every one of them once in a rotating order; at 4 and 8 rows only the reorder candidates that the case's M = 1 group of the same run leaves adoptable are measured, the others are skipped rows ([below](#how-the-gemv-sweep-times-a-row-count)). Parameters: `candidateSet` (`quick` — M = 1, the identical class on the 3 × 3 grid of columns and read-ahead around the baseline, the reorder class in full —, `full` — M = 1, 4 and 8, every row count a derivation rule reads, and the whole grid —, `row-blocks` — M = 16 and 64, the row-block heights, which no rule reads yet — or `explore` — the row counts of `full` in a short run: the [sentinels](#the-explore-set) of the case table with every candidate, first, and every other case with the candidates they predict), `cases` (none: every case of the table — the 91 integer-storage shapes, which are those of the default profile's rows and the output heads and MTP drafter shapes that have none, and the 25 bf16 linears of regular Gemma 4 E2B / E4B, 116 in all), `rows` (row counts of the set; none: all of them), `candidates` (names; none: every candidate — the references are measured either way; refused with `explore`, which chooses its own), `quickLookMargin` (empty: the set's default, ×1.25 and ×1.10 for `explore`; 0 times every kernel in full; a value between 0 and 1, or one that is no number, is refused), `rounds` (5), `idleSeconds` (empty: the set's default, 10 and 0 for `explore`; an integer of at least 0 otherwise). With `explore` the per-case loop measures the sentinels among the planned cases first (each part in the table's order) and hands every call the sentinels the calls before it measured, so the merged record is what one `runGemvSweep` call over the same cases returns. The summary has a totals line (with the kernels the quick look screened out, and the kernels skipped as not adoptable from M = 1 when there are any — `not carried from M = 1` for `explore`), then per case and row count the baseline's time and the spread of its rounds, the fastest identical and the fastest reorder candidate with their speed against the baseline, the default profile's choice at each level with its share of the fastest of its class's speed, for an `explore` group narrowed to its prediction how many candidates it was narrowed to (`· narrowed to 9 predicted candidates`), and the kernels screened and skipped (`· 12 screened · 640 skipped (not adoptable from M = 1)`). The verdict, checked in this order: `fail` when a row of a finished case is in the identical class and its words differ from the baseline's, or in the reorder class and outside the band; `incomplete` when a device loss or an error stopped the run; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. A screened or skipped row has no check, so it is never wrong. Timing is not part of the verdict. | Synthetic; no distribution |
-| `geometry-sweep` | `runGeometrySweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-geometry-sweep/4` record (`data`) — what `deriveGeometryProfile` reads. Each case after a quick look: only the default geometry and the candidates whose quick time is within the margin of the default's are timed in full; the others are screened rows. Parameters: `candidateSet` (`quick`, `quick+`, `full`, `explore` — `full`'s candidates on its cases in fewer rows: the cases class by class, a candidate that an earlier case of its class screened out, failed, found not identical or timed slower than the default skipped in the later ones ([below](#the-geometry-sweeps-explore-set)) —, or the evaluation set `k88` — whose summary compares every candidate with the table's geometry: run it at margin 0; in `quick+` and `full` a linear / matmul / bmm case measures every tile also with each skeleton form and a conv2d case also with the counter decode and with both, [geometry-profiles.md](geometry-profiles.md#the-skeleton-form-and-the-counter-decode)), `ops`, `cases` (none: every case of the chosen op families in the chosen set; a case that is not in the chosen set is an error), `geometries` (comma-separated names of candidate geometries; none: every candidate of the set; the default geometry is measured either way, and a name that is not a candidate of every chosen case makes the run fail before the GPU is touched; refused with `explore`, which chooses what it measures), `quickLookMargin` (×1.25; 0 times every geometry in full; a value between 0 and 1 is refused), `rounds`, `idleSeconds`. With `explore` the per-case loop measures the planned cases class by class and hands every call the rows the calls before it measured, so the merged record is what one `runGeometrySweep` call over the same cases returns; the summary's totals line then counts the rows skipped as dropped for their class (`· 412 skipped as dropped for their class`). A cancelled run, a lost device and a sweep that threw keep the cases that finished. The verdict, checked in this order: `fail` when a row of a finished case (one that neither a cancel nor a device loss cut short) is not identical to its case's default; `incomplete` when a device loss or an error stopped the run short of its plan; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. Every candidate that is timed is expected to match its default (f32 by the K reduction order, i8a8 by exact integer arithmetic); a screened or skipped candidate has no output checked; timing is not part of the verdict. | Synthetic; no distribution |
+| `kernel-check` | The fifteen kernel identity checks of `@karume/kernel-checks` — the cases and criteria of the runtime's node GPU tests — on the host's backend. Parameter `checks`: which of the fifteen (default: all). `pass` needs every check run and passed; a check the device cannot run is not available, never a pass. | Synthetic (built in memory); no distribution |
+| `gemv-sweep` | `runGemvSweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-gemv-sweep/4` record (`data`, [below](#the-gemv-sweeps-record)) through the per-case loop the `geometry-sweep` entry uses. Per case (a shape of the case table: the default profile's GEMV rows, the other integer-storage linears a decode token or a draft step of the Gemma 4 distributions runs at one row — the int2 and int4 output heads, the MTP drafters —, or a linear of regular Gemma 4 E2B / E4B in bf16) and row count: the baseline — what a Session at the level `exact` runs with the default profile —, the identical class (the sequential M = 1 variants, the row-block heights) and the reorder class (the parallel GEMV at each lane count, plain, staged and, where the device has the features, subgroup, at 1 to 8 rows, and at 4 and 8 rows its row-blocked form `staged-l<lanes>r<rows>` at each height of at most that many rows the kernel exists at), measured together; a bf16 case is measured at 1, 4 and 8 rows, its baseline past one row is the GEMM (`gemm`: such a weight has no sequential GEMV there, and no row-block height or subgroup candidate): a warm start on the baseline, a quick look at every kernel, the kernels that go on calibrated and checked, then rounds that each time every one of them once in a rotating order; at 4 and 8 rows only the reorder candidates that the case's M = 1 group of the same run leaves adoptable are measured, the others are skipped rows ([below](#how-the-gemv-sweep-times-a-row-count)). Parameters: `candidateSet` (`quick` — M = 1, the identical class on the 3 × 3 grid of columns and read-ahead around the baseline, the reorder class in full —, `full` — M = 1, 4 and 8, every row count a derivation rule reads, and the whole grid —, `row-blocks` — M = 16 and 64, the row-block heights, which no rule reads yet — or `explore` — the row counts of `full` in a short run: the [sentinels](#the-explore-set) of the case table with every candidate, first, and every other case with the candidates they predict), `cases` (none: every case of the table — the 93 integer-storage shapes, which are those of the default profile's rows and the output heads and MTP drafter shapes that have none, and the 25 bf16 linears of regular Gemma 4 E2B / E4B, 118 in all), `rows` (row counts of the set; none: all of them), `candidates` (names; none: every candidate — the references are measured either way; refused with `explore`, which chooses its own), `quickLookMargin` (empty: the set's default, ×1.25 and ×1.10 for `explore`; 0 times every kernel in full; a value between 0 and 1, or one that is no number, is refused), `rounds` (5), `idleSeconds` (empty: the set's default, 10 and 0 for `explore`; an integer of at least 0 otherwise). With `explore` the per-case loop measures the sentinels among the planned cases first (each part in the table's order) and hands every call the sentinels the calls before it measured, so the merged record is what one `runGemvSweep` call over the same cases returns. The summary has a totals line (with the kernels the quick look screened out, and the kernels skipped as not adoptable from M = 1 when there are any — `not carried from M = 1` for `explore`), then per case and row count the baseline's time and the spread of its rounds, the fastest identical and the fastest reorder candidate with their speed against the baseline, the default profile's choice at each level with its share of the fastest of its class's speed, for an `explore` group narrowed to its prediction how many candidates it was narrowed to (`· narrowed to 9 predicted candidates`), and the kernels screened and skipped (`· 12 screened · 640 skipped (not adoptable from M = 1)`). The verdict, checked in this order: `fail` when a row of a finished case is in the identical class and its words differ from the baseline's, or in the reorder class and outside the band; `incomplete` when a device loss or an error stopped the run; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. A screened or skipped row has no check, so it is never wrong. Timing is not part of the verdict. | Synthetic; no distribution |
+| `geometry-sweep` | `runGeometrySweep` of `@karume/runtime/tune`, one call per planned case with idle time before every case but the first, the per-case records merged into one `karume-geometry-sweep/4` record (`data`) — what `deriveGeometryProfile` reads. Each case after a quick look: only the default geometry and the candidates whose quick time is within the margin of the default's are timed in full; the others are screened rows. Parameters: `candidateSet` (`quick`, `quick+`, `full`, `explore` — `full`'s candidates on its cases in fewer rows: the cases class by class, a candidate that an earlier case of its class screened out, failed, found not identical or timed slower than the default skipped in the later ones ([below](#the-geometry-sweeps-explore-set)) —, the evaluation set `k88` — whose summary compares every candidate with the table's geometry: run it at margin 0 —, or `grid` — the grid-fill rule's ladder on cases of its own in interleaved rounds ([below](#the-geometry-sweeps-grid-set)); in `quick+` and `full` a linear / matmul / bmm case measures every tile also with each skeleton form and a conv2d case also with the counter decode and with both, [geometry-profiles.md](geometry-profiles.md#the-skeleton-form-and-the-counter-decode)), `ops`, `cases` (none: every case of the chosen op families in the chosen set; a case that is not in the chosen set is an error), `geometries` (comma-separated names of candidate geometries; none: every candidate of the set; the default geometry is measured either way, and a name that is not a candidate of every chosen case makes the run fail before the GPU is touched; refused with `explore`, which chooses what it measures), `quickLookMargin` (×1.25; 0 times every geometry in full; a value between 0 and 1 is refused; not read by `grid`, which takes no quick look), `rounds`, `idleSeconds`. With `explore` the per-case loop measures the planned cases class by class and hands every call the rows the calls before it measured, so the merged record is what one `runGeometrySweep` call over the same cases returns; the summary's totals line then counts the rows skipped as dropped for their class (`· 412 skipped as dropped for their class`). A cancelled run, a lost device and a sweep that threw keep the cases that finished. The verdict, checked in this order: `fail` when a row of a finished case (one that neither a cancel nor a device loss cut short) is not identical to its case's default; `incomplete` when a device loss or an error stopped the run short of its plan; `fail` when a row of a finished case errored; none when the run was cancelled; otherwise `pass`. Every candidate that is timed is expected to match its default (f32 by the K reduction order, i8a8 by exact integer arithmetic); a screened or skipped candidate has no output checked; timing is not part of the verdict. | Synthetic; no distribution |
 | `attention-bench` | `runAttentionRouteBench` of `@karume/runtime/tune` at Wan2.2 TI2V-5B's attention shapes: the two int8 attention routes with the kernels and row blocks production uses on the host, optionally the shared quantization and the tiled-key-axis candidate. `data` is the runtime's `karume-attention-bench/2` record. Parameters: `shapes`, `rowsPerDispatch` (0: production's split), `rounds`, `quantization`, `onlineTiled`. Without `timestamp-query` it times with the wall clock. | Synthetic; no distribution |
 | `session-ab` (local) | The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) of one component forward with and without the fusion rule its pipeline passes: the MOSS-Image DiT (`models/ew_chain`), the Wan2.2 VAE next chunk or the anima VAE tile (`models/vae_rms_silu`), on seeded feeds, every visit opening its own Session. Parameters: `target`, `preset` (empty: the manifest's default), `rounds`, `minGain`, `source`. The verdict is identity — every arm's outputs equal the base's first run, word for word; the judgement (adopt, reject, inconclusive) is in the summary and the data. | The mount of the target |
 | `gemma4-session-ab` (local) | The same A/B on a Gemma 4 decode: one greedy generation of a fixed prompt per run, the rule arm with the candidate rule `candidate/gelu_mul`; an optional count probe before the A/B. Parameters: `model` (`<mount>/<model>`; empty: the default model of the first Gemma 4 mount whose mirror is present), `preset`, `tokens`, `rounds`, `minGain`, `openPerVisit`, `probeCounts`, `f16Kv`, `subgroups` (whether the device is acquired with the subgroup features when it has them), the expert cache of the 26B model (`expertCacheSlots`, `hostTier`, `depth`), `source`. The verdict is token identity. | A Gemma 4 mount |
@@ -123,7 +123,8 @@ the drafter (`fromPretrained` with `speculative`, at the drafter's own draft cou
 `speculative: "always"` — speculation in every cycle, without the self-tuning gate, so the arm times speculative
 decode itself. An arm without the switch builds no drafter and passes no `speculative`: it decodes one run per token.
 So two arms of one model and preset, with and without the switch, compare speculative decode with plain decode; under
-greedy decoding their outputs are the same tokens.
+greedy decoding their outputs are the same tokens. The bench builds no expert cache: an arm of Gemma 4 26B A4B, with
+the switch or without it, has every expert resident, the only way the pipeline takes `speculative` there.
 
 The switch is refused, naming the arm, before any GPU work: on a model whose manifest entry declares no `drafter`
 weights (it ships none), on the mobile QAT line (`gemma4QatMobile.Pipeline` takes no drafter), with `ple-gpu` and with
@@ -181,11 +182,15 @@ The kernels of one case at one row count are measured together, on the case's bu
 largest row count, with the host's f64 oracle). A case's row counts are measured in ascending order, so at 4 and 8
 rows — where the derivation only checks that a candidate M = 1 would adopt is not slower than the default's choice at
 `reorder` — the run has the case's M = 1 group, when it measured it. There a reorder candidate that is not a reference
-(the baseline or the default's choice at `reorder` of that row count) is measured only if its row of the same name at
-M = 1 has a time (not screened by the quick look, not failed), held its check (inside the band, no non-finite output),
-and — when the M = 1 group was steady (its baseline spread at most 1.25) and the default's choice at `reorder` has a
-time there — is at least ×1.10 faster than that choice (gemv-candidates.ts's `gemvCarriedFromM1`, with the
-derivation's threshold and the sweep's own steadiness bound, which the derivation does not read). Any other is skipped: it takes none of the steps below, and its row has
+(the baseline, the default's choice at `reorder` or a choice of the device's table, of that row count — below) is
+measured only if its row of the same name at M = 1 has a time (not screened by the quick look, not failed), held its
+check (inside the band, no non-finite output), and — when the M = 1 group was steady (its baseline spread at most
+1.25) and the default's choice at `reorder` has a time there — is at least ×1.03 faster than that choice
+(gemv-candidates.ts's `gemvCarriedFromM1`, with the sweep's own steadiness bound, which the derivation does not read).
+×1.03 is the lowest margin the derivation's output is meant to be re-decided at
+([geometry-profiles.md](geometry-profiles.md#deriving-the-gemv-choices)), and every bar of the derivation is at least
+that (a margin times two gaps of at least 1, or ×1.10 over a time no slower than this group's), so a record carries
+every candidate a re-decision at ×1.03 could adopt. Any other is skipped: it takes none of the steps below, and its row has
 its kernel's fingerprint, its pipeline key and workgroups and `skipped: true`. Nothing is skipped in a run that has
 no M = 1 group of the case to read (narrowed by `rows`, stopped before it, or its baseline was not timed there), for a
 candidate without a row at M = 1, for the identical class or at any other row count.
@@ -210,9 +215,15 @@ out itself keeps nothing; without the run's M = 1 group of the case the margin a
 margin.
 
 1. Every kernel's pipeline is made first, so that no compile leaves the device idle between the steps below. The
-   kernels are the baseline, the default profile's choice at `reorder` and the candidates of the set (those the
-   parameter `candidates` names, when given; for an `explore` case that is no sentinel, at M = 1, those its
-   sentinels predict).
+   kernels are the baseline, the default profile's choice at `reorder`, the choices of the device's table at `exact`
+   and at `reorder` and the candidates of the set (those the parameter `candidates` names, when given; for an
+   `explore` case that is no sentinel, at M = 1, those its sentinels predict). The device's table is the profile the
+   device resolves to (the embedded table of its adapter, the default profile where none matches, an injected table
+   when the device was acquired with one): what a derivation for that adapter keeps unless a challenger beats it in
+   the same group ([geometry-profiles.md](geometry-profiles.md#deriving-the-gemv-choices)). Its choices are
+   measured whatever the set, a narrowing or the case's M = 1 group says — a sequential variant outside the `quick`
+   set's small grid is taken from the `full` set's —, unless one is the baseline or a kernel the sweep does not
+   measure (packed activations). Where the table holds the default's choices they add nothing.
 2. A warm start on the baseline: passes of its dispatch, each kept near the 80 ms target, back to back until three
    consecutive passes agree within 2 % (largest ÷ smallest), spending at least 1 s and at most 5 s of load, and at
    most 125 passes (a dispatch too short to fill a pass at the bound of 16,384 dispatches would otherwise take far
@@ -229,7 +240,8 @@ margin.
    clock or the bound of 16,384 dispatches — with timestamps, a candidate's first pass from a zeroed output; the
    last pass ÷ its dispatches is its quick time. Right after its probe, while the buffer holds its output, the
    kernel's check is read by the comparison of step 4 (the baseline's holds; a candidate's does not when the
-   baseline has no output). The references (the baseline and the default's choice at `reorder`) go on, and so does
+   baseline has no output). The references (the baseline, the default's choice at `reorder` and the device table's
+   choices) go on, and so does
    every kernel whose quick time is at most the margin times its class's bar: the fastest quick time of the class
    among the kernels whose check held at M = 1, where the derivation picks a winner, the subgroup form left out (a
    Session option no table row holds) — a kernel that can never be adopted does not screen out one that can; the
@@ -243,7 +255,8 @@ margin.
    screened rows. The rule and its evidence are measurement.ts's `QUICK_LOOK_MARGIN` (×1.25) and, for the `explore`
    set, `EXPLORE_QUICK_LOOK_MARGIN` (×1.10: replayed on the GEMV sweep records of 2026-11-18/19, it left the
    derivation's decisions unchanged on the RTX 5070 Ti, 0 of 116, and changed 2 of 214 on the Apple M2, each within
-   2 %; ×1.05 lost adoptions on both).
+   2 %; ×1.05 lost adoptions on both — a replay under the rule of two records, not run again under the rule of one
+   steady record).
 4. Every kernel that goes on, the baseline first, runs once from a zeroed output and is calibrated from its quick
    look's probe (from a probe of its own with the quick look off): the dispatches per pass that fill the target, from
    the wall clock of passes of growing length. A calibration whose pass comes out below a quarter of the target (with
@@ -252,7 +265,16 @@ margin.
    the buffer still holds it.
 5. The rounds: each times every kernel that went on once, the baseline included, in plan order rotated so that round
    r starts at kernel ⌊r · kernels / rounds⌋ (at kernel r mod kernels when there are more rounds than kernels). A
-   kernel's time is the min of its rounds ÷ its dispatches per pass.
+   kernel's time is the min of its rounds ÷ its dispatches per pass. Then every reference whose rounds all finished
+   is timed once more, in plan order — one pass at its dispatches per pass —, and its row holds that pass ÷ its
+   dispatches as `retimedPerDispatch`: a reference whose time moved within the group shows there, which the rule of
+   one steady record reads. The rounds hold the rounds alone. A re-timing pass that reads no time is marked so, not
+   left without a value: `retimingUnread: "clamped"` when its timestamp difference was negative (clamped to 0),
+   `"zero"` when it was 0, `"lost"` when the device was lost after the reference's rounds and before that pass. The
+   rule of one steady record then reads no evidence against that reference — a
+   re-timing that read nothing tested nothing —, while a reference row with neither field is one of a record written
+   before the re-timing, read untested as before. One that fails makes the reference's row a failure row, as a
+   failed round does.
 
 A kernel that fails a step gets a failure row and leaves the steps after it; a lost device makes every kernel without
 all its rounds a failure row (a screened kernel is no failure: its row has its quick time; a skipped kernel keeps its
@@ -262,11 +284,13 @@ whichever was measured last. How far the state moved is the spread of the baseli
 are final when its rounds are done; a cancel during a row count leaves no row of it.
 
 Besides one status line per step, `runGemvSweep` reports a `plan` event when a case starts — its place among the
-planned cases and, per row count, the kernels planned (the baseline, the default's choice at `reorder` and the
-candidates; at 4 and 8 rows those M = 1 does not carry are skipped, not prepared) — and a `step` event per unit of a
+planned cases and, per row count, the kernels planned (the baseline, the default's choice at `reorder`, the device
+table's choices and the candidates; at 4 and 8 rows those M = 1 does not carry are skipped, not prepared) — and a
+`step` event per unit of a
 row count: its phase (`prepare`, `warm-start`, `quick-look`, `calibrate`, `rounds`), how many units are done and how
 many there are — a kernel's pipeline, the warm start (one unit), a kernel's quick look and check, a kernel's
-calibration and check, a kernel's pass in a round (rounds × the kernels timed). A phase reports 0 of its total when it
+calibration and check, a kernel's pass in a round (rounds × the kernels timed, and one pass more for each reference
+timed: its re-timing). A phase reports 0 of its total when it
 begins and each unit when it ends, a unit that failed included; the quick look reports nothing at a margin of 0.
 
 ### The explore set
@@ -279,16 +303,21 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
   words of their weight rows and between their column counts, plus 100 for another storage and 0.5 for another i4
   group length (`gemvCaseDistance`). The count is where the decisions of replayed records stopped improving fast
   (2026-11-19: 6, 8, 12 and 16 sentinels left 18, 14, 8 and 5 of 214 decisions different on the Apple M2 and 1, 0, 0
-  and 0 of 116 on the RTX 5070 Ti).
+  and 0 of 116 on the RTX 5070 Ti — a replay under the rule of two records and the prediction at ×1.10 of that time,
+  not run again under the rule of one steady record).
 - The planned sentinels are measured first, with every candidate, then the other cases; each part in the table's
   order.
 - Every other case measures at M = 1, besides the references, the fastest sequential variant and the fastest plain
   or staged parallel row — each among the rows whose check held, timed (a finite time), not screened, skipped or
   failed — of the nearest sentinel of the case's storage that has one (the first of equally near ones; the i4 group
   length may differ), each with every other kernel of its kind at that sentinel, among the same rows, that the
-  derivation could adopt there: at least ×1.10 faster than its class's reference there — the default's choice at
-  `exact` (the baseline) for a sequential variant, at `reorder` for a plain or staged row; none when that reference
-  has no time there —, and their neighbours on the candidate grid: one step of the columns per workgroup or of the
+  derivation could adopt there at the lowest margin its output may be re-decided under: at least ×1.03
+  (`GEMV_LOWEST_MARGIN`) faster than its class's reference there — the default's choice at `exact` (the baseline)
+  for a sequential variant, at `reorder` for a plain or staged row; none when that reference has no time there —,
+  so that one steady explore record holds the rows a re-decision at ×1.03 reads as well as those of ×1.065 (the
+  prediction was ×1.10, the rule of two records' threshold, until 2026-11-28; on the devices' records the change
+  adds 0.6 to 7.5 % to the other cases' timed passes and 0.5 to 6.1 % to the whole set's), and their neighbours on
+  the candidate grid: one step of the columns per workgroup or of the
   words read ahead; one step of the lanes, and the other of plain and staged at the same lanes
   (`gemvExploreSelection`). A sentinel of another storage
   does not predict: the storage decides the decode. A name
@@ -310,19 +339,28 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
 of `karume-gemv-sweep/3`, whose rows had no skipped state, of `/2`, whose fingerprints were one per record, or of `/1`,
 whose rounds were taken kernel after kernel. A record of the `explore` set is a `/4` record with two optional fields
 no reader needs (`settings.sentinels`, `narrowedTo` of a summary) and rows only of the kernels it measured; a reader
-that predates the set refuses it by its candidate set:
+that predates the set refuses it by its candidate set.
+
+The rule of one steady record (2026-11-28) added four optional fields, and the format stays `/4`: each is additive,
+and a reader written before them misreads nothing — it ignores them, and the rows of the device table's choices are
+rows like any other. The derivation reads a record without them as it did (no re-timing to test, the class from the
+summaries, no session), so the records taken before them — the evidence base — stay readable as they are. The fields
+are the record's `session` and `steadiness`, a summary's `table` and a reference row's `retimedPerDispatch` (or
+`retimingUnread`):
 
 | Field | Content |
 | --- | --- |
 | `format`, `startedAt`, `date`, `aborted` | The format; when the sweep started and when its record was assembled; whether a cancel cut it short |
 | `userAgent`, `adapter` | The host and the four adapter fields |
+| `session` | The page load or process the sweep ran in: a random id made once when the page loaded (the workbench's shell, the benchmark page) or the process started (the Node command), and the time from that start to the sweep's (`elapsedMs`), so two records of one session are told from two sessions. The entry's merged record holds the id its per-case records share (records of two sessions are not merged) and the first one's time. Absent when the caller gave no session (`runGemvSweep` called directly) and in a record written before the field |
+| `steadiness` | The record's class by its own summaries ([geometry-profiles.md](geometry-profiles.md#deriving-the-gemv-choices)): `class` (`steady`, `unsteady` or `unclassified` — fewer than 20 groups with a baseline spread), `groups` (the groups with a spread), `unsteadyGroups` (those beyond ×1.05) and `share` (their share). The entry's merged record states the class of all its summaries, not a case's. A statement for the reader of one run, which the benchmark page shows; the derivation computes the class from the summaries itself |
 | `geometryProfile` | The id of the geometry profile the sweep's device resolved to (the adapter's embedded table, or `default`). The GEMM that is the baseline of a float-stored case past one row was built with its tile geometry; no other kernel of the sweep depends on it. The entry merges per-case records of one profile only |
 | `gates` | The device facts that decided which candidates exist: the subgroup features (`subgroups`, `subgroup-size-control`, the WGSL `subgroup_id`; the subgroup form needs all three) and `maxComputeWorkgroupsPerDimension` (a candidate whose grid exceeds it, such as 32 lanes on a 262144-column head, is not measured) |
 | `gpuTiming` | Whether `timestamp-query` was enabled, the unit (`ns` or `wall`), whether every round looks quantized |
 | `settings` | The candidate set, for `explore` its sentinels (`sentinels`: the ids of the whole table's twelve), the cases (in measuring order: the table's, the sentinels first for `explore` — one `runGemvSweep` call and the workbench's merged record alike), row counts and candidates when narrowed, the rounds, the quick look's margin (`quickLookMargin`, 0 when it was off) and the timing protocol's constants (`targetPassMs`, `maxReps`, the warm start's `warmStart` — `minNs`, `loadedMinNs` (the least load of a row count that follows one of the same case that timed a kernel; absent from a record written before it existed, which no reader needs), `maxNs`, `maxPasses`, `stablePasses`, `tolerance` —, `recalibrateBelow` and `calibrationAttempts`), the band (`tolerance`, the band of `linear`) and `notMeasured` (the packed-activation form: it reads the quantizing producer's codes, which the sweep does not run) |
 | `cases` | The planned cases: id, storage (`i2`, `i4`, `i8` or `bf16`), i4 group, `n`, `k`, the row counts measured, where the shape comes from (the model and the role of the linear) and the case's `fingerprint` (of its id, storage, group, `n` and `k`, built as the geometry sweep's fingerprints: FNV-1a 64 of canonical JSON) |
-| `summaries` | Per case and row count: the default profile's choice at `exact` and at `reorder` (by candidate name), the wall time, how steady the device was over the rounds: the baseline's largest round ÷ its smallest (`baselineSpread`; rounds clamped to 0 left out, 1 with one round), absent when the baseline's row failed, how many kernels the quick look screened out (`screened`) and how many were skipped as not carried by the run's M = 1 group of the case (`skipped`, 0 at M = 1); for `explore`, at M = 1 of a case that is no sentinel and was narrowed, the candidate names it was narrowed to (`narrowedTo`, the references measured besides) |
-| `rows` | One per planned kernel: the case, the row count `m`, the candidate's name, its class, whether it is the baseline, its choice (the member of the GEMV family, lanes, column and row form; for the GEMM that is the baseline of a float-stored case past one row, `gemm-f32` with the storage and whether it writes `vec4` outputs), the fingerprint of its kernel (`kernel`: its program's pipeline keys, params, WGSL tokens and workgroups), the pipeline keys, the workgroups, its quick time (`quickPerDispatch`, with the quick look on) — and for a kernel the quick look screened out `screened: true` and nothing more —; for a kernel skipped at 4 or 8 rows (above) `skipped: true` after the workgroups and nothing more (no quick time, never the baseline); the time per dispatch (`perDispatch`) with its `rounds` (in round order, so round i of two rows was taken in the same round) and wall-clock rounds, the speed against the baseline; for the identical class whether every word equals the baseline's and how many differ; for the reorder class — and for the baseline at a row count with reorder rows — the largest absolute error against the host's f64 oracle, its use of the band, whether it is inside and the non-finite outputs; an `error` when it failed |
+| `summaries` | Per case and row count: the default profile's choice at `exact` and at `reorder` (by candidate name), the device table's (`table`, the same names where the table holds the default's choices), the wall time, how steady the device was over the rounds: the baseline's largest round ÷ its smallest (`baselineSpread`; rounds clamped to 0 left out, 1 with one round), absent when the baseline's row failed, how many kernels the quick look screened out (`screened`) and how many were skipped as not carried by the run's M = 1 group of the case (`skipped`, 0 at M = 1); for `explore`, at M = 1 of a case that is no sentinel and was narrowed, the candidate names it was narrowed to (`narrowedTo`, the references measured besides) |
+| `rows` | One per planned kernel: the case, the row count `m`, the candidate's name, its class, whether it is the baseline, its choice (the member of the GEMV family, lanes, column and row form; for the GEMM that is the baseline of a float-stored case past one row, `gemm-f32` with the storage and whether it writes `vec4` outputs), the fingerprint of its kernel (`kernel`: its program's pipeline keys, params, WGSL tokens and workgroups), the pipeline keys, the workgroups, its quick time (`quickPerDispatch`, with the quick look on) — and for a kernel the quick look screened out `screened: true` and nothing more —; for a kernel skipped at 4 or 8 rows (above) `skipped: true` after the workgroups and nothing more (no quick time, never the baseline); the time per dispatch (`perDispatch`) with its `rounds` (in round order, so round i of two rows was taken in the same round) and wall-clock rounds, for a reference whose rounds all finished its re-timed pass ÷ its dispatches (`retimedPerDispatch`) or, where that pass read no time, `retimingUnread` (`clamped`, `zero` or `lost`), the speed against the baseline; for the identical class whether every word equals the baseline's and how many differ; for the reorder class — and for the baseline at a row count with reorder rows — the largest absolute error against the host's f64 oracle, its use of the band, whether it is inside and the non-finite outputs; an `error` when it failed |
 | `deviceLost` | The loss that ended the sweep, or `null` |
 
 ### The geometry sweep's explore set
@@ -373,6 +411,34 @@ it skips — and a `step` event per unit of the case: its phase (`prepare`, `war
 geometry's quick look, a geometry's timing (its calibration, idle runs and rounds), the default's re-measurement (one
 unit). A phase reports 0 of its total when it begins and each unit when it ends, a unit that failed included; the quick
 look reports nothing at a margin of 0. The callbacks run between timed passes and must stay cheap.
+
+### The geometry sweep's grid set
+
+The `grid` set of `geometry-sweep` times the ladder of the grid-fill rule of the GEMM
+([geometry-profiles.md](geometry-profiles.md#the-grid-fill-rule-of-the-gemm)) on cases of its own.
+
+- **Cases**: 33 linears and bmms of the default presets (`geometrySweepCases("grid")`), copied from the census of the
+  recon of 2026-11-28 and spanning the dispatch grid's workgroup count on every step of the ladder: 128 × 128's grid
+  from 4 to 1,728 workgroups, full grids, under-filled ones, padded ones and short-K bmm. The linears store their
+  weights as the presets do — f32 (10), f16 (2), bf16 (8) and int4 at group 32 (6, every one past 64 rows, so they run
+  the GEMM) — under f32 compute; the 7 bmms are f32. Each case carries its node count in a unit of the census
+  (`censusCount`, `censusGroup`).
+- **Candidates**: the ladder's five tiles (128 × 128, 64 × 64 / 256, 64 × 32 / 128, 32 × 32 / 128, 16 × 16 / 64),
+  without the skeleton forms. A case's default geometry (the default profile's bucket tile) is one of them.
+- **Timing**: every arm's pipeline, a warm start on the default, every arm once from a zeroed output (its words for
+  the comparison with the default), the reps of the default's calibration for every arm, idle runs of every arm at
+  those reps, then `rounds` rounds (5 unless given). A round times every arm twice in a palindrome — the arms in order
+  then reversed, the whole reversed on every other round — and a row's round is the mean of its two passes. No quick
+  look (the margin is 0 and another is refused) and no re-measurement of the default: the interleaving stands for the
+  drift ratio, so a case has no `defaultRepeat`.
+- **The record** is a `karume-geometry-sweep/4` record with `settings.candidateSet: "grid"`. The rows of a case share
+  their `reps` and their `rounds` are aligned: round i of every row was timed in the same palindrome. `perDispatch`
+  and `speedupVsDefault` mean what they mean in every set (the least round ÷ reps, its ratio to the default's). Its
+  case-set version and default fingerprint are the grid table's own, and the tile geometry's derivation
+  (`deriveGeometryProfile`) refuses the record.
+- **The summary** gives, per case, each tile against the default as the median over the rounds of the default's round
+  ÷ the tile's (above ×1 the tile is faster), the spread of those ratios and a tile that did not write the default's
+  words. The verdict is every set's.
 
 ### The anima-single-file record
 
@@ -572,7 +638,9 @@ every shared module. It uses the GPU, so it runs under the GPU lock (`flock /tmp
   example) is not a command-line error: `run` throws, the record's outcome is `error`, the record is written, and the
   exit code is 1.
 
-Progress goes to stderr; the outcome, the summary and the record's path go to stdout.
+Progress goes to stderr; the outcome, the summary and the record's path go to stdout. The command makes one sweep
+session when it starts (the steps of a batch share it), as the shell makes one when its page loads; a GEMV sweep's
+record names it ([the record](#the-gemv-sweeps-record)).
 
 ## Batches
 

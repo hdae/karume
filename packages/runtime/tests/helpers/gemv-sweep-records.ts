@@ -67,6 +67,12 @@ export type GemvRecordOptions = {
    * id, and the GEMM rows of a float-stored case carry the fingerprint of the GEMM it builds.
    */
   readonly profile?: GeometryProfile;
+  /**
+   * Rows as a steady device's sweep writes them for the rule of one steady record: `reps` dispatches
+   * a pass (default 100, a pass far below 20 ms) and rounds whose gap — second-smallest ÷ smallest —
+   * is `gap` (default: today's two rounds about 1 % apart). A row's own `fields` still lay over it.
+   */
+  readonly passes?: { readonly reps: number; readonly gap?: number };
 };
 
 /** A row without its measurement: its identity and launch fields, and its time as `quick`. */
@@ -133,9 +139,20 @@ export const gemvRecord = (
           kernel: gemvKernelId(gemvCase, plan.m, candidate.choice, (one, m, choice) =>
             gemvProgram(one, m, choice, profile),
           ),
-          reps: 100,
-          // Off Chrome's 100 µs step, so the record does not look quantized
-          rounds: [perDispatch * 100 + 1, perDispatch * 101 + 1],
+          ...(options.passes === undefined
+            ? {
+                reps: 100,
+                // Off Chrome's 100 µs step, so the record does not look quantized
+                rounds: [perDispatch * 100 + 1, perDispatch * 101 + 1],
+              }
+            : {
+                reps: options.passes.reps,
+                // The smallest round is the time's pass (off the 100 µs step), the second the gap above it
+                rounds: [
+                  perDispatch * options.passes.reps + 1,
+                  (perDispatch * options.passes.reps + 1) * (options.passes.gap ?? 1.002),
+                ],
+              }),
           perDispatch,
           ...(isBaseline ? {} : { speedupVsBaseline: baseline / perDispatch }),
           ...(candidate.class === "identical"

@@ -8,9 +8,10 @@
  * builder turns a program into dispatches with one generic routine (`emitLinearProgram` in
  * recipe-builders/linear.ts): it fetches each pipeline from the Session's cache, writes the uniforms,
  * binds the weight's scale buffer where its storage has one and checks the grids against the device
- * limit. Anything that needs to know a strategy's WGSL or temporaries before running — the memory
- * estimate, the verification cache — can read the same value (ADR 0152 decisions 6 and 8); neither
- * reads it yet.
+ * limit. Anything that needs to know a strategy's WGSL or temporaries before running can read the
+ * same value (ADR 0152 decisions 6 and 8): the memory estimate counts a linear's node temporaries and
+ * their dispatches from it (`linearNodeProgram` in estimate.ts); the verification cache does not read
+ * it yet.
  *
  * NOTE: device-free (kernel modules only). Not part of the public surface of mod.ts (ADR 0008).
  */
@@ -18,8 +19,8 @@
 import type { GemmCompute } from "../kernels/gemm.ts";
 import { gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
 import {
-  gemmRowsGeometry,
   type GeometryProfile,
+  gemmShapeGeometry,
   i8a8LinearGeometry,
 } from "../kernels/geometry-profile.ts";
 import {
@@ -74,14 +75,12 @@ import {
 } from "../kernels/linear-i8a8.ts";
 import {
   LINEAR_SPLITK_COMBINE_GROUP,
-  LINEAR_SPLITK_TILE,
   linearSplitKCombineKey,
   linearSplitKCombineWgsl,
+  linearSplitKGemmKey,
+  linearSplitKGemmWgsl,
   linearSplitKParams,
-  linearSplitKPartialKey,
   linearSplitKPartialsBytes,
-  linearSplitKPartialWgsl,
-  type LinearSplitKSlices,
 } from "../kernels/linear-splitk.ts";
 import {
   quantizeRowsGeometry,
@@ -93,7 +92,7 @@ import {
 } from "../kernels/quantize-rows.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import type { LinearPrologue } from "./fusion-rule.ts";
-import type { LinearChoice, LinearGemvChoice } from "./linear-strategies.ts";
+import type { LinearChoice, LinearGemvChoice, LinearSplitKChoice } from "./linear-strategies.ts";
 import { ExecutionError } from "./plan.ts";
 import type { I8a8Dot } from "./session-types.ts";
 
@@ -145,6 +144,9 @@ export type LinearProgram = {
   /**
    * The byte length of each temporary. A temporary lives from the first dispatch to the last:
    * allocated in this order before the first, released in the reverse order after the last.
+   * MUST: the first dispatch that binds a temporary writes it, and every later one that binds it only
+   * reads it — the memory estimate derives each dispatch's reads and writes from that order (the
+   * WGSL declares the first binding `read_write` and the later ones `read`).
    */
   readonly temps: readonly number[];
   readonly dispatches: readonly ProgramDispatch[];
@@ -228,7 +230,15 @@ export const linearProgramFor = (
     case "planes-gemv":
       return linearPlanesGemvProgram(`linear gemv planes ${operands}`, choice.variant, m, n, k);
     case "gemm-splitk":
-      return linearSplitKProgram(`linear split-K ${operands}`, m, n, k, choice.slices);
+      return linearSplitKProgram(
+        `linear split-K ${operands}`,
+        choice,
+        m,
+        n,
+        k,
+        facts.weightStorage,
+        facts.geometryProfile,
+      );
     case "gemm-f32":
     case "gemm-f16":
       return linearGemmProgram(
@@ -255,6 +265,35 @@ export const linearProgramFor = (
       );
   }
 };
+
+/**
+ * Whether each strategy's program holds temporaries ({@link LinearProgram.temps}): the i8a8 path's
+ * quantized activations and scales, the split-K GEMM's partial sums. Every other strategy is one
+ * dispatch into the output. Keyed by every id, so a new strategy is classified where it is added
+ * (tests/linear_program_test.ts holds each entry against the program it builds).
+ */
+const HOLDS_TEMPS: Readonly<Record<LinearChoice["id"], boolean>> = {
+  "integer-gemv": false,
+  i8a8: true,
+  "planes-gemv": false,
+  "gemm-splitk": true,
+  "gemm-f32": false,
+  "gemm-f16": false,
+  "gemv-m1": false,
+  "gemv-rows": false,
+  "gemv-parallel": false,
+  "gemv-parallel-packed": false,
+  "gemv-parallel-staged": false,
+  "gemv-parallel-subgroup32": false,
+};
+
+/**
+ * Whether the program {@link linearProgramFor} builds for `choice` holds temporaries. The memory
+ * estimate reads a program only for its temporaries, so it builds one only where this holds: it
+ * never builds a single-dispatch strategy's program, and so repeats none of that program's refusals
+ * (a plain linear whose `m · k` passes u32 gets a number).
+ */
+export const linearChoiceHoldsTemps = (choice: LinearChoice): boolean => HOLDS_TEMPS[choice.id];
 
 /**
  * The producer SRQ's scale of a strategy that reads packed activations. The selection takes such a
@@ -285,10 +324,10 @@ const linearGemmProgram = (
   groupSize: number | undefined,
   profile: GeometryProfile,
 ): LinearProgram => {
-  // MUST: the tile geometry is the bucket of the flattened row count m (the adapter's profile —
-  // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to key, WGSL and
-  // dispatch.
-  const geometry = gemmRowsGeometry(profile, m);
+  // MUST: the tile geometry is the adapter's profile's for the flattened shape — the bucket of the
+  // row count m, or the grid-fill rule where the table carries one (src/kernels/geometry-profile.ts).
+  // Pass the geometry taken once **unchanged** to key, WGSL and dispatch.
+  const geometry = gemmShapeGeometry(profile, { m, n, k, batch: 1 });
   return {
     where,
     temps: [],
@@ -641,35 +680,46 @@ const linearI8a8Program = (
 };
 
 /**
- * The split-K linear (src/kernels/linear-splitk.ts): the partial sums of every K slice into one
- * temporary, then their sum and the bias into the output.
+ * The split-K linear (src/kernels/linear-splitk.ts): the split of the linear GEMM writes the partial
+ * sums of every K slice into one temporary, then the combine adds them and the bias into the output.
+ *
+ * MUST: the partial takes the tile geometry the reference GEMM takes for the linear's shape (the
+ * adapter's profile — the same lookup as {@link linearGemmProgram}, so with one slice it is that
+ * GEMM's kernel over every K tile), passed once unchanged to key, WGSL and grid; the
+ * slice is the grid's z axis, one workgroup per (tile, slice), so a grid past the device limit on any
+ * axis fails loudly (the emitter's `tiledWorkgroups`).
  */
 const linearSplitKProgram = (
   where: string,
+  { slices, v4, groupSize }: LinearSplitKChoice,
   m: number,
   n: number,
   k: number,
-  slices: LinearSplitKSlices,
+  weightStorage: WeightStorage,
+  profile: GeometryProfile,
 ): LinearProgram => {
   const params = linearSplitKParams(m, n, k, slices);
+  const geometry = gemmShapeGeometry(profile, { m, n, k, batch: 1 });
   return {
     where,
     temps: [linearSplitKPartialsBytes(m, n, slices)],
     dispatches: [
       {
-        key: linearSplitKPartialKey(),
-        wgsl: linearSplitKPartialWgsl,
+        key: linearSplitKGemmKey(weightStorage, v4, slices, m, groupSize, geometry),
+        wgsl: () => linearSplitKGemmWgsl(weightStorage, v4, slices, m, groupSize, geometry),
         params,
+        // The linear GEMM's numbering without the bias: the partials take the output's binding.
         bindings: [
           { binding: 1, operand: "x" },
           { binding: 2, operand: "weight" },
-          { binding: 3, operand: { temp: 0 } },
+          { binding: 4, operand: { temp: 0 } },
+          { binding: LINEAR_SCALE_BINDING, operand: "weightScale" },
         ],
         grid: {
           kind: "tiled",
           axes: [
-            { items: n, tile: LINEAR_SPLITK_TILE },
-            { items: m, tile: LINEAR_SPLITK_TILE },
+            { items: n, tile: gemmTileN(geometry) },
+            { items: m, tile: gemmTileM(geometry) },
             { items: slices, tile: 1 },
           ],
         },

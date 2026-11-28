@@ -138,7 +138,8 @@ export const QUICK_LOOK_MARGIN = 1.25;
  *
  * Source: replayed on the GEMV sweep records of 2026-11-18/19, a margin of ×1.10 left the
  * derivation's decisions unchanged on the RTX 5070 Ti (0 of 116) and changed 2 of 214 on the Apple
- * M2, each within 2 %; ×1.05 lost adoptions on both.
+ * M2, each within 2 %; ×1.05 lost adoptions on both. NOTE: a replay under the rule of two records;
+ * it has not been run again under the rule of one steady record.
  */
 export const EXPLORE_QUICK_LOOK_MARGIN = 1.1;
 

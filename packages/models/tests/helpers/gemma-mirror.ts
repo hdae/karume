@@ -109,8 +109,8 @@ export const gemma4MirrorAssets = async (
 };
 
 /**
- * The q4_0 QAT line's distribution mirror (E2B, E4B and 12B with their QAT drafters — the only
- * distribution that ships 12B).
+ * The q4_0 QAT line's distribution mirror (E2B, E4B, 12B and 26B A4B with their QAT drafters — the
+ * only distribution that ships 12B).
  */
 export const GEMMA4_QAT_MIRROR: URL = mirrorRoot("karume-gemma4-qat");
 

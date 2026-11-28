@@ -4,9 +4,10 @@
  * and its plan (the case list `runGeometrySweep` is called with, one case per call). Pure, so the
  * case selection is tested without a GPU.
  *
- * The case list depends on the candidate set: the evaluation set `k88` sweeps a table of its own
- * (`geometrySweepCases("k88")`). Every function that takes `cases` takes the list of the chosen set.
- * The `explore` set sweeps `full`'s table class by class.
+ * The case list depends on the candidate set: the evaluation set `k88` and the `grid` set sweep
+ * tables of their own (`geometrySweepCases("k88")`, `geometrySweepCases("grid")`). Every function
+ * that takes `cases` takes the list of the chosen set. The `explore` set sweeps `full`'s table class
+ * by class.
  */
 
 import {
@@ -32,7 +33,8 @@ import { K88_SET } from "./k88.ts";
 
 /**
  * The candidate sets in growing size (the runtime's default is `quick+`; `explore` measures `full`'s
- * candidates in fewer rows), then the evaluation set `k88`.
+ * candidates in fewer rows), then the evaluation set `k88` and the `grid` set (the grid-fill rule's
+ * ladder in interleaved rounds).
  */
 export const CANDIDATE_SETS = [
   "quick",
@@ -40,7 +42,11 @@ export const CANDIDATE_SETS = [
   "explore",
   "full",
   "k88",
+  "grid",
 ] as const satisfies readonly GeometrySweepCandidateSet[];
+
+/** The candidate set that times the grid-fill rule's ladder (no quick look). */
+export const GRID_SET = "grid" satisfies GeometrySweepCandidateSet;
 
 /** What a run is asked for: the entry's typed parameters. */
 export type SweepSelection = {
@@ -87,14 +93,21 @@ export const sweepOps = (cases: readonly GeometrySweepCase[]): GeometrySweepOp[]
   ...new Set(cases.map(({ op }) => op)),
 ];
 
-/** The sweep's own case table, then the evaluation set's (the two tables a run can choose from). */
-const BOTH_TABLES = [...geometrySweepCases(), ...geometrySweepCases(K88_SET)];
+/**
+ * The sweep's own case table, then the evaluation set's and the grid set's (the tables a run can
+ * choose from).
+ */
+const ALL_TABLES = [
+  ...geometrySweepCases(),
+  ...geometrySweepCases(K88_SET),
+  ...geometrySweepCases(GRID_SET),
+];
 
-/** Every op family of the two case tables, in table order (the options of `ops`). */
-export const SWEEP_OPS: readonly GeometrySweepOp[] = sweepOps(BOTH_TABLES);
+/** Every op family of the case tables, in table order (the options of `ops`). */
+export const SWEEP_OPS: readonly GeometrySweepOp[] = sweepOps(ALL_TABLES);
 
-/** Every case id of the two case tables, in table order (the options of `cases`). */
-export const SWEEP_CASE_IDS: readonly string[] = [...new Set(BOTH_TABLES.map(({ id }) => id))];
+/** Every case id of the case tables, in table order (the options of `cases`). */
+export const SWEEP_CASE_IDS: readonly string[] = [...new Set(ALL_TABLES.map(({ id }) => id))];
 
 /** The entry id of the geometry sweep: the workbench's entry and the record's `entry.id`. */
 export const GEOMETRY_SWEEP_ENTRY_ID = "geometry-sweep";
@@ -135,7 +148,8 @@ export const GEOMETRY_SWEEP_PARAMETERS: readonly Parameter[] = [
   {
     kind: "number",
     name: "quickLookMargin",
-    label: "Quick look margin (0: off — every geometry is timed in full)",
+    label:
+      "Quick look margin (0: off — every geometry is timed in full; not read by the grid set, which times every ladder tile)",
     min: 0,
     max: 1000,
     default: QUICK_LOOK_MARGIN,
@@ -162,7 +176,9 @@ export const GEOMETRY_SWEEP_PARAMETERS: readonly Parameter[] = [
  * The selection the entry's parameters (`candidateSet`, `ops`, `cases`, `geometries` — names
  * separated by commas —, `quickLookMargin`, `rounds`, `idleSeconds`) give. A margin between 0 and
  * 1 is a {@link ParameterError}: it would screen out every geometry but the default. So are
- * geometries named for the `explore` set, which chooses what it measures of `full` itself.
+ * geometries named for the `explore` set, which chooses what it measures of `full` itself. The
+ * `grid` set takes no quick look: its selection's margin is 0 whatever the parameter says (the
+ * parameter's label says so), as the runtime refuses any other.
  */
 export const sweepSelection = (values: ParameterValues): SweepSelection => {
   const quickLookMargin = numberValue(values, "quickLookMargin");
@@ -188,7 +204,7 @@ export const sweepSelection = (values: ParameterValues): SweepSelection => {
     ops: choicesValue(values, "ops", SWEEP_OPS),
     cases: choicesValue(values, "cases", SWEEP_CASE_IDS),
     geometries,
-    quickLookMargin,
+    quickLookMargin: candidateSet === GRID_SET ? 0 : quickLookMargin,
     rounds: integerValue(values, "rounds"),
     idleSeconds: integerValue(values, "idleSeconds"),
   };

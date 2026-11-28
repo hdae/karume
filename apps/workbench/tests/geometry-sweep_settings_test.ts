@@ -52,8 +52,12 @@ describe("the defaults", () => {
 });
 
 describe("the parameters", () => {
-  it("offer every op family and every case id of the sweep's table and of the k88 table, in table order", () => {
-    const tables = [...geometrySweepCases(), ...geometrySweepCases("k88")];
+  it("offer every op family and every case id of the sweep's table, of the k88 table and of the grid table, in table order", () => {
+    const tables = [
+      ...geometrySweepCases(),
+      ...geometrySweepCases("k88"),
+      ...geometrySweepCases("grid"),
+    ];
     expect(SWEEP_OPS).toEqual([...new Set(tables.map(({ op }) => op))]);
     expect(SWEEP_CASE_IDS).toEqual(tables.map(({ id }) => id));
   });

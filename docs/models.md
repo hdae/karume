@@ -40,8 +40,14 @@ No repository. A repository the recipe builds and the e2e lanes run on the local
 belongs here until its first publication (a checklist in §3 of the [release runbook](release-runbook.md); a new family
 follows "First publication of a family").
 
-One new role of a published repository:
+New roles of published repositories:
 
+- **Gemma 4 26B A4B's QAT MTP drafter** (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`, the `drafter` role
+  of `karume-gemma4-qat`'s `26b`) — built by the recipe as the series `outputs/series/gemma4-26b-qat-drafter/`
+  (`gemma4.export_drafter_qat --model 26b`); the test-only drafter of the 12-layer cut
+  (`outputs/series/gemma4-26b-cut12-qat-drafter/`, `--layers`) is never shipped. It runs only with every expert
+  resident (`expertCache` refuses `speculative`). The published `karume-gemma4-qat` ships 26B without a drafter until
+  its next upload, with the next release.
 - **Regular Gemma 4 E4B's MTP drafter** (`google/gemma-4-E4B-it-assistant`, the `drafter` role of `karume-gemma4`'s
   `e4b`) — built as the series `outputs/series/gemma4-e4b-drafter/` (`gemma4.export_drafter --model e4b`) and checked
   on the next `karume-gemma4` staged from the series under `outputs/misc/local-dist/karume-gemma4/`

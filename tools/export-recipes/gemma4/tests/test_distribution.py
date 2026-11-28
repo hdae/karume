@@ -31,6 +31,7 @@ from ir_fixtures import ir_container
 
 from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4 import card as gemma4_card
 from gemma4 import chat
 from gemma4 import distribution as gemma4_distribution
@@ -57,7 +58,7 @@ from gemma4.distribution import (
     gemma4_sources,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
-from gemma4.sources import REGULAR_DRAFTER_PINS
+from gemma4.sources import REGULAR_DRAFTER_PINS, REGULAR_TOKENIZER_PINS
 from gemma4.tests import product_fixture as fixture
 from karume.container import AssetInput, container_parts
 from karume.dist import (
@@ -66,6 +67,12 @@ from karume.dist import (
     assemble_family,
     resolve_card_renderer,
     verify_dist,
+)
+from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    MEASUREMENTS_LEAD,
+    hf_link,
+    upstream_cards,
 )
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
@@ -941,6 +948,57 @@ class TestGemma4Card:
         assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
 
+    def test_the_card_names_the_license_by_its_identifier_with_the_shared_text_link(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#license-statements: "licensed **apache-2.0**" followed
+        by the shared reference to the text, and the license page only in the front matter."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        body = card.split("\n---\n", 1)[1]
+
+        assert f"licensed **apache-2.0** {APACHE_LICENSE_REFERENCE}." in body
+        assert "**Apache 2.0**" not in card
+        assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE) == 1
+        assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
+        assert GEMMA_LICENSE_PAGE not in body
+
+    def test_the_card_pins_every_upstream_at_the_commit_sources_records(
+        self, tmp_path: Path
+    ) -> None:
+        """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — each model at the commit
+        its hand-placed checkpoint was fetched at, each drafter at its pin."""
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        for model in ("e2b", "e4b"):
+            for pin in (REGULAR_TOKENIZER_PINS[model], REGULAR_DRAFTER_PINS[model]):
+                assert f"{hf_link(pin.repo)} at commit `{pin.revision}`" in card, pin.repo
+
+    def test_the_attribution_ends_by_sending_the_reader_to_every_upstream_card(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#what-the-upstream-says — the shared bullet, last in the
+        attribution, linking the card of every redistributed upstream (the drafter's included)."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        attribution = card.split("## Base weights and attribution")[1].split("\n## ")[0]
+        last = attribution.strip().split("\n")[-1]
+
+        assert (
+            last
+            == upstream_cards(
+                [hf_link("google/gemma-4-E2B-it"), hf_link("google/gemma-4-E2B-it-assistant")]
+            )[0]
+        )
+
     def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
         self, gemma4_assembled, tmp_path: Path
     ) -> None:
@@ -1002,6 +1060,16 @@ class TestGemma4Card:
         assert "E2B" not in title
         # The spelling the summary states is the one taken from the manifest (not baked in).
         assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in overview
+
+    def test_the_overview_links_the_upstream_it_names(self, gemma4_assembled) -> None:
+        """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — a repository the card
+        names is a link with its ID as plain text, never code font."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
+
+        assert f"of {hf_link(GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL])},\n" in overview
+        assert re.findall(r"`(?:google|hdae)/[^`]+`", card) == []
 
     def test_it_names_the_device_limits_a_quant_declares(self, gemma4_assembled) -> None:
         """`requiredLimits` is a field for "knowing in advance which devices it does not fit", so
@@ -1085,7 +1153,9 @@ class TestGemma4LegalText:
         other gates let it through.
         """
         out_dir, _ = gemma4_assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_it_ships_the_modification_notice(self, gemma4_assembled) -> None:
         """The modification notice of Apache 2.0 §4(b)."""
@@ -1196,17 +1266,35 @@ class TestGemma4LegalText:
     def test_a_model_the_notice_does_not_mention_is_caught(self, gemma4_assembled) -> None:
         """Evidence that it is not a tautology — the 2 above fail on a combination with a second
         entry added."""
-        out_dir, _ = gemma4_assembled
+        out_dir, manifest = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
         with pytest.raises(AssertionError, match=UNLISTED_CHECKPOINT):
             _assert_notice_names(
                 notice,
                 [
-                    *(GEMMA4_UPSTREAM[model] for model in GEMMA4_REGULAR_MODELS),
+                    *(GEMMA4_UPSTREAM[model] for model in manifest["models"]),
                     f"google/{UNLISTED_CHECKPOINT}",
                 ],
             )
+
+    def test_the_opening_names_the_checkpoints_of_the_models_built_alone(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#noticemd — a build of E2B alone names E2B's checkpoint,
+        not E4B's, which it does not redistribute; the opening of both names both."""
+        out_dir, _ = gemma4_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        both = " ".join(gemma4_notice_markdown(["e2b", "e4b"]).split())
+
+        assert "redistributes a modified form of `google/gemma-4-E2B-it`, which is licensed" in (
+            " ".join(notice.split())
+        )
+        assert "`google/gemma-4-E4B-it`" not in notice
+        assert (
+            "redistributes modified forms of `google/gemma-4-E2B-it` and `google/gemma-4-E4B-it`,"
+            " which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`)." in both
+        )
 
 
 #: Stand-in for E4B's upstream `tokenizer.json` (the gate does not read the contents and compares
@@ -1653,15 +1741,15 @@ class TestGemma4ParallelPreset:
         reference = gemma4_distribution.GEMMA4_QUANTS["bf16"]["description"]
         declared = gemma4_distribution.GEMMA4_PARALLEL_QUANTS["bf16-fast"]["description"]
         note = gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE
-        speed = gemma4_distribution.GEMMA4_SPEED_NOTE
         e2b = gemma4_distribution.gemma4_quants("e2b")
         e4b = gemma4_distribution.gemma4_quants("e4b")
 
-        # The drafter sentence follows the preset's own text; the speed sentence comes last.
+        # The drafter sentence follows the preset's own text and ends it (what a preset measured
+        # is a note on the card, never part of its description).
         assert e2b["bf16"]["description"] == reference + note
-        assert e2b["bf16-fast"]["description"] == declared + note + speed["e2b"]
+        assert e2b["bf16-fast"]["description"] == declared + note
         assert e4b["bf16"]["description"] == reference + note
-        assert e4b["bf16-fast"]["description"] == declared + note + speed["e4b"]
+        assert e4b["bf16-fast"]["description"] == declared + note
 
     def test_a_model_without_a_drafter_gets_no_drafter_sentence(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1672,45 +1760,56 @@ class TestGemma4ParallelPreset:
         for name, quant in quants.items():
             assert gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE not in quant["description"], name
 
-    def test_the_e2b_speed_sentence_names_the_decode_it_measured(self) -> None:
-        """E2B's speculative decode is not measured, so its sentence says its decode ran without
-        the drafter (`GEMMA4_SPEED_NOTE`)."""
-        assert gemma4_distribution.gemma4_has_drafter("e2b")
-        assert gemma4_distribution.GEMMA4_SPEED_NOTE["e2b"].endswith(" without the drafter.")
+    @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
+    def test_each_measurement_note_names_the_decode_it_measured(self, model: str) -> None:
+        """Both models ship a drafter and neither's speculative decode was measured against
+        `bf16-fast`, so every note on it says the decode ran without the drafter
+        (`gemma4.card.GEMMA4_MEASUREMENTS` — the maintainer's ruling of 2026-11-27)."""
+        assert gemma4_distribution.gemma4_has_drafter(model)
+        notes = gemma4_card.GEMMA4_MEASUREMENTS[model]
 
-    def test_the_e4b_speed_sentence_names_the_decode_it_measured(self) -> None:
-        """E4B ships a drafter too and its speculative decode is not measured, so its sentence is
-        the maintainer's wording that names the decode without the drafter (`GEMMA4_SPEED_NOTE`)."""
-        assert gemma4_distribution.gemma4_has_drafter("e4b")
-        assert (
-            gemma4_distribution.GEMMA4_SPEED_NOTE["e4b"]
-            == " Faster than bf16 on tested E4B devices without the drafter."
-        )
+        assert [note.preset for note in notes] == ["bf16-fast"] * 4
+        assert all(note.statement.startswith("without the drafter, ") for note in notes)
+        assert {note.date for note in notes} == {"2026-11-19"}
 
     @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
     def test_every_description_fits_the_manifest_limit(self, model: str) -> None:
         for name, quant in gemma4_distribution.gemma4_quants(model).items():
             assert len(quant["description"]) <= 200, name
 
-    def test_no_preset_states_a_speed_without_a_measurement(self) -> None:
-        """The speed sentence enters per model with its measurement (`GEMMA4_SPEED_NOTE`): the
-        parallel preset of a measured model ends with that model's sentence, and no other
-        description says anything about speed."""
-        notes = gemma4_distribution.GEMMA4_SPEED_NOTE
-        assert set(notes) == {"e2b", "e4b"}
-        assert set(notes) <= set(GEMMA4_REGULAR_MODELS)
+    def test_no_description_states_a_measurement_and_every_note_is_of_a_preset_shipped(
+        self,
+    ) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a description says what
+        the preset is; what it measured is a note, naming a preset the model ships."""
+        assert set(gemma4_card.GEMMA4_MEASUREMENTS) == set(GEMMA4_REGULAR_MODELS)
         for model in GEMMA4_REGULAR_MODELS:
             quants = gemma4_distribution.gemma4_quants(model)
-            description = quants["bf16-fast"]["description"]
-            if model in notes:
-                assert description.endswith(notes[model]), model
-                # The model's measured sentence, never another model's.
-                assert model.upper() in notes[model], model
-            else:
-                assert "faster" not in description.lower(), model
-                assert "slower" not in description.lower(), model
-            assert "faster" not in quants["bf16"]["description"].lower(), model
-            assert "slower" not in quants["bf16"]["description"].lower(), model
+            for name, quant in quants.items():
+                for word in ("faster", "slower", "tested", "device"):
+                    assert word not in quant["description"].lower(), (model, name)
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[model]:
+                assert note.preset in quants, (model, note)
+
+    def test_each_model_s_notes_stand_under_its_own_quant_table(self, tmp_path: Path) -> None:
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        e2b_section, e4b_section = card.split("## Model: e2b")[1].split("## Model: e4b")
+
+        for section, model, other in ((e2b_section, "e2b", "e4b"), (e4b_section, "e4b", "e2b")):
+            assert section.count(MEASUREMENTS_LEAD) == 1
+            notes = section.split(MEASUREMENTS_LEAD)[1].split("\n\n### ")[0]
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[model]:
+                assert note.statement in notes and f"{note.device}, {note.date})." in notes
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[other]:
+                assert note.statement not in notes
 
     def test_the_presets_do_not_share_session_tables_with_the_declaration(self) -> None:
         """A manifest built for one model cannot alter the line's declaration (each table is a
@@ -1880,7 +1979,25 @@ class TestGemma4Bf16Product:
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
-        assert "its weights shipped unchanged (bf16)" in card
+        assert (
+            "the main model's weights shipped unchanged (bf16), the drafter's\nquantized to int8"
+            in card
+        )
         assert "the checkpoint's bf16 values unchanged" in card
         assert "Original weights (bf16)" in card
         assert "keep the checkpoints' BF16 values unchanged" in notice
+
+    def test_the_opening_says_bf16_unchanged_alone_only_without_a_drafter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The attribution's opening states each stored form: a manifest without a drafter keeps
+        every weight at the checkpoint's bf16 values, one with drafters names their int8."""
+        _without_e4b_drafter(monkeypatch)
+        _, bf16_only = _assemble_e4b(tmp_path, drafter=False)
+
+        card = render_gemma4_model_card(bf16_only, "hdae/karume-gemma4")
+
+        assert (
+            "Converted from the upstream checkpoint, its weights shipped unchanged (bf16)" in card
+        )
+        assert "int8" not in card.split("## Base weights and attribution")[1].split("\n\n")[1]

@@ -175,7 +175,7 @@ const bf16Pattern = (bits: number): number =>
 
 /** The packed weight words of `[n, k]` (16 B per `vec4`, as the kernel binds them). */
 const weightWords = (storage: WeightStorage, n: number, k: number): Uint32Array<ArrayBuffer> => {
-  const bitsPerElement = storage === "i4" ? 4 : storage === "i8" ? 8 : 16;
+  const bitsPerElement = storage === "i2" ? 2 : storage === "i4" ? 4 : storage === "i8" ? 8 : 16;
   const words = new Uint32Array((n * k * bitsPerElement) / 32);
   for (let index = 0; index < words.length; index++) {
     const word = Math.imul(index + 1, 0x9e3779b9) >>> 0;
@@ -189,7 +189,7 @@ const weightWords = (storage: WeightStorage, n: number, k: number): Uint32Array<
 
 /**
  * Element `[row, col]` of the weight as the kernel decodes it: the bf16 value, or the code times its
- * scale (`group`: the i4 group length).
+ * scale (`group`: the i4 group length; i8 and i2 scale per row).
  */
 const weightAt = (
   storage: WeightStorage,
@@ -205,6 +205,11 @@ const weightAt = (
     const word = words[index >> 1];
     BITS[0] = (index & 1) === 0 ? word << 16 : word & 0xffff0000;
     return VALUE[0];
+  }
+  if (storage === "i2") {
+    // i2: 16 elements per word from the low bits up; the code is q + 2
+    const code = (words[index >> 4] >>> ((index & 15) * 2)) & 3;
+    return Math.fround((code - 2) * scale[row]);
   }
   if (storage === "i8" || group === undefined) {
     return Math.fround(((words[index >> 2] << (24 - (index & 3) * 8)) >> 24) * scale[row]);
@@ -252,7 +257,10 @@ test.skipIf(!GPU_AVAILABLE)(
         const { storage, variant } = exception;
         const row = `${profiles.join(" / ")}: ${storage} ${exception.n}×${exception.k} c${variant.cols}u${variant.unroll}`;
         // The storages this test builds weights for: another one needs its words and its decode above
-        assert(storage === "i4" || storage === "i8" || storage === "bf16", `${row}: storage`);
+        assert(
+          storage === "i2" || storage === "i4" || storage === "i8" || storage === "bf16",
+          `${row}: storage`,
+        );
         assert(
           variant.cols !== general.cols || variant.unroll !== general.unroll,
           `${row}: the row names the general variant`,
@@ -284,7 +292,12 @@ test.skipIf(!GPU_AVAILABLE)(
             try {
               const words = weightWords(storage, n, k);
               const input = Float32Array.from({ length: k }, (_, i) => Math.sin(i * 0.037) * 0.75);
-              const scales = group !== undefined ? n * (k / group) : storage === "i8" ? n : 0;
+              const scales =
+                group !== undefined
+                  ? n * (k / group)
+                  : storage === "i8" || storage === "i2"
+                    ? n
+                    : 0;
               const scale = new Float32Array(scales);
               for (let index = 0; index < scales; index++)
                 scale[index] = ((index % 17) + 1) * 0.00017;

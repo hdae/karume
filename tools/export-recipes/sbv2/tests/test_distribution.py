@@ -36,6 +36,7 @@ from ir_fixtures import ir_container
 from safetensors.numpy import load_file, save_file
 
 from _shared.licenses import CC_BY_SA_4_0_PATH
+from _shared.upstream import UPSTREAM_AUTHORS
 from dist import main
 from karume.dist import (
     LEGAL_PATHS,
@@ -392,6 +393,18 @@ def sbv2_assembled(tmp_path: Path) -> tuple[Path, dict]:
 
 def _sbv2_model(manifest: Mapping[str, Any], name: str = SBV2_DEFAULT_MODEL) -> Mapping[str, Any]:
     return manifest["models"][name]
+
+
+class TestSbv2NoticeNames:
+    """The notice names each upstream by its repository ID and its publisher as the cards spell
+    it (`_shared.upstream.UPSTREAM_AUTHORS`)."""
+
+    def test_each_upstream_and_its_publisher_are_named_as_the_cards_name_them(self) -> None:
+        for repo in SBV2_JVNV_PROFILE.metadata.base_model:
+            owner = repo.split("/")[0]
+            assert f"`{repo}` (published by {UPSTREAM_AUTHORS[owner]})" in " ".join(
+                SBV2_JVNV_NOTICE_MARKDOWN.split()
+            )
 
 
 class TestSbv2Layout:
@@ -1619,14 +1632,18 @@ class TestSbv2LegalText:
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
         assert notice == SBV2_JVNV_NOTICE_MARKDOWN
-        assert "https://huggingface.co/litagin/style_bert_vits2_jvnv" in notice
-        assert f"https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}" in notice
+        assert "`litagin/style_bert_vits2_jvnv`" in notice
+        assert f"`{SBV2_TEXT_ENCODER_MODEL}`" in notice
         assert SBV2_JVNV_CORPUS_PAGE in notice
         # The notice of changes: the truncation to 22 layers (the only change that alters the text
         # encoder's structure) and quantization.
         assert f"first {SBV2_TEXT_ENCODER_LAYERS} encoder layers" in notice
         assert "quantized" in notice
-        assert "licensed under CC BY-SA 4.0 as well" in notice
+        prose = " ".join(notice.split())
+        assert (
+            "licensed under the Creative Commons Attribution-ShareAlike 4.0 International"
+            " license as well" in prose
+        )
 
     def test_the_notice_holds_for_any_subset_of_the_voices(self) -> None:
         """MUST: the voices are not named one by one — one set of `root_files` also goes with any

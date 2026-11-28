@@ -40,6 +40,7 @@ import {
   gemvProgram,
   programWorkgroups,
 } from "../src/tune/gemv-candidates.ts";
+import { GEMV_LOWEST_MARGIN } from "../src/tune/gemv-rule.ts";
 import {
   GEMV_CASES,
   GEMV_SWEEP_FLOAT_ROW_COUNTS,
@@ -143,6 +144,26 @@ describe("the case table", () => {
       },
     };
     assertEquals(uncovered(exceptions, GEMV_CASES), ["bf16 g* 8960×2560"]);
+  });
+
+  it("has a case for every linear of 26B A4B's QAT MTP drafter, the shapes 12B's drafter shares named for both", () => {
+    // [n, k] of the drafter's linears at i4 g32, as its checkpoint holds them ([out, in]); the
+    // embedding table is the output head (n 262144, k 1024).
+    const drafter26b = [
+      [1024, 5632], // pre_projection
+      [4096, 1024], // q (sliding)
+      [1024, 4096], // o (sliding)
+      [8192, 1024], // gate / up, q (full)
+      [1024, 8192], // down, o (full)
+      [2816, 1024], // post_projection
+      [262144, 1024], // lm_head
+    ] as const;
+    for (const [n, k] of drafter26b) {
+      const { source } = caseOf(`i4g32-n${n}-k${k}`);
+      assert(source.includes("26B A4B"), source);
+      // 12B's drafter has the same shapes but at its projections (its hidden width is 3840)
+      assertEquals(source.includes("12B"), n !== 2816 && k !== 5632, source);
+    }
   });
 
   it("gives every case a unique id spelled from its shape, a source and the sweep's row counts", () => {
@@ -521,13 +542,17 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
   /** The time at M = 1 that makes a candidate `gain` times faster than the default's choice. */
   const at = (gain: number): number => REFERENCE_TIME / gain;
 
-  it("carries a candidate that held its check and is ×1.10 or more faster than the default's choice in a steady M = 1 group, at M = 4 and 8", () => {
-    assertEquals(GEMV_MIN_SPEEDUP, 1.1);
+  it("carries a candidate that held its check and is ×1.03 (the lowest margin) or more faster than the default's choice in a steady M = 1 group, at M = 4 and 8", () => {
+    assertEquals(GEMV_LOWEST_MARGIN, 1.03);
     for (const m of [4, 8]) {
       assertEquals(carried(groupOf([held("staged-l8", at(1.3))]), "staged-l8", m), true);
     }
-    // At the threshold itself it is adoptable
-    assertEquals(carried(groupOf([held("staged-l8", REFERENCE_TIME / GEMV_MIN_SPEEDUP)])), true);
+    // At the lowest margin itself it is adoptable
+    assertEquals(carried(groupOf([held("staged-l8", REFERENCE_TIME / GEMV_LOWEST_MARGIN)])), true);
+    // Below the rule of two records' ×1.10, which a steady record's rule does not ask (fault of the
+    // earlier rule, which skipped it)
+    assertEquals(GEMV_MIN_SPEEDUP, 1.1);
+    assertEquals(carried(groupOf([held("staged-l8", at(1.07))])), true);
   });
 
   it("skips a candidate the quick look screened at M = 1 (condition 1)", () => {
@@ -555,11 +580,11 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
     }
   });
 
-  it("skips a candidate less than ×1.10 faster than the default's choice in a steady M = 1 group (condition 3; fault: ×1.09)", () => {
-    assertEquals(carried(groupOf([held("staged-l8", at(1.09))])), false);
+  it("skips a candidate less than ×1.03 faster than the default's choice in a steady M = 1 group (condition 3; fault: ×1.02)", () => {
+    assertEquals(carried(groupOf([held("staged-l8", at(1.02))])), false);
     assertEquals(carried(groupOf([held("staged-l8", at(0.5))])), false);
     // Steady up to the bound itself
-    assertEquals(carried(groupOf([held("staged-l8", at(1.09))], GEMV_STEADY_SPREAD)), false);
+    assertEquals(carried(groupOf([held("staged-l8", at(1.02))], GEMV_STEADY_SPREAD)), false);
   });
 
   it("lets an unsteady M = 1 group rule out nothing by its times: only conditions 1 and 2 decide (fault: a spread of ×1.26, and none)", () => {
@@ -644,11 +669,11 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
       assertEquals(blocked(lanes8(1.3, 1.3)), true);
     });
 
-    it("is skipped when M = 1 leaves both candidates of its lanes unadoptable (fault: ×1.09 and ×1.09)", () => {
-      assertEquals(blocked(lanes8(1.09, 1.09)), false);
+    it("is skipped when M = 1 leaves both candidates of its lanes unadoptable (fault: ×1.02 and ×1.02)", () => {
+      assertEquals(blocked(lanes8(1.02, 1.02)), false);
       assertEquals(
         blocked(
-          groupOf([{ candidate: "parallel-l8", screened: true }, held("staged-l8", at(1.09))]),
+          groupOf([{ candidate: "parallel-l8", screened: true }, held("staged-l8", at(1.02))]),
         ),
         false,
       );
@@ -665,7 +690,7 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
 
     it("is measured when the M = 1 group has no row of a candidate of its lanes (a run narrowed to other candidates)", () => {
       assertEquals(blocked(groupOf([])), true);
-      assertEquals(blocked(groupOf([held("staged-l8", at(1.09))])), true);
+      assertEquals(blocked(groupOf([held("staged-l8", at(1.02))])), true);
       assertEquals(blocked(undefined), true);
     });
 
@@ -693,7 +718,7 @@ describe("the candidates carried from M = 1 on to M = 4 and 8 (gemvCarriedFromM1
           4,
           { name: "staged-l8r4", class: "reorder", choice: { lanes: 8, parallelRows: 4 } },
           { exact: "c32u4r2", reorder: "staged-l8r4" },
-          lanes8(1.09, 1.09),
+          lanes8(1.02, 1.02),
         ),
         true,
       );
@@ -1014,5 +1039,99 @@ describe("the record", () => {
 
   it("is not quantized when the rounds are not all multiples of 100 µs", () => {
     assertEquals(report.gpuTiming, { feature: true, unit: "ns", quantized: false });
+  });
+});
+
+describe("the record's session and class", () => {
+  const parts = (summaries: number, session?: { id: string; elapsedMs: number }) =>
+    gemvSweepReport({
+      startedAt: "2026-11-28T10:00:00.000Z",
+      date: "2026-11-28T10:30:00.000Z",
+      aborted: false,
+      userAgent: "Node.js/24",
+      ...(session === undefined ? {} : { session }),
+      adapter: { vendor: "nvidia", architecture: "ampere", device: "", description: "" },
+      geometryProfile: "default",
+      gates: gemvSweepGates({
+        features: new Set(),
+        wgslLanguageFeatures: new Set(),
+        limits: { maxComputeWorkgroupsPerDimension: 65535 },
+      }),
+      timing: { feature: true, unit: "ns" },
+      candidateSet: "full",
+      caseIds: [],
+      selection: {},
+      rounds: 5,
+      quickLookMargin: 1.25,
+      tolerance: opTolerance("linear"),
+      deviceLost: null,
+      cases: [],
+      summaries: Array.from({ length: summaries }, (_, index) => ({
+        caseId: `case-${index}`,
+        m: 1,
+        elapsedMs: 1,
+        profile: { exact: "c32u4", reorder: "c32u4" },
+        // One group in five beyond ×1.05: 20 %, the most a steady record may have
+        baselineSpread: index % 5 === 0 ? 1.2 : 1.01,
+        screened: 0,
+        skipped: 0,
+      })),
+      rows: [],
+    });
+
+  it("states its class from its own summaries (fault: 19 groups, no class)", () => {
+    assertEquals(parts(20).steadiness, {
+      class: "steady",
+      groups: 20,
+      unsteadyGroups: 4,
+      share: 0.2,
+    });
+    assertEquals(parts(19).steadiness?.class, "unclassified");
+  });
+
+  it("names its session when the sweep was given one, and has none otherwise", () => {
+    assertEquals(parts(1, { id: "session-a", elapsedMs: 1234 }).session, {
+      id: "session-a",
+      elapsedMs: 1234,
+    });
+    assertEquals("session" in parts(1), false);
+  });
+});
+
+describe("the device table's choices in a plan (gemvMeasurementPlans with a table)", () => {
+  /** A table whose sequential variant for PLE's shape is c128u16 and whose PLE row is staged at 16 lanes. */
+  const table: LinearGemvChoices = {
+    ...DEFAULT_GEOMETRY_PROFILE.linearGemv,
+    sequential: {
+      ...DEFAULT_GEOMETRY_PROFILE.linearGemv.sequential,
+      shapes: [
+        ...DEFAULT_GEOMETRY_PROFILE.linearGemv.sequential.shapes,
+        { storage: "i4", n: PLE.n, k: PLE.k, variant: { cols: 128, unroll: 16 } },
+      ],
+    },
+    parallelShapes: DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.map((row) =>
+      row.storage === "i4" && row.group === PLE.group && row.n === PLE.n && row.k === PLE.k
+        ? { ...row, lanes: 16, stagedActivations: true, rowBlock: undefined }
+        : row,
+    ),
+  };
+
+  it("names the table's choices at both levels, and the default's where there is no table", () => {
+    const [one, four] = gemvMeasurementPlans(PLE, "full", GATES, {}, table);
+    assertEquals(one.table, { exact: "c128u16", reorder: "staged-l16" });
+    assertEquals(four.table.reorder, "staged-l16");
+    const [plain] = gemvMeasurementPlans(PLE, "full", GATES);
+    assertEquals(plain.table, plain.profile);
+  });
+
+  it("measures them in the quick set, whose small grid does not hold c128u16, and when a narrowing names other candidates (faults: both)", () => {
+    const quick = gemvMeasurementPlans(PLE, "quick", GATES, {}, table)[0];
+    assert(quick.candidates.some(({ name }) => name === "c128u16"));
+    assert(!gemvCandidates(PLE, 1, "quick", GATES).some(({ name }) => name === "c128u16"));
+    const narrowed = gemvMeasurementPlans(PLE, "full", GATES, { candidates: ["c64u8"] }, table)[0];
+    assertEquals(
+      narrowed.candidates.map(({ name }) => name).toSorted(),
+      ["c128u16", "c64u8", gemvProfileChoice(PLE, 1, "reorder").name, "staged-l16"].toSorted(),
+    );
   });
 });

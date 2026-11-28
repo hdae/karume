@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the Wan distribution — pure functions derived mechanically from
 the manifest (Wan2.2 TI2V 5B).
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
 live in `karume.modelcard`. This module owns only **the facts of each Wan generation**: attribution
 (provenance, pinned revision, license) and what this pipeline's card says (the fixed prompts of
@@ -40,18 +42,27 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
+    model_measurements,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import SOURCES, UMT5_SOURCES, WAN22_MODELS, WAN22_TEXT_MODEL
@@ -63,9 +74,6 @@ WAN_PIPELINE_TAG = "text-to-video"
 #: The upstream technical report.
 WAN_PAPER = "arxiv.org/abs/2503.20314"
 
-#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
-#: root — Apache 2.0 §4(a)).
-WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: The construction option that chooses the text path (the second argument of the TS side's
 #: `wan.Ti2vPipeline.fromPretrained` — ADR 0119 addendum B; a fact not in the manifest). The
@@ -85,6 +93,7 @@ WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 #: in f32 to this checkpoint's `text_encoder`, but the provenance names the original — so that it
 #: does not disagree with the card of the umT5 distribution).
 WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
+WAN_TEXT_ENCODER_REVISION = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.revision
 
 #: The pipeline contract the Wan2.2 TI2V 5B card can describe (`WAN_TI2V_PIPELINE_NAME` /
 #: `WAN_TI2V_PIPELINE_MAJOR` in the TS side's `packages/models/src/wan/config.ts`).
@@ -184,6 +193,46 @@ WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
 #: {@link WAN22_RESOURCES}, so the table's "not measured yet" line names them.
 WAN22_INT8_VAE_QUANTS = ("i8", "i8-a8-attn8-online-conv8")
 
+#: The decode of the int8 VAE decoder's practical preset against the online preset (ADR 0133
+#: "Results": the NVIDIA GeForce RTX 3080 Ti under Node + Dawn on 2026-10-23, 8 clips at
+#: 1280×704×33 with 50 steps): `(decode, the online preset's decode, clip, the online preset's
+#: clip)`. The Resources prose and the measurement note both read it.
+WAN22_INT8_VAE_TIMING = ("87 s", "168 s", "533 s", "611 s")
+
+#: The device and runtime of Wan2.2's measurements of 2026-10-23.
+_WAN22_MEASURED_ON = "NVIDIA GeForce RTX 3080 Ti, Node with Dawn"
+
+
+def _wan22_measurements() -> dict[str, tuple[Measurement, ...]]:
+    """Model name → what its presets measured, written under its quant table (the maintainer's
+    ruling of 2026-11-27: a measurement is a note naming its device and date, never a preset's
+    description). The online preset's pass is its {@link WAN22_RESOURCES} row against the s16
+    preset's pass of the same morning (ADR 0132 "Results"); the conv8 preset's decode is
+    {@link WAN22_INT8_VAE_TIMING}."""
+    online = WAN22_ONLINE_QUANT_ERROR[0]
+    _, conv8 = WAN22_INT8_VAE_QUANTS
+    decode, online_decode, clip, online_clip = WAN22_INT8_VAE_TIMING
+    ((frames, online_pass, *_),) = WAN22_RESOURCES[online]
+    return {
+        "ti2v-5b": (
+            Measurement(
+                online,
+                f"one transformer pass at {frames} frames (27,280 tokens) took {online_pass}"
+                f" against 24.2 s for `{WAN22_PRACTICAL_QUANT_ERROR[0]}` the same morning",
+                _WAN22_MEASURED_ON,
+                "2026-10-23",
+            ),
+            Measurement(
+                conv8,
+                "over 8 clips at 1280 × 704 with 33 frames and 50 steps, the VAE decode took"
+                f" {decode} against {online_decode} for `{online}`, and the whole clip {clip}"
+                f" against {online_clip}",
+                _WAN22_MEASURED_ON,
+                "2026-10-23",
+            ),
+        ),
+    }
+
 
 @dataclass(frozen=True)
 class WanCard:
@@ -230,6 +279,8 @@ class WanCard:
     attribution_notes: Callable[[Mapping[str, Any]], list[str]]
     #: The "Resources" section (the measured table and its notes — ADR 0089 decision 3).
     resources: Callable[[Mapping[str, Any]], list[str]]
+    #: Model name → what its presets measured (the notes under its quant table).
+    measurements: Mapping[str, tuple[Measurement, ...]]
     #: The lines below are for a generation that takes I2V (ADR 0121 step 9b; empty by default).
     #: Tags added to the frontmatter after the pipeline tag (HF has one pipeline tag, so it stays
     #: text-to-video — I2V is stated by a tag).
@@ -255,9 +306,12 @@ def _upstream(name: str, card: WanCard) -> Any:
 
 def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
     """Build the frontmatter from the models listed in the manifest (`base_model` is the upstream of
-    the manifest's models — HF's meaning of "the model it derives from". The provenance of
-    Wan2.2's two text assets (the Wan2.1 checkpoint) is not a model it derives from, so it is
-    left out here and the attribution section states it)."""
+    the manifest's models — HF's meaning of "the model it derives from" — and the upstream of the
+    text encoder, stored here or fetched from `karume-umt5-xxl`: the maintainer's ruling of
+    2026-11-27 lists the upstreams of fetched components too. The provenance of Wan2.2's two text
+    assets (the Wan2.1 checkpoint, whose tokenizer files are this checkpoint's and whose encoder is
+    the umT5-XXL one) is not a model it derives from, so it is left out here and the attribution
+    section states it)."""
     licenses = {_upstream(name, card).license for name in manifest["models"]}
     if len(licenses) != 1:
         raise ValueError(
@@ -266,7 +320,10 @@ def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
         )
     return CardMetadata(
         pipeline_tag=WAN_PIPELINE_TAG,
-        base_model=tuple(_upstream(name, card).repo for name in manifest["models"]),
+        base_model=(
+            *(_upstream(name, card).repo for name in manifest["models"]),
+            WAN_TEXT_ENCODER_UPSTREAM,
+        ),
         # A distribution that lowers the f32 upstream to f16 / i8 (the doc of `CardMetadata` — f16 /
         # i8 distributions are `quantized`).
         base_model_relation="quantized",
@@ -313,7 +370,7 @@ def _encoder_whereabouts(manifest: Mapping[str, Any]) -> str:
     return (
         "stored in this repository"
         if borrowed is None
-        else f"referenced from [`{borrowed[0]}`](https://huggingface.co/{borrowed[0]})"
+        else f"referenced from {hf_link(borrowed[0])}"
     )
 
 
@@ -358,6 +415,7 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
         "A **text-to-video** and **image-to-video** distribution of Wan2.2 TI2V 5B, converted into",
         "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
         "first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"- Nine graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
         f" {where}),",
@@ -413,16 +471,19 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
     for name in manifest["models"]:
         source = _upstream(name, card)
         lines.append(
-            f"- **`{name}`**: [{source.repo}](https://huggingface.co/{source.repo}) at commit"
-            f" `{source.revision}`, licensed **{source.license}** (as of retrieval;"
-            f" [full text]({WAN_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: {pinned(source.repo, source.revision)}, licensed"
+            f" **{source.license}** {APACHE_LICENSE_REFERENCE}."
         )
     if card.paper is not None:
         lines.append(
             f"- **Authors**: {card.generation} is released by Wan-AI"
             f" ([technical report](https://{card.paper}))."
         )
-    return lines + card.attribution_notes(manifest)
+    return [
+        *lines,
+        *card.attribution_notes(manifest),
+        *upstream_cards([hf_link(repo) for repo in _wan_metadata(manifest, card).base_model]),
+    ]
 
 
 def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
@@ -438,7 +499,7 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
     """
     text = SOURCES[WAN22_TEXT_MODEL]
     lines = [
-        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        changes_made_here(APACHE_MODIFICATION_CLAUSE),
         "  conversion into the Karume container format; the transformer shipped only in int8,",
         "  its linear weights quantized per output channel (biases and normalization weights kept",
         "  in float32 at the source values); every parameter of the VAE decoder rounded to the",
@@ -469,17 +530,17 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
         repo, revision = borrowed
         lines += [
             "- **The text encoder is not stored here.** `karume.json` references the encoder of",
-            f"  `{WAN_TEXT_ENCODER_UPSTREAM}` (this checkpoint's `text_encoder` holds the same",
+            f"  {pinned(WAN_TEXT_ENCODER_UPSTREAM, WAN_TEXT_ENCODER_REVISION)} (this checkpoint's"
+            " `text_encoder` holds the same",
             "  encoder rounded to bfloat16), converted to int8, at commit"
-            f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
+            f" `{revision[:16]}…` of {hf_link(repo)}",
             "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
             "  the changes made to it.",
         ]
     lines += [
         "- **Precomputed embeddings and tokenizer**: the repository also ships the encoder's",
         "  outputs for a fixed set of prompts (see below), computed in bfloat16 with the umT5-XXL",
-        f"  encoder of [{text.repo}](https://huggingface.co/{text.repo}) at commit"
-        f" `{text.revision}`",
+        f"  encoder of {pinned(text.repo, text.revision)}",
         "  and stored as float32, for use without the text encoder, and the tokenizer table",
         "  converted from the same commit (its tokenizer files are the same as this checkpoint's).",
     ]
@@ -911,6 +972,7 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
     online, _, online_error_33 = WAN22_ONLINE_QUANT_ERROR
     int8_vae_reference, int8_vae_practical = WAN22_INT8_VAE_QUANTS
+    decode, online_decode, clip, online_clip = WAN22_INT8_VAE_TIMING
     online_row = online in measured
     return [
         "## Resources",
@@ -1028,8 +1090,9 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 "  transformer's; `conv8` computes the decoder's 3-D convolutions on per-pixel",
                 "  int8 activations (integer dot products). On the NVIDIA GeForce RTX 3080 Ti",
                 "  under Node with Dawn (2026-10-23, 1280 × 704 with 33 frames, 50 steps, 8 clips)",
-                f"  `{int8_vae_practical}` decoded the clip in 87 s against 168 s for `{online}`",
-                "  (the whole clip 533 s against 611 s) with a GPU-wide peak of 6.2 GiB",
+                f"  `{int8_vae_practical}` decoded the clip in {decode} against {online_decode}"
+                f" for `{online}`",
+                f"  (the whole clip {clip} against {online_clip}) with a GPU-wide peak of 6.2 GiB",
                 "  (nvidia-smi).",
             ]
             if int8_vae_reference in seats and int8_vae_practical in seats
@@ -1068,7 +1131,7 @@ def _download_and_memory(
     — 121 frames — so the method is named per row).
     """
     encoder_bytes, borrowed = _text_encoder(manifest)
-    source = "" if borrowed is None else f" from `{borrowed[0]}`"
+    source = "" if borrowed is None else f" from {hf_link(borrowed[0])}"
     return [
         f"- **Download**: the quant table's Download column includes the text encoder"
         f" ({_gib(encoder_bytes)}{source});",
@@ -1147,6 +1210,7 @@ WAN22_CARD = WanCard(
     overview=_wan22_overview,
     attribution_notes=_wan22_attribution_notes,
     resources=_wan22_resources,
+    measurements=_wan22_measurements(),
     extra_tags=("image-to-video",),
     usage_extra=_WAN22_I2V_USAGE,
     inputs_extra=_WAN22_I2V_INPUTS,
@@ -1191,7 +1255,12 @@ def render_wan_model_card(
             *model_sections(
                 manifest,
                 (
-                    partial(quants, abbreviations=abbreviations, host_assets=host_assets),
+                    partial(
+                        quants,
+                        abbreviations=abbreviations,
+                        host_assets=host_assets,
+                        measured=model_measurements(manifest, card.measurements),
+                    ),
                     _wan_defaults,
                 ),
             ),

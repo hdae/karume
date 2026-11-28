@@ -93,6 +93,81 @@ time.
   them: 152 of the 1,656 rows of `quick+` come from `apple-m5` and `apple-metal-3-shared` (1,504 without them), and
   3 of the 213 rows `k88` forms over its own 19 cases (210 without them).
 
+## The grid-fill rule of the GEMM
+
+A table may carry a rule that chooses the tile of the GEMM of linear, matmul and bmm from the dispatch grid's workgroup
+count instead of the row count alone (`gemmGrid` — ADR [0157](../decisions/0157-gemm-tile-from-grid-fill.md)).
+
+- **The field**: `ladder` (two tiles or more, largest first), `keepLargest.minWorkgroups` and `keepLargest.minK` (when
+  the largest tile is kept), `minWorkgroups` (the least workgroup count of a smaller tile's grid) and `maxPadding`
+  (the largest tile area over output area a tile is taken at).
+- **The walk** (`gemmShapeGeometry`): the grid of a tile on a shape has `ceil(N / tileN) · ceil(M / tileM) · batch`
+  workgroups, and its padding is `(ceil(N / tileN) · tileN · ceil(M / tileM) · tileM) / (M · N)`. The largest tile is
+  taken when K is at least `keepLargest.minK`, its grid has at least `keepLargest.minWorkgroups` workgroups and its
+  padding is at most `maxPadding`; otherwise the first smaller tile whose grid has at least `minWorkgroups` workgroups
+  and whose padding is at most `maxPadding`; otherwise the last tile. The padding is compared as a product of
+  integers, so a padding of exactly the bound is taken.
+- **Where it applies**: the GEMM of linear (every weight storage, f32 and f16 compute, over the flattened rows, a batch
+  of 1), the split-K partial (the tile of the reference GEMM of the same shape, so that its one-slice identity stays
+  the identity with the GEMM the Session would run), matmul (a batch of 1) and bmm (M of one matrix, its batch on the
+  z axis). In a table that carries the field these ops do not read `gemmRows`. Nothing else reads the field: the i8a8
+  paths, the fused attention, conv and the states-shaped and row-block attention select as before.
+- **Without the field** the lookup is the `gemmRows` rule of M, the same object as before the field existed, so a
+  table without it keeps every pipeline key, WGSL text and dispatch. The default profile carries no rule, and no
+  registered table carries one: no Session's kernels change.
+- **Checks** (at injection, selection and JSON reading): the ladder has two tiles or more in strictly decreasing tile
+  area, each passes the geometry check, and may carry the skeleton form but not the counter decode; the counts are
+  positive integers; the padding bound is a finite number of at least 1. A lookup refuses a shape whose M, N, K or
+  batch is 0. The limit check names a ladder tile past the device's workgroup limits. The JSON reader rejects unknown
+  fields inside the rule.
+- **Identity**: a tile the rule picks writes the bucket tile's words by construction of the WGSL (the geometry decides
+  which thread computes which output, not the order of a K reduction); below the WGSL it is a fact of the device's
+  compiler, checked by a GPU test on the development machine (every storage, every step of the ladder, matmul, bmm and
+  the split-K partial at one slice).
+- **The grid set** of the geometry sweep times the ladder in interleaved rounds on cases of its own
+  ([workbench.md](workbench.md#the-geometry-sweeps-grid-set)); `deriveGeometryProfile` refuses its records, naming
+  the set.
+- **Matching** (`geometryProfileMismatch`) and the per-family kernel fingerprint take the `gemm` family over
+  `gemmRows`, the field its sweep records decide, also in a table that carries the rule: they do not cover the rule,
+  as they do not cover the GEMV choices. A derivation on a base table carries the base's rule as it is.
+
+### Deriving the grid-fill rule
+
+`deriveGemmGrid` of `@karume/runtime/tune` derives the field for a table from that device's grid records (the
+generator's `--grid-records`, [below](#the-command)).
+
+- **What is code and what is the table's**: the ladder (`GEMM_GRID_LADDER` — 128 × 128, 64 × 64 / 256, 64 × 32 / 128,
+  32 × 32 / 128, 16 × 16 / 64), the K floor (256) and the padding bound (1.5) are the code's, written into the field;
+  the two workgroup counts are derived. The pairs tried are `keepLargest.minWorkgroups` ∈ {128, 192, 256, 288, 320,
+  384, 480} × `minWorkgroups` ∈ {32, 48, 64, 96, 128}.
+- **Today's tile** of a case is the table's choice for its shape (`gemmShapeGeometry` of the table the field is
+  derived for: its `gemmRows` rule, or its own field). It must have a time in the records; a tile off the ladder (a
+  table whose rule carries a skeleton form) has none, and every pair is refused.
+- **A record's class**: the GEMV rule's (`gemvSteadiness`) over the cases' default rows — steady when at least 20
+  cases have a default row of two positive rounds or more and at most 20 % of those spread beyond ×1.05; a steady
+  record timed in ns is evidence on its own, any other only beside a second record that times the same two tiles.
+- **A reading** of the pair's tile X against today's tile T in one record: the gain `T.perDispatch ÷ X.perDispatch`
+  (each the least of its aligned rounds ÷ reps) and both rows' gaps (second-smallest round ÷ smallest). X is not
+  slower than today in it when `gain × margin × gap(X) × gap(T) ≥ 1`, the margin ×1.065 (the GEMV rule's,
+  `GEMV_MARGIN`) unless given.
+- **A pair qualifies** when, on every case of the grid set, its tile wrote the default's words and did not fail in any
+  record that timed it, has readings that are evidence against today's tile, and is not slower than today in any of
+  them (a case where the pair takes today's tile has a gain of 1); and when the census-weighted GEMM time under it —
+  each case weighted by its `censusCount` × today's time, its time divided by the geometric mean of its readings'
+  gains — is at most `1 ÷ minSpeedup` of today's (`minSpeedup` ×1.05 by default, the generator's `--min-speedup`).
+  The ×1.05 of the tile derivation stays as this threshold on the total; no case needs a gain of its own.
+- **The outcome**: the qualifying pair with the lowest weighted time (ties to the smaller pair), written with the code's
+  ladder, K floor and padding bound; none qualifying, the table carries no field. The verdict lines give the outcome
+  with each record's class, one line per pair (qualifies or the first reason it does not, with its weighted time), and
+  the cases of the chosen pair — or, none qualifying, of the measured pair with the lowest weighted time — each with
+  its tile, today's tile, its gain and every reading's gain and gaps.
+- **Refused** (thrown): no record, one record given twice, records of two adapters, a record that is not of the grid
+  set, not timed by GPU timestamps, quantised, of another case set, default kernels or measured candidates' kernels
+  than the current runtime's, a row of another case or shape, a case without exactly one default row; a shared table
+  (its integers would be one device's), a table whose match the records' adapter does not fit, and a table whose
+  provenance names another vendor, architecture or device (not the description: under Node on Dawn that is the
+  driver's version, and a table takes records made after a driver update — the GEMV derivation's rule).
+
 ## A record
 
 - A workbench record (`karume-workbench/1`), unwrapped to its `data`, or a bare runtime record
@@ -207,8 +282,9 @@ matched without a description: the predicted table of [the three levels](#the-th
   the default profile) against the sequential variants and row-block heights, whose words must equal the baseline's,
   and against the parallel GEMV at each lane count, plain, staged and subgroup — and at M = 4 and 8 its row-blocked
   form at each height of at most M rows the kernel exists at —, held to the band of `linear`, after a
-  quick look that times in full only the references and the kernels near enough to matter; at M = 4 and 8 it skips the
-  reorder candidates that the case's M = 1 group of the same run leaves unadoptable by the rule below
+  quick look that times in full only the references (the device table's choices among them) and the kernels near
+  enough to matter; at M = 4 and 8 it skips the reorder candidates that the case's M = 1 group of the same run leaves
+  unadoptable at the lowest margin the rule below is meant to be re-decided at (×1.03)
   ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)). Its record is `karume-gemv-sweep/4`
   ([workbench.md](workbench.md#the-gemv-sweeps-record)): each row carries the fingerprint of its kernel and each case
   its own.
@@ -227,7 +303,9 @@ matched without a description: the predicted table of [the three levels](#the-th
   selection, the fusion pass and the recipe builder all read the same choices.
 - The memory estimate has no adapter and reads the default profile's. Of the choices, the fusion pass reads which
   shapes have a parallel row (the linear → `static_quantize` fusion) and a row's packed-activation flag (the packed
-  pairing); no size reads the sequential variants, a row's lanes, its staged flag or its row block. No registered
+  pairing), and under the private key `LINEAR_SPLIT_K` the linear selection reads which shapes have a parallel row
+  (a linear without one may take the split-K GEMM and its partial sums — [numerics](numerics.md)); no size reads the
+  sequential variants, a row's lanes, its staged flag or its row block. No registered
   table removes a parallel row of the default, moves a packed flag or adds a packed row. Each adds rows on shapes the
   default has none for — `nvidia-ampere` 11, `nvidia-blackwell` 20, `apple-metal-3` 13 and `apple-m5` 17 —, so on
   its adapter the Session's fusion plan differs from the estimate's where a linear of one of those shapes feeds a
@@ -312,34 +390,44 @@ matched without a description: the predicted table of [the three levels](#the-th
     writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
     at the same lanes.
 - `apple-metal-3`'s field is the default profile's choices with what the derivation adopts from 14 GEMV sweep
-  records of an Apple M2 in Chrome (Metal) in place — 80 sequential decisions and 65 parallel ones adopted:
-  - The default's 22 exceptions, in the default's order; 15 of them with the variant the records adopt over the
-    default's, of 32 to 256 columns per workgroup (`c128u8` on 5, `c128u16` on 4, `c256u8` on 4, `c64u2` on
-    `1536 × 256` and `c32u2` on `2560 × 256`, ×1.10 to ×1.54). On the other 7 no variant reaches ×1.10.
-  - 65 per-shape exceptions after them, on int4 (55) and int8 (10) shapes, all of 128 or 256 columns per workgroup:
-    `c128u4` on 48, `c256u4` on 14 and `c128u8` on 3 (the smallest gains of the 80 adopted exceptions ×1.10 to
-    ×2.54).
-  - 65 parallel rows apart from the default's. 52 of the default's 88 rows are changed — 48 integer-stored and 4
+  records of an Apple M2 in Chrome (Metal) in place — 87 sequential decisions and 69 parallel ones adopted. The
+  rule of two records adopted 80 and 65 of them (2026-11-21); the table was regenerated on 2026-11-28 by the rule of
+  one steady record (12 of the 14 records are steady) from those choices, which it keeps every one of, and that
+  added 7 sequential choices and 4 row blocks:
+  - The default's 22 exceptions, in the default's order; 17 of them with the variant the records adopt over the
+    default's, of 32 to 256 columns per workgroup (`c128u16` on 6, `c128u8` on 5, `c256u8` on 4, `c64u2` on
+    `1536 × 256` and `c32u2` on `2560 × 256`). Two of the 17 are the rule of one steady record's: `c128u16` on
+    `6144 × 1536` and `4096 × 2560`. On the other 5 no variant qualifies.
+  - 70 per-shape exceptions after them, on int4 (57), int8 (12) and int2 (1) shapes, all of 128 or 256 columns per
+    workgroup: `c128u4` on 53, `c256u4` on 14 and `c128u8` on 3. Five of the 70 are the rule of one steady record's,
+    all `c128u4`: int4 `6144 × 1536` and `4096 × 1536`, int8 `262144 × 1536` and `262144 × 256`, and int2
+    `12288 × 1536`. The smallest gains of the 80 exceptions of the rule of two records are ×1.10 to ×2.54, those of
+    the 7 of the rule of one steady record ×1.070 to ×1.366.
+  - 69 parallel rows apart from the default's. 56 of the default's 88 rows are changed — 52 integer-stored and 4
     bf16 (`256 × 1536` and `256 × 2560` from 32 lanes to 16, `512 × 1536` from 16 to 8, `1536 × 256` from 8 to 4):
-    other lanes on 35, the staged flag cleared on 16, another row block on 42 (39 without one take one — 2 on 23, 4
-    on 14, 8 on 2 — and three go from 2 to 4). 13 rows are on shapes the default has none for: int4 6 and int8 5
-    (shapes of the MTP drafters), and bf16 2 — `8960 × 1536` (8 lanes) and `2560 × 256` (4 lanes), each ×1.15 to
-    ×2.20 faster than the sequential GEMV at one row, ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.51 at
-    8, in four records at each row count. Of the 65, 48 gain at one row (×1.10 to ×11.2) and 17 change only the row
-    block.
+    other lanes on 35, the staged flag cleared on 16, another row block on 46 (39 without one take one — 2 on 23, 4
+    on 14, 8 on 2 —, three go from 2 to 4, and four go from 4 to 2: int4 g32 `8960 × 1536`, `12288 × 1536`,
+    `10752 × 2560` and `10240 × 2560`, by the rule of one steady record, ×1.062 to ×1.090 at 4 and 8 rows). 13 rows
+    are on shapes the default has none for: int4 6 and int8 5 (shapes of the MTP drafters), and bf16 2 —
+    `8960 × 1536` (8 lanes) and `2560 × 256` (4 lanes), each ×1.15 to ×2.20 faster than the sequential GEMV at one
+    row, ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.51 at 8, in four records at each row count. Of the
+    69, 48 gain at one row (×1.10 to ×11.2) and 21 change only the row block.
   - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 35
-    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 17 changed rows it
+    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 21 changed rows it
     writes the words of the default's row.
   - An exception is adopted only where its words equal the baseline's in every record, on Metal
     ([limitations](../limitations.md), the section on the linear GEMV family).
 - `apple-m5`'s field is the default profile's choices with what the derivation adopts from two GEMV sweep records of
-  the Apple M5 in Chrome (Metal) of 2026-11-23, each of the `full` set — 43 sequential decisions and 66 parallel
-  ones adopted:
-  - The default's 22 exceptions, in the default's order and with the default's variant: no variant reaches the ×1.10
-    that replaces one.
-  - 43 per-shape exceptions after them, on int4 (39) and int8 (4) shapes: `c32u2` on 15, `c16u2` on 11, `c64u2`,
-    `c256u2` and `c16u4` on 4 each, `c16u8` and `c32u8` on 2 each and `c128u8` on one (the smallest gains of the 43
-    ×1.10 to ×1.77).
+  the Apple M5 in Chrome (Metal) of 2026-11-23, each of the `full` set and steady — 45 sequential decisions and 66
+  parallel ones adopted. The rule of two records adopted 43 and 66 of them (2026-11-23); the table was regenerated
+  on 2026-11-28 by the rule of one steady record from those choices, which it keeps every one of, and that added 2
+  sequential choices:
+  - The default's 22 exceptions, in the default's order and with the default's variant: no variant qualifies to
+    replace one.
+  - 45 per-shape exceptions after them, on int4 (40) and int8 (5) shapes: `c32u2` on 16, `c16u2` on 11, `c16u4` on
+    5, `c64u2` and `c256u2` on 4 each, `c16u8` and `c32u8` on 2 each and `c128u8` on one. The smallest gains of the
+    43 of the rule of two records are ×1.10 to ×1.77; the rule of one steady record adds `c32u2` on int4
+    `12288 × 1536` (×1.123) and `c16u4` on int8 `256 × 2560` (×1.087).
   - 66 parallel rows apart from the default's. 49 of the default's 88 rows are changed — int4 42, int8 6 and int2 1,
     no bf16 row —, each with another row block (37 without one take one — 2 on 8, 4 on 29 — and 12 go from 2 to 4
     or, on one, to 8), 18 of them with other lanes, 4 with the staged flag set and 3 with it cleared. 17 rows are on
@@ -429,7 +517,99 @@ measures nothing and changes no default value.
   with another tile geometry (under another profile) is no reference, and the reason names the record's profile and
   the table. A record that does not name its profile is read by the same comparison of kernel fingerprints. A record's
   baseline that is not the current reference is a candidate like any other, whose words are its own.
-- **The reference's time**: at a case and row count, the fastest `perDispatch` of the reference kernel over every
+- **Two rules** (the maintainer, 2026-11-28). A decision — a sequential key, a parallel row — one of whose cases a
+  *steady* record measured at M = 1 with a usable reference for the class is decided by **the rule of one steady
+  record**, over the steady records; any other decision by **the rule of two records** (below), over every record. A
+  failure or a failed check in a current group of any record rules a candidate out under either. The numbers' basis is
+  [the research note](../research/2026-11-28-gemv-adoption-rule.md) (the GEMV sweep records of 2026-11-18 to 27 of
+  the RTX 5070 Ti, the Apple M2, the Apple M5 — also as `apple-metal-3` without its description — and the RTX 3080 Ti).
+- **The class of a record**, from its summaries (`gemvSteadiness`, the same function the sweep states its record's
+  class with — the derivation does not read that statement): *steady* when at least 20 of its groups have a baseline
+  spread and at most 20 % of those have `baselineSpread` above ×1.05; *unsteady* when more do; *unclassified* — read as
+  unsteady — with fewer than 20 such groups. Every group counts, at every row count. Of the records of 20 groups or
+  more, the 35 of three devices (RTX 5070 Ti 13, Apple M2 12, Apple M5 10) read 0 to 15.2 % and the 36 of the RTX
+  3080 Ti 31.8 to 84.6 %; no record lies between, so 20 % is a point inside an empty band. Below 20 groups the test
+  fails both ways: six RTX 3080 Ti records of 12 or 13 groups read 0 to 16.7 % (and the rule of one record adopted 2 of
+  74 candidates there that other records read slower), four records of steady devices with 2 to 4 groups read 25 to
+  50 %. A record whose timestamps are Deno's raw ticks is read by the rule of two records whatever its class: the
+  length of its passes in ms is not known.
+- **The rule of one steady record** reads, in each steady record's current group, a kernel's time (`perDispatch`), its
+  *gap* — the second-smallest of its positive rounds ÷ the smallest — and, for a reference, its re-timing
+  (`retimedPerDispatch` ÷ `perDispatch`). A kernel whose pass (its smallest round) is shorter than 20 ms, or that has
+  fewer than two positive rounds, has no time there (3 and 5 such rows in the data, 3 of them wrong; between 20 ms and
+  the 80 ms target the gap term widens the bar by itself). A *reading* of a kernel against another in one group is the
+  other's time ÷ its own (the gain), both gaps, the other's re-timing and the *break-even margin*, gain ÷ (gap × other's
+  gap): the largest margin at which the gain clears its bar. A reading is evidence at a margin unless the other kernel's
+  re-timing, or its inverse, is above margin × the two gaps — a reference whose time moved within the group by more
+  than the bar a gain must clear can account for such a gain by itself (no record of today repeats a kernel within a
+  group, so this reads only records taken from 2026-11-28 on; a record without the re-timing has nothing to test). A
+  reference whose re-timed pass read no time (`retimingUnread`: clamped, 0, or the device lost before it) tested nothing, so no reading against
+  it is evidence (its reading's `retime` is `unread`).
+  - *At M = 1* a candidate qualifies when its check held, at least one steady record's reading of it against its class's
+    reference (the default's choice, its row in the same group — its time need not repeat in a second record) is
+    evidence, and every such reading's gain is at least the margin × its gap × the reference's gap. The margin is a
+    parameter of the derivation (`DeriveLinearGemvOptions.margin`), ×1.065 by default (`GEMV_MARGIN`): the least
+    margin that covers 99 % of the gains' differences between records of one device is ×1.060, ×1.066 and ×1.058 on
+    the three steady devices (M = 1, table candidates, 3,633, 4,414 and 8,338 rows), and without the gap term it
+    would be ×1.063, ×1.083 and ×1.080. Against a reference that is the default's choice, 0 of 1,491 adoptions is
+    slower than ×1/1.02 by the other records (0 of 1,061 by records of another day), and 14 of 1,369 clear winners
+    are refused where the rule of two records refuses 135 of 1,108. ×1.065 bounds the error between records of one
+    session (in the fit it is missed in 0.85, 1.04 and 0.68 % of the rows of the RTX 5070 Ti, the Apple M2 and the
+    Apple M5 — the M2's least margin is ×1.066); it is no bound across sessions: across days it is exceeded in 0.8 %
+    (Apple M5), 1.9 and 3.8 % (RTX 5070 Ti) and 2.8 % (Apple M2) of the rows, because single kernels move between
+    sessions by more than ×1.065 in 0.6 to 1.1 % of the cases with nothing to see inside a record. The reference's
+    re-timing is evidence of its own: in today's data only the reference alone moved by more than ×1.065 in 7 of 2,932
+    groups, all at M = 1. (These counts are of the margin as built, ×1.065, re-run on 2026-11-28 with the
+    adjudication's scripts. The adjudication itself had run them at ×1.0672 — e^0.065, its margin taken in log
+    space — and reported 1,481, 1,051, 15 of 1,369, 0.7 / 1.8 / 3.8 / 2.5 % and 0.6 to 0.9 %; on the existing records
+    the two margins decide 8 single-record decisions differently — 7 sequential exceptions that qualify by ×1.068 to
+    ×1.078 and one parallel row's row block. The maintainer kept ×1.065.)
+  - *At the other row counts of a parallel row* (M = 4 and 8) the kernel the derived row runs there must have a time
+    in every steady record whose reading at M = 1 was evidence — the same record —, and in every reading there that is
+    evidence it is not slower than the default's choice in the same group: a gain of at least 1, no margin either way.
+    That bar passes 3 of 1,299 rows that other records read slower than ×1/1.02 and refuses 3 of 10,684 they read at
+    least ×1.02 faster; 1 ÷ (margin × gaps) would pass 36 to 47 % of the slower rows, margin × gaps refuse 5.2 to 7.5 %
+    of the faster ones (37 to 51 % and 5.5 to 7.6 % at the adjudication's ×1.0672). The one place the margin touches M = 4 and 8 is the re-timing of the reference (above): a
+    reading there whose reference's re-timing departs beyond margin × the two gaps is no evidence, so in that record
+    the row has no time at that row count — which refuses it, never lets it pass. How often that happens has no
+    measured rate yet: no record before 2026-11-28 re-times a reference.
+  - *The row block* of a candidate's row (or of a kept row: below) replaces its reference row's — the candidate without
+    one, or the kept row with its own — when, at the other row counts where the two run different kernels, each has a
+    reading that is evidence, every such ratio of the two kernels in the same group is at least 1, and at one row count
+    or more every one is at least the margin × the two kernels' gaps (the reference's time cancels in the ratio, so the
+    noise is the two gaps). Among several, the one whose smallest ratio is largest.
+  - *Several candidates*: among those that qualify, the one whose smallest gain at M = 1 is largest. Two records of one
+    device pick different winners in 5.3, 19.6 and 13.3 % of the pairs (6.9, 16.7 and 9.9 % under the rule of two
+    records; 5.2, 20.3 and 13.0 % at ×1.0672), mostly near ties.
+  - *The table's choice*: where the table the records derive for holds another choice than the default's for the
+    shape (a sequential exception, a parallel row, or no row where the default has one), that choice stays unless a
+    candidate that qualifies — or the default's choice itself — beats it by the bar of M = 1 in the same group, in
+    every steady record that times both, the largest gain over the default's choice then taken; a table's choice that
+    no steady record timed at M = 1 stays as it is, its row block too; one that failed or whose check failed in a
+    current group is no longer held, and the default's choice is the one to beat. With the table's choice kept so, 0 of
+    546, 2 of 326 and 0 of 446 choices move between records of one device, and the time behind the best by further
+    records falls from 0.14 / 0.81 / 0.65 % to 0.05 / 0.23 / 0.23 % (at ×1.0672: 0 of 544, 2 of 321, 0 of 439; 0.12 /
+    0.88 / 0.66 % to 0.05 / 0.24 / 0.23 %). A kept row may still move its row block by the
+    rule above, against its own. The sweep times the device table's choices for this
+    ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)); a record taken before it times them only where
+    they are candidates of its set.
+  - *Several steady records*: a decision holds in every steady record that times it — every reading that is evidence
+    clears its bar, at M = 1 and at the other row counts —, and one steady record is enough. A sequential key's cases
+    must reach the same choice, or the table's stays. (The replays of the adjudication measured the same form — a
+    candidate in every record read, `later_pairs.ts` — and found no harm beyond the rule of two records'.)
+  - *Not in the rule*: a pair gate on the quick look's time against the final time, which on the RTX 3080 Ti made one
+    unsteady record as safe as two, was measured on one unsteady device only.
+- **Re-deciding**: a decision of the rule of one steady record carries its evidence (`evidence`: per case, every
+  candidate a steady record timed at M = 1 with its readings against the default's choice and against the table's,
+  its check, and under each row block its row's kernels at the other row counts with their readings), and the margin
+  enters only where `decideOneRecord` reads them. `redecideLinearGemvChoices(derivation, margin)` decides every such
+  decision again from the output alone, by the same function, builds the field again from the table's choices the
+  derivation started from (`tableChoices`), and lists the decisions whose derived choice or row block changes; the
+  decisions of the rule of two records stay. At the derivation's own margin it gives the derivation back. A margin
+  below `GEMV_LOWEST_MARGIN` (×1.03) is taken, but the records hold no times at M = 4 and 8 for the parallel
+  candidates between it and ×1.03 (the sweep carries only those at least ×1.03 faster at M = 1), so such a
+  candidate is refused there for want of a time; the generator warns of it ([below](#the-command)).
+- **The rule of two records** — **the reference's time**: at a case and row count, the fastest `perDispatch` of the reference kernel over every
   current group of the given records in which its row is current, timed and without error. It is a time only when at
   least two different records hold a time within ×1.10 of it (`GEMV_REFERENCE_REPEAT`); otherwise no group at that
   case and row count is evidence for the class, and the reason says the fastest time is not repeated. On a device
@@ -440,7 +620,7 @@ measures nothing and changes no default value.
   comes from the records of four devices: of the baseline kernels timed in two or more records, 210 of 222 repeat
   their fastest time within ×1.10 on the RTX 3080 Ti (36 records of 2026-11-18/19), 344 of 345 on the Apple M2, 256
   of 258 on the Apple M5 and 367 of 367 on the RTX 5070 Ti. The summaries' `baselineSpread` is not read.
-- **Evidence**: a group is evidence for a candidate when it is current, usable for the candidate's class, the
+- **Evidence** (the rule of two records): a group is evidence for a candidate when it is current, usable for the candidate's class, the
   reference's time at its case and row count is repeated, and the candidate's row is current and timed (a row the
   quick look screened out, or one the sweep skipped because the same record's M = 1 group left the candidate
   unadoptable, is never evidence; a skipped row that is a baseline, has a time or is also screened is refused). The
@@ -449,13 +629,14 @@ measures nothing and changes no default value.
   any record that holds part of the candidates: its rows — every candidate of a sentinel at M = 1, the predicted
   candidates of another case, what M = 1 carries at M = 4 and 8 — are evidence as the rules say, and a candidate
   without a row in it has none. It measures no row-block height.
-- **Adoption**: a candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at least
+- **Adoption** (the rule of two records): a candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at least
   two different records are evidence for it, it is at least ×1.10 faster than that choice in every one, and its check
   held in every current group, evidence or not (identical class: its words equal the record's baseline's; reorder
   class: inside the band); a row that failed in a current group rules it out too. Among several, the one whose
   smallest gain is largest.
 - **The identical class** writes the sequential variant's per-shape exceptions (`sequential.shapes`) from M = 1. Its
-  key has no group length: the cases that share a key must reach the same decision, or the key keeps the default. An
+  key has no group length: the cases that share a key must reach the same decision, or the key keeps the default
+  (under the rule of one steady record: the table's choice). An
   adopted variant replaces the key's exception or adds one; when it is the general variant, the key's exception goes.
   It changes no number of any Session. A float-stored shape has a sequential key like any other: from records of the
   bf16 cases a derived table may carry `sequential.shapes` rows for bf16, and an `exact` Session on that adapter then
@@ -463,11 +644,13 @@ measures nothing and changes no default value.
 - **The reorder class** writes the parallel rows (`parallelShapes`): the lanes and the staged flag of the plain and
   staged candidates at M = 1, and the row block. A parallel row serves M = 1 to 8, and at each other row count of
   that range the case table has (M = 4 and 8: the `full` set) it runs its own kernel or, with a row block, the
-  row-blocked kernel of its lanes (`staged-l<lanes>r<rows>`). At each of those row counts groups of at least two
-  records must be evidence for the kernel the derived row runs there, and it may be slower than the default's choice
-  in none of them — for a float-stored shape without a row that choice is the GEMM; a candidate whose row does not
-  meet this is not adopted. The adopted row replaces the shape's row in place, or is added when the shape had none.
-  - **The row block** of a row is chosen by one rule, against a reference row of the same lanes: the default's row
+  row-blocked kernel of its lanes (`staged-l<lanes>r<rows>`). Under the rule of two records, at each of those row
+  counts groups of at least two records must be evidence for the kernel the derived row runs there, and it may be
+  slower than the default's choice in none of them — for a float-stored shape without a row that choice is the GEMM;
+  a candidate whose row does not meet this is not adopted (the rule of one steady record: above). The adopted row
+  replaces the shape's row in place, or is added when the shape had none; a derived choice of no row removes the
+  table's row.
+  - **The row block** under the rule of two records is chosen by one rule, against a reference row of the same lanes: the default's row
     where M = 1 keeps its lanes and staged flag, the candidate without a row block where M = 1 adopts one. The row
     blocks of one lane count write the same words, so the choice among them is speed alone. A row block — or none —
     replaces the one the reference row has only when, at the other row counts where the two run different kernels,
@@ -488,15 +671,34 @@ measures nothing and changes no default value.
   measure a row-block height per case and row count — the `quick` and `explore` sets measure none —, and no rule
   turns those into it) and the general sequential
   variant (it also sets the row blocks' columns and read-ahead).
-- **Output**: the field (absent when nothing is adopted), the default profile's choices, one decision per sequential
-  key, per parallel row and for the thread target (adopted or kept, the default's choice and the derived one, the gains
-  per group that is evidence, why it was kept; for a parallel row also the row block of the default's row and of the
-  derived one, and the derived row's gains at its other row counts), the groups whose case is not current (record,
-  case, row count and how the case differs), the lines that state them (per record its groups — current and not
-  current —, the current groups without a usable reference at `exact` and at `reorder` (a choice the sweep does not
-  measure, a row with packed activations, is not counted) and its rows of current groups that are not current), the
-  rule's two numbers (the threshold ×1.10 and the repeat factor ×1.10) and the records used (path, sha256, date,
-  candidate set, user agent and those counts; the adapter and the case table).
+- **The field** is the table's choices (the default's where the table carries none) with every decision's derived
+  choice in place: so a shape no record measured keeps the table's choice. Under the rule of two records a kept
+  decision writes the default's choice, as before, when groups of two records or more are evidence for one of its
+  candidates at M = 1 (or, for a parallel row, for another row block of the default's row at a row count where the
+  two differ); a decision that has no such evidence — the only records of its shape a lone unsteady record or one
+  without a class — judged nothing, so it keeps the table's choice and its row block (`tableChoice`), and its reason
+  says that fewer than two records are evidence, so the table's choice stays. Lack of evidence does not shield a
+  table's choice that a record rules out, as the rule of one steady record does not: where the table's choice at
+  M = 1 is another kernel than the default's and it failed, or its check failed, in a current group of any record,
+  the decision writes the default's choice and its row block, and its reason says that the table's choice is not
+  held, with the failure and the record and row count where it happened. (A lone unsteady RTX 3080 Ti record
+  against `nvidia-ampere` wrote the default's choice over 99 of its 171 rows before this.) Records that judge every
+  shape they hold give what they gave before: `nvidia-ampere`'s 24 records give its field byte for byte. The general
+  variant and the thread target are the default's. The field is absent when it equals the default's choices.
+- **Output**: the field (absent when it is the default's choices), the default profile's choices, the table's choices
+  it started from (`tableChoices`), one decision per sequential key, per parallel row and for the thread target (which
+  rule decided it, `one-record` or `two-record`; adopted or kept, the default's choice, under the rule of one steady
+  record — and where fewer than two records are evidence and no record rules it out — the table's, and the derived one, the gains per group that is evidence, why it was kept or won; for a
+  parallel row also the row blocks of the default's, the table's and the derived row, and the derived row's gains at
+  its other row counts; under the rule of one steady record its `evidence`, above), the groups whose case is not
+  current (record, case, row count and how the case differs), the lines that state them (per record its groups —
+  current and not current —, the current groups without a usable reference at `exact` and at `reorder` (a choice the
+  sweep does not measure, a row with packed activations, is not counted), its rows of current groups that are not
+  current, and its class with the share and the groups it was read from and which rule reads it; per decision under
+  the rule of one steady record the adopted or nearest candidate's break-even margins), the rule's numbers (`margin`,
+  the class's 20 groups, 20 % and ×1.05, the 20 ms pass and 5 rounds, then the rule of two records' threshold ×1.10
+  and repeat factor ×1.10) and the records used (path, sha256, date, candidate set, user agent, those counts, the class
+  and whether the rule of one steady record reads it; the adapter and the case table).
 
 ## Planning the GEMV measurements
 
@@ -504,9 +706,14 @@ measures nothing and changes no default value.
 for the derivation to be complete under the current runtime (the GEMM baselines read against the table given, or,
 without one, against the embedded table the records' adapter selects): per case and row count of the `full` set, the
 candidates the derivation reads there — at M = 1 every candidate, at M = 4 and 8 the reorder class, on the records'
-gates (subgroups, grid limit; records whose gates differ are refused) — that fewer than two records could be evidence
-for: a current group, usable for the candidate's class, whose reference's time is repeated, with a current row of the
-candidate. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
+gates (subgroups, grid limit; records whose gates differ are refused) — that the records could not be evidence for
+by the rule the derivation will take for the candidate's decision. Where a steady record measured the case at M = 1
+with a usable reference for the class (the identical class: a case of its sequential key), the decision is the rule
+of one steady record's, which reads the steady records alone: a candidate no steady record could be evidence for — a
+current group of a steady record, usable for its class by its own reference row, with a current row of the
+candidate — is listed in `missingSteady`, and records of no class do not fill it. Elsewhere the rule of two records
+decides, and a candidate fewer than two records could be evidence for — a current group whose reference's time is
+repeated, with a current row of the candidate — is listed in `missing`. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
 does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would skip it again); a row
 that failed does not. Of an `explore` record only the rows it timed count: that set carries fewer candidates from
 M = 1 than a run of the `full` set, which would measure a row it skipped, and screens at ×1.10 where the `full` set
@@ -519,17 +726,25 @@ reference's fastest time is not repeated, every candidate read against it at tha
 the step that measures them measures the reference again. A candidate whose reference is a choice the sweep does not
 measure (a row with packed activations) is not listed: no measurement makes it evidence.
 
-The generator writes the plan as a workbench batch ([workbench.md](workbench.md#batches)),
+The generator writes the plan of `missing` as a workbench batch ([workbench.md](workbench.md#batches)),
 `inputs/workbench/batches/gemv-plan-<profile id>.json`: per list of missing candidates one `gemv-sweep` step of the
 `full` set, its `cases` the cases that miss that list at the same row counts, `rows` those row counts, `candidates`
-the list; the steps run twice (one record is not evidence). With no record at hand the batch is the whole
-measurement: the `full` set, twice. With nothing missing no batch is written.
+the list. A step holds at most 19 groups (its cases × its row counts), one fewer than the 20 a record needs for a
+class; a larger one is split by its cases, in table order. That keeps the batch on the rule it was planned for: a step's
+record that read steady would move its cases' decisions to the rule of one steady record, which reads that record's
+few rows alone, so the batch would not complete what the plan promised. The steps run twice: a record without a class
+is evidence only beside a second, even on a steady device. For the same reason no step fills
+`missingSteady`: the generator lists it apart, per case and row count, as what a steady record that times the named
+kernels fills (a run of the `full` or the `explore` set on the device). So after the batch has run, what the
+derivation still lacks is what `missingSteady` named. With no record at hand the batch is the whole measurement: the
+`full` set, twice (one such record of a steady device would be enough). With nothing in `missing` no batch is
+written.
 
 ## The command
 
 `node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,…]] [--attention-bench=<path>[,…]]
-[--gemv-records=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>]
-[--dry-run]`
+[--gemv-records=<path>[,…] [--gemv-margin=<x>]] [--grid-records=<path>[,…]]
+[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]`
 
 `node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
 [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]`
@@ -538,18 +753,31 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
 
 - A registered id uses its table as base and its table's match; giving a match is an error. An id that is not
   registered needs `--vendor` and `--records`.
-- At least one of `--records` and `--gemv-records` is given. With `--gemv-records` alone, a registered table keeps its
-  tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`. `--min-speedup` is the tile
-  geometry's threshold only.
+- At least one of `--records`, `--gemv-records` and `--grid-records` is given. With `--gemv-records` alone, a
+  registered table keeps its tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`.
+  `--min-speedup` is the tile geometry's threshold and the grid-fill rule's threshold on the weighted total.
+- `--grid-records` takes records of the geometry sweep's `grid` set and derives the grid-fill rule
+  ([above](#deriving-the-grid-fill-rule)) onto the table, after the tile geometry and the GEMV choices; alone, a
+  registered table keeps everything else. Without it a table's field is carried; with it a table no pair qualifies for
+  carries none. The header lists the grid records and states the rule.
+- `--gemv-margin` is the GEMV derivation's margin (`DeriveLinearGemvOptions.margin`, default ×1.065), refused as a
+  usage error where the API refuses it (`gemvMarginOf`: a finite number of at least 1) and without
+  `--gemv-records`. The lowest margin whose rows the records hold is `GEMV_LOWEST_MARGIN` (×1.03): the sweep times at
+  M = 4 and 8 only the reorder candidates at least that much faster than the default's choice at M = 1, so below it a
+  parallel row between the two margins is refused for want of a time there, not for its speed; the command says so
+  on stderr and in a verdict line beginning `WARNING:`. The GEMV verdict lines end with the decisions whose derived
+  choice changes at `GEMV_LOWEST_MARGIN` (`redecideLinearGemvChoices` of the output; none listed when the margin is
+  that one), so a table's header shows what the lower margin would move.
 - `--shared` derives a shared table ([above](#shared-tables)): a first one needs `--vendor` and `--architecture`, a
-  registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records` and
-  `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.
+  registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records`,
+  `--grid-records` and `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.
 - `--gemv-plan` derives nothing: it prints what the GEMV records lack ([above](#planning-the-gemv-measurements)) and
   writes its batch (with `--dry-run`, prints it); `--records`, `--attention-bench`, a match and `--min-speedup` beside
   it are usage errors. A registered id's table checks the records' adapter as the derivation does.
 - `--dry-run` writes nothing and prints the derived profile, the verdict lines (with the GEMV decisions shape by shape
-  and whether the table would carry the field) and every field that differs from the registered table; with GEMV
-  records, `linearGemv` is compared as each table runs with it (the default's choices where a table has no field).
+  and whether the table would carry the field, and with grid records whether it would carry `gemmGrid`) and every
+  field that differs from the registered table; with GEMV records, `linearGemv` is compared as each table runs with it
+  (the default's choices where a table has no field).
 - A new table is written but not registered: the command prints the two edits registration needs (the array of
   `BUILTIN_GEOMETRY_PROFILES` and the list `geometry_profile_test.ts` compares it with).
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else.
@@ -568,7 +796,10 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
 - On a machine that has the records: for `apple-m5` and `apple-metal-3-shared`, every record any of their families
   cites, with the registered table as base (a shared derivation for the shared one), and the GEMV sweep records the
   header of `apple-m5` cites, from which its `linearGemv` is derived again rather than carried, derive an object
-  equal to the registered table, provenance included.
+  equal to the registered table, provenance included. The GEMV derivation starts from the table's own choices, as
+  the generator does: the rule of one steady record keeps a choice the table holds unless a challenger beats it
+  ([the table's choice](#deriving-the-gemv-choices)), so a derivation from the default's choices alone is not what
+  the generator writes.
 - The shared derivation on hand-built records (core lane): a geometry faster on one device and slower on another is
   not taken; among the geometries eligible on every device the largest geometric mean of the per-device geometric
   means is taken (devices weigh equally, not cases); one slow case on one device rules a geometry out; a field one
@@ -590,6 +821,18 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
+- The grid-fill rule's derivation (core lane): replaying the recon's interleaved medians of the ladder on the grid
+  cases against `nvidia-ampere`'s tiles adopts (256, 48); a ladder row not identical to the default refuses every
+  pair that picks it there; a tile slower than today beyond the bar refuses the pairs that pick it and not the others;
+  a weighted gain below the threshold refuses every pair; one unsteady record is no evidence and two are; today's tile
+  is the table's own; the refusals. The generator's `--grid-records`: the dry run, the written field and header, the
+  field carried through a regeneration of the tile geometry, and the usage errors.
+- The grid-fill rule (core lane): the walk at its edges (the K floor, the least workgroup count, a padding of exactly
+  the bound, the batch on the z axis, the last tile); on the recon's 125 shapes of 2026-11-28 the tile the recon's own
+  fitting script picked; the lookup without the field equal to the `gemmRows` rule of M on every registered table and
+  the default; the refusals of a broken rule, among them a ladder out of order; the JSON round trip; the linear's
+  dispatch program naming the rule's tile, and the split-K partial the reference GEMM's tile. On the development
+  machine's GPU, a Session with the rule writes the default profile's words on every storage and step (GPU tests).
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
   they moved into the profile, without its one per-shape exception, and the rows added since —; the registered
   tables that carry the field are `apple-metal-3`, `nvidia-ampere`, `nvidia-blackwell` and `apple-m5`, and one
@@ -597,8 +840,8 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   parallel rows in place and its 50 pinned exceptions and 11 pinned parallel rows after them; `nvidia-blackwell`'s,
   `apple-metal-3`'s and `apple-m5`'s hold the default's general variant and thread target, the default's 22
   exceptions in the default's order — each with the default's variant except the ones the case names with the
-  table's (two, 15 and none) —, the counted exceptions of their own after them (41, 65 and 43), and every parallel
-  row of the default in the default's order, a counted number of them changed (42, 52 and 49), with the counted rows
+  table's (two, 17 and none) —, the counted exceptions of their own after them (41, 70 and 45), and every parallel
+  row of the default in the default's order, a counted number of them changed (42, 56 and 49), with the counted rows
   added (20, 13 and 17); no registered table
   removes a parallel row of the default, moves a packed flag or adds a
   packed row; a profile with other choices changes the selection and the pipeline key (core lane).
@@ -623,5 +866,13 @@ measurement: the `full` set, twice. With nothing missing no batch is written.
   the kept cases, groups as the unit of evidence (a stale, screened or skipped row is no evidence while its record's other groups are; records that each hold
   half of the cases derive what a complete pair derives; groups that are not current are reported) and the refusals
   (core lane); the generator's dry run, its write path and the carry-over of an existing `linearGemv`.
-- The plan of GEMV measurements: exactly the missing candidates, and a batch the workbench's own batch reader accepts
-  (core lane).
+- The rule of one steady record on hand-built steady records (core lane), a fault per point: the class (19 groups, a
+  share of 25 %), the reference of the same group, the bar of margin × two gaps and the evidence the decision carries,
+  a failed check, the row's kernel at M = 4 and 8 (×0.99, no time in the same record, a gain of 1 enough), the row
+  block (×1.05 refused), the largest gain, the table's choice kept unless beaten (×1.04 over it), not moved by a record
+  that did not time it, given up for the default's where that beats it, kept on a shape no record measured, an
+  unsteady record alone, a pass of 10 ms, a second steady record below the bar, a reference re-timed ×0.9 its rounds'
+  minimum, and the re-decision under ×1.03 equal to a derivation at ×1.03 (and the derivation itself at ×1.065); the
+  generator deriving from one steady record and stating both rules in its header.
+- The plan of GEMV measurements: exactly the missing candidates, one steady record enough, and a batch the workbench's
+  own batch reader accepts (core lane).

@@ -1,6 +1,8 @@
 """The model card (`README.md`) of the Depth Anything V2 distribution — a pure function derived
 mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live
 in `karume.modelcard`. This module holds only **facts specific to Depth Anything V2**: the
 attribution (source, licence, citation) and what this pipeline's card says.
@@ -22,17 +24,26 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .measurements import convt_diff_text
@@ -65,13 +76,38 @@ DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",
 }
 
+#: Model name → the commit of the upstream checkpoint the stored weights were taken from (the one
+#: fetched on 2026-08-16 into `inputs/depth-anything/Depth-Anything-V2-Small-hf` —
+#: THIRD_PARTY_NOTICES.md). The card pins every model at it.
+DEPTH_ANYTHING_REVISIONS: Mapping[str, str] = {
+    "small": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+}
+
+#: What the upstream card states of how Depth Anything V2 was trained, quoted verbatim (the
+#: maintainer's ruling of 2026-11-27: an upstream's statement the recipe cannot measure is quoted,
+#: not reworded) — the card at the pinned commit, read 2026-11-27.
+DEPTH_ANYTHING_TRAINING_QUOTE = UpstreamQuote(
+    repo="depth-anything/Depth-Anything-V2-Small-hf",
+    revision=DEPTH_ANYTHING_REVISIONS["small"],
+    sections=("Depth Anything V2 Small – Transformers Version", "Model description"),
+    paragraphs=(
+        "It uses the same architecture as the original Depth Anything release, but uses synthetic"
+        " data and a larger capacity teacher model to achieve much finer and robust depth"
+        " predictions.",
+        "The model is trained on ~600K synthetic labeled images and ~62 million real unlabeled"
+        " images, obtaining state-of-the-art results for both relative and absolute depth"
+        " estimation.",
+    ),
+)
+
+#: Every quotation of an upstream card this card writes (checked against the cached cards by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (DEPTH_ANYTHING_TRAINING_QUOTE,)
+
 #: Checked 2026-08-14 against the HF model API: `license: apache-2.0`. The frontmatter is written
 #: on the premise that **every model in the table has this one value** (the MUST above).
 DEPTH_ANYTHING_LICENSE = "apache-2.0"
 
-#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
-#: root — Apache 2.0 §4(a)).
-DEPTH_ANYTHING_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: Measured width of the difference introduced by replacing `ConvTranspose2d` with a 1×1 conv +
 #: pixel shuffle (③ of `depth_anything.patch`). It is **not bit-identical**, so the attribution
@@ -137,20 +173,21 @@ def _depth_anything_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "A monocular **relative depth** distribution, converted into the WebGPU inference runtime",
         "**Karume**'s container format (a `.krm` part sequence whose first part carries the graph",
-        "and model descriptors). Runs as-is in the browser and in Deno.",
+        "and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         "- One graph, one call: pixels in, one **f32 depth value per pixel** out, at the same size",
         "  as the image you handed over.",
         "- **Relative depth has no unit and no origin** — larger means nearer, and only the",
         "  ordering carries meaning. This is not a metric-depth checkpoint: the numbers are not",
-        "  metres and are not comparable across images.",
+        "  meters and are not comparable across images.",
         "- **Pre- and post-processing are included.** The pipeline resizes to"
         f" {config['imageWidth']} × {config['imageHeight']}, normalizes with the constants below,",
         "  runs the graph, and scales the depth map back to the original resolution. Decoding",
         "  PNG / JPEG is *not* part of this — use `createImageBitmap` in the browser, or any",
         "  decoder in Deno.",
-        "- **Normalization and colouring are yours.** The pipeline returns the raw f32 map, not a",
-        "  `[0, 1]` image: folding it with min/max would throw the scale away, and which colour",
+        "- **Normalization and coloring are yours.** The pipeline returns the raw f32 map, not a",
+        "  `[0, 1]` image: folding it with min/max would throw the scale away, and which color",
         "  map to use is a decision this repository should not make for you.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{DEPTH_ANYTHING_SUPPORTED_PIPELINE}`.",
@@ -170,20 +207,20 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         repo = _depth_anything_repo(name)
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **{DEPTH_ANYTHING_LICENSE}** (as of retrieval;"
-            f" [full text]({DEPTH_ANYTHING_LICENSE_TEXT_LINK}) — a verbatim copy is in"
-            " `LICENSE.md`)."
+            f"- **`{name}`**: {pinned(repo, DEPTH_ANYTHING_REVISIONS[name])}, licensed"
+            f" **{DEPTH_ANYTHING_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
-        "- **Only the Small checkpoint is Apache-2.0.** Upstream ships Base and Large under"
-        " **CC BY-NC 4.0**, so they are not converted or redistributed here.",
-        "- **Training data**: see the upstream model card. Depth Anything V2 is distilled from a",
-        "  teacher trained on synthetic data and then trained on pseudo-labelled real images —",
-        "  check the upstream sources against your own use case.",
+        "- **Only the Small checkpoint is redistributed**: upstream licenses Base and Large"
+        " **cc-by-nc-4.0**, so they are not converted or redistributed here.",
+        *quotation(
+            DEPTH_ANYTHING_TRAINING_QUOTE,
+            "- **Training data**: the upstream model card",
+            indent="  ",
+        ),
         f"- **Architecture**: DINOv2 backbone + DPT head"
         f" ([{DEPTH_ANYTHING_PAPER}](https://{DEPTH_ANYTHING_PAPER})).",
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        changes_made_here(APACHE_MODIFICATION_CLAUSE),
         "  conversion into the Karume container format. No retraining, no fine-tuning and",
         "  **no quantization** — the weights are the source checkpoint's own f32 values. The",
         "  graph is the upstream `forward` with two layout-only rewrites (the last fusion",
@@ -194,6 +231,7 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  became a 1×1 convolution followed by a pixel shuffle (they have",
         "  `kernel == stride`, so the two are exactly the same sum in a different order —",
         f"  measured max {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1).",
+        *upstream_cards([hf_link(repo) for repo in _depth_anything_metadata(manifest).base_model]),
     ]
     return lines
 

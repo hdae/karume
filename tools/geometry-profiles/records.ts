@@ -22,8 +22,8 @@ export class RecordError extends Error {
   override name = "RecordError";
 }
 
-/** Which option a record was given to: sweep, attention-bench or GEMV sweep records. */
-export type RecordKind = "records" | "attention-bench" | "gemv-records";
+/** Which option a record was given to: sweep, attention-bench, GEMV sweep or grid records. */
+export type RecordKind = "records" | "attention-bench" | "gemv-records" | "grid-records";
 
 /** How a workbench run was made, as its envelope records it. */
 export type WorkbenchOrigin = {
@@ -54,6 +54,7 @@ const EXPECTED: Readonly<Record<RecordKind, { readonly entry: string; readonly f
     records: { entry: "geometry-sweep", format: "karume-geometry-sweep/" },
     "attention-bench": { entry: "attention-bench", format: "karume-attention-bench/" },
     "gemv-records": { entry: "gemv-sweep", format: "karume-gemv-sweep/" },
+    "grid-records": { entry: "geometry-sweep", format: "karume-geometry-sweep/" },
   };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

@@ -1,9 +1,10 @@
 /**
- * What a run measures: the GEMV sweep's and the geometry sweep's `explore` sets at their defaults
- * (rounds, margins) with no idle time between cases (`IDLE_SECONDS`), each sweep planned by the
- * shared settings exactly as the workbench's entry plans it, and the run's cases in order with the
- * kind the estimate reads them by. The URL may narrow a run for a short trial (`?cases=`,
- * comma-separated ids of either table) and set the idle time (`?idleSeconds=`); nothing else. Pure.
+ * What a run measures: the GEMV sweep's and the geometry sweep's `explore` sets and the geometry
+ * sweep's `grid` set (the grid-fill rule's ladder) at their defaults (rounds, margins) with no idle
+ * time between cases (`IDLE_SECONDS`), each sweep planned by the shared settings exactly as the
+ * workbench's entry plans it, and the run's cases in order with the kind the estimate reads them by.
+ * The URL may narrow a run for a short trial (`?cases=`, comma-separated ids of any of the three
+ * tables) and set the idle time (`?idleSeconds=`); nothing else. Pure.
  *
  * SPEC: docs/spec/benchmark.md#what-a-run-measures
  */
@@ -25,6 +26,7 @@ import {
 import {
   GEOMETRY_SWEEP_ENTRY_ID,
   GEOMETRY_SWEEP_PARAMETERS,
+  GRID_SET,
   planSweep,
   type SweepPlan,
   sweepSelection,
@@ -36,15 +38,19 @@ import {
   parseParameters,
 } from "@karume/sweep-app-support/parameters";
 
-/** The two sweeps of a run, in the order they run. */
-export type SweepId = "gemv" | "geometry";
+/**
+ * The three sweeps of a run, in the order they run: the GEMV sweep, the geometry sweep's `explore`
+ * set and its `grid` set (one geometry sweep record each).
+ */
+export type SweepId = "gemv" | "geometry" | "grid";
 
 /**
  * What a case is for the estimate: a GEMV case is a `sentinel` (measured with every candidate) or
  * `other` (the candidates its sentinels predict); a geometry case is the `first-of-class` (every
- * candidate of `full`) or `later` (what the class's earlier cases left).
+ * candidate of `full`) or `later` (what the class's earlier cases left); a `grid` case times
+ * every tile of the ladder.
  */
-export type CaseKind = "sentinel" | "other" | "first-of-class" | "later";
+export type CaseKind = "sentinel" | "other" | "first-of-class" | "later" | "grid";
 
 /** One case of the run, in run order. */
 export type RunCase = {
@@ -62,7 +68,7 @@ export type PlannedSweep =
       readonly plan: GemvSweepPlan;
     }
   | {
-      readonly sweep: "geometry";
+      readonly sweep: "geometry" | "grid";
       readonly entryId: typeof GEOMETRY_SWEEP_ENTRY_ID;
       readonly parameters: ParameterValues;
       readonly plan: SweepPlan;
@@ -70,7 +76,7 @@ export type PlannedSweep =
 
 /** What the URL asked for (absent: not given). */
 export type Trial = {
-  /** Case ids of either table; a sweep none of them belongs to does not run. */
+  /** Case ids of any of the three tables; a sweep none of them belongs to does not run. */
   readonly cases?: readonly string[];
   readonly idleSeconds?: number;
 };
@@ -80,7 +86,7 @@ export type BenchmarkPlan = {
   readonly sweeps: readonly PlannedSweep[];
   /** Every case of the run, sweep after sweep, each sweep's in its plan's order. */
   readonly cases: readonly RunCase[];
-  /** Idle before every case of the run but the first (the second sweep's first case too). */
+  /** Idle before every case of the run but the first (a later sweep's first case too). */
   readonly idleSeconds: number;
   readonly trial: Trial;
 };
@@ -102,8 +108,11 @@ const IDLE_SECONDS = 0;
 /** The geometry explore set's table (`full`'s). */
 const geometryCaseIds = (): readonly string[] => geometrySweepCases("explore").map(({ id }) => id);
 
+/** The grid set's own table. */
+const gridCaseIds = (): readonly string[] => geometrySweepCases(GRID_SET).map(({ id }) => id);
+
 /**
- * The trial a URL query asks for: `cases` (comma-separated ids of either sweep's table, at least one)
+ * The trial a URL query asks for: `cases` (comma-separated ids of any sweep's table, at least one)
  * and `idleSeconds` (an integer of at least 0, the sweeps' own bounds). Any other parameter, an
  * unknown case id, an empty list and a value that does not fit throw {@link ParameterError}.
  */
@@ -120,12 +129,12 @@ export const trialOfQuery = (query: string): Trial => {
   if (casesText !== null) {
     cases = casesText.split(",").filter((id) => id !== "");
     if (cases.length === 0) throw new ParameterError("cases", "name at least one case");
-    const known = new Set([...GEMV_CASE_IDS, ...geometryCaseIds()]);
+    const known = new Set([...GEMV_CASE_IDS, ...geometryCaseIds(), ...gridCaseIds()]);
     const unknown = cases.filter((id) => !known.has(id));
     if (unknown.length > 0) {
       throw new ParameterError(
         "cases",
-        `${unknown.join(", ")} ${unknown.length === 1 ? "is no case" : "are no cases"} of either sweep`,
+        `${unknown.join(", ")} ${unknown.length === 1 ? "is no case" : "are no cases"} of any sweep`,
       );
     }
   }
@@ -142,12 +151,13 @@ export const trialOfQuery = (query: string): Trial => {
   };
 };
 
-/** The parameter text a sweep's record is parsed from: the explore set, its cases, the idle time. */
+/** The parameter text a sweep's record is parsed from: its candidate set, its cases, the idle time. */
 const givenOf = (
+  candidateSet: "explore" | typeof GRID_SET,
   caseIds: readonly string[] | undefined,
   idleSeconds: number,
 ): Record<string, string> => ({
-  candidateSet: "explore",
+  candidateSet,
   ...(caseIds === undefined ? {} : { cases: caseIds.join(",") }),
   idleSeconds: String(idleSeconds),
 });
@@ -165,6 +175,9 @@ const runCasesOf = (sweep: PlannedSweep): RunCase[] => {
       caseId,
       kind: sentinels.has(caseId) ? "sentinel" : "other",
     }));
+  }
+  if (sweep.sweep === "grid") {
+    return sweep.plan.caseIds.map((caseId) => ({ sweep: "grid", caseId, kind: "grid" }));
   }
   const seen = new Set<string>();
   return sweep.plan.caseIds.map((caseId) => {
@@ -186,7 +199,10 @@ export const planBenchmark = (choice: SweepChoice, trial: Trial): BenchmarkPlan 
   const sweeps: PlannedSweep[] = [];
   const gemvCases = trialCasesIn(trial, GEMV_CASE_IDS);
   if (choice.gemv && gemvCases?.length !== 0) {
-    const parameters = parseParameters(GEMV_SWEEP_PARAMETERS, givenOf(gemvCases, idleSeconds));
+    const parameters = parseParameters(
+      GEMV_SWEEP_PARAMETERS,
+      givenOf("explore", gemvCases, idleSeconds),
+    );
     sweeps.push({
       sweep: "gemv",
       entryId: GEMV_SWEEP_ENTRY_ID,
@@ -198,11 +214,25 @@ export const planBenchmark = (choice: SweepChoice, trial: Trial): BenchmarkPlan 
   if (choice.geometry && geometryCases?.length !== 0) {
     const parameters = parseParameters(
       GEOMETRY_SWEEP_PARAMETERS,
-      givenOf(geometryCases, idleSeconds),
+      givenOf("explore", geometryCases, idleSeconds),
     );
     const selection = sweepSelection(parameters);
     sweeps.push({
       sweep: "geometry",
+      entryId: GEOMETRY_SWEEP_ENTRY_ID,
+      parameters,
+      plan: planSweep(selection, geometrySweepCases(selection.candidateSet)),
+    });
+  }
+  const gridCases = trialCasesIn(trial, gridCaseIds());
+  if (choice.grid && gridCases?.length !== 0) {
+    const parameters = parseParameters(
+      GEOMETRY_SWEEP_PARAMETERS,
+      givenOf(GRID_SET, gridCases, idleSeconds),
+    );
+    const selection = sweepSelection(parameters);
+    sweeps.push({
+      sweep: "grid",
       entryId: GEOMETRY_SWEEP_ENTRY_ID,
       parameters,
       plan: planSweep(selection, geometrySweepCases(selection.candidateSet)),

@@ -97,6 +97,7 @@ import { SAMPLE_MESSAGES } from "./samples";
 import {
   type ChatForm,
   type ChatSettings,
+  drafterOrExpertCache,
   effectiveModelKey,
   gemmaModelChoices,
   chatSpeculative,
@@ -311,11 +312,17 @@ export const Gemma4Page = () => {
     selectedManifest !== undefined &&
     modelKey !== undefined &&
     hasDrafter(selectedManifest, modelKey);
-  const speculative = speculativeChosen && speculativeAvailable;
   const [f16KvChosen, setF16KvChosen] = useState(false);
   // The field is kept as typed; it applies (and is checked) only for a mixture-of-experts model.
   const [expertSlotsText, setExpertSlotsText] = useState("");
   const expertCacheAvailable = modelKey !== undefined && hasExpertCache(modelKey);
+  // The drafter and the expert cache exclude each other (one on disables the other's control).
+  const { speculative, drafterOffForExpertCache, expertCacheOffForDrafter } = drafterOrExpertCache({
+    drafterAvailable: speculativeAvailable,
+    drafterChosen: speculativeChosen,
+    expertCacheAvailable,
+    expertSlotsText,
+  });
   const expertSlotsParsed = useMemo(
     () => parseExpertCacheSlots(expertSlotsText),
     [expertSlotsText],
@@ -1065,14 +1072,20 @@ export const Gemma4Page = () => {
                   id="gemma4-speculative"
                   checked={speculative}
                   onCheckedChange={(checked) => setSpeculativeChosen(checked)}
-                  disabled={running || !speculativeAvailable}
+                  disabled={running || !speculativeAvailable || drafterOffForExpertCache}
                 />
                 <Label htmlFor="gemma4-speculative">MTP drafter (speculative decoding)</Label>
               </div>
               <p className="-mt-2 text-xs text-muted-foreground">
-                {speculativeAvailable
-                  ? "Also reads the drafter weights; the session then speculates with the self-tuning gate. It is designed to emit the same tokens as plain decoding."
-                  : "Not available for this model (no drafter weights, or the mobile QAT distribution)."}
+                {!speculativeAvailable
+                  ? "Not available for this model (no drafter weights, or the mobile QAT distribution)."
+                  : drafterOffForExpertCache
+                    ? "Off while the expert cache has slots: speculative decoding runs only with every expert resident. Clear the slots to use the drafter."
+                    : `Also reads the drafter weights; the session then speculates with the self-tuning gate. It is designed to emit the same tokens as plain decoding.${
+                        expertCacheAvailable
+                          ? " It runs only with every expert resident, so the expert cache is off while it is on."
+                          : ""
+                      }`}
               </p>
               <div className="flex items-center gap-2">
                 <Switch
@@ -1092,9 +1105,11 @@ export const Gemma4Page = () => {
                 id="gemma4-expert-cache"
                 label="Expert cache slots"
                 hint={
-                  expertCacheAvailable
-                    ? `Keeps this many of each layer's ${EXPERT_CACHE_SLOTS.max} experts on the GPU and reads a missing one from the distribution when the routing picks it; a run that missed is run again, so the tokens are those of full residency. One count for every layer (${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}); a comma-separated list of such counts, one per routed layer, layer 0 first (a wrong length is refused by the pipeline); or "${EXPERT_CACHE_FITTED}" for the per-layer allocation fitted to 26B's routing at an average of 64 (more slots in the early layers, the same total VRAM as 64). Empty = every expert resident. Prefill chunks shrink to at most ⌊slots / 8⌋ rows of the fewest layer, so long prompts are slow, and each token is sampled on the CPU. A refusal by the pipeline shows under Status. Applies on the next Load.`
-                    : "Only for a mixture-of-experts model (Gemma 4 QAT 26B)."
+                  expertCacheOffForDrafter
+                    ? "Off while the MTP drafter is on: speculative decoding runs only with every expert resident. Turn the drafter off to use the cache."
+                    : expertCacheAvailable
+                      ? `Keeps this many of each layer's ${EXPERT_CACHE_SLOTS.max} experts on the GPU and reads a missing one from the distribution when the routing picks it; a run that missed is run again, so the tokens are those of full residency. One count for every layer (${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}); a comma-separated list of such counts, one per routed layer, layer 0 first (a wrong length is refused by the pipeline); or "${EXPERT_CACHE_FITTED}" for the per-layer allocation fitted to 26B's routing at an average of 64 (more slots in the early layers, the same total VRAM as 64). Empty = every expert resident. Prefill chunks shrink to at most ⌊slots / 8⌋ rows of the fewest layer, so long prompts are slow, and each token is sampled on the CPU. A refusal by the pipeline shows under Status. Applies on the next Load.`
+                      : "Only for a mixture-of-experts model (Gemma 4 QAT 26B)."
                 }
               >
                 <Input
@@ -1102,7 +1117,7 @@ export const Gemma4Page = () => {
                   value={expertSlotsText}
                   placeholder="off"
                   onChange={(event) => setExpertSlotsText(event.target.value)}
-                  disabled={running || !expertCacheAvailable}
+                  disabled={running || !expertCacheAvailable || expertCacheOffForDrafter}
                 />
                 {expertCacheAvailable && !expertSlotsParsed.ok ? (
                   <p className="text-xs text-destructive">{expertSlotsParsed.errors.join(" ")}</p>

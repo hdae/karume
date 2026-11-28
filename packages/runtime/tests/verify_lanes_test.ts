@@ -224,9 +224,10 @@ const CORE_E2E_TESTS = [
 /**
  * Family lanes that claim no end-to-end test (their real-asset tests are host-side ones in
  * `packages/models/tests`): dropping such a row moves no e2e file into core, so the lane is named
- * here and must exist in `LANES`.
+ * here and must exist in `LANES`. None today: `models:umt5`, the last one, claims its fusion-count
+ * check `e2e_umt5_fusion_counts_test.ts`.
  */
-const HOST_ONLY_FAMILY_LANES = ["models:umt5"];
+const HOST_ONLY_FAMILY_LANES: readonly string[] = [];
 
 test("lane gate: core holds no end-to-end test but the gates that need no model asset", () => {
   assertEquals(

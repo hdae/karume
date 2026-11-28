@@ -135,6 +135,13 @@ export {
 } from "./src/fusion-twins/linear-static-quantize.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export {
+  checkLinearSplitK,
+  LINEAR_SPLITK_AB_BAND,
+  LINEAR_SPLITK_CASES,
+  LINEAR_SPLITK_F64_BAND,
+  type LinearSplitKCheckOptions,
+} from "./src/linear-splitk.ts";
+export {
   checkGemvParallelRows,
   GEMV_PARALLEL_ROWS_CASES,
   type GemvParallelRowsCheckOptions,

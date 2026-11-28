@@ -286,7 +286,7 @@ describe("the derivation reads an explore record", () => {
           { path: "typo.json", sha256: "sha" },
         ),
       Error,
-      'settings.candidateSet is none of quick+ / quick / full / k88 ("explor") nor explore',
+      'settings.candidateSet is none of quick+ / quick / full / k88 / grid ("explor") nor explore',
     );
   });
 });

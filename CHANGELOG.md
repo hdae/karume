@@ -17,6 +17,18 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/runtime/tune`: the GEMV sweep times the device table's choices too (the profile its device resolves to, at
+  `exact` and at `reorder`), in every candidate set and whatever a narrowing, the quick look or the case's M = 1 group
+  says, and every reference once more after the rounds (a reference row's `retimedPerDispatch`, or `retimingUnread` —
+  `clamped` or `zero` — where that pass read no time, which the derivation reads as no evidence); a summary names the
+  table's choices (`table`), and the record states its class by its summaries (`steadiness`: `steady`, `unsteady` or
+  `unclassified`, from `gemvSteadiness`) and, when the caller gives one, its session (`session`: a random id made once
+  per page load or process with `gemvSweepSession`, and the time since its start). All these fields are optional, so the
+  record stays `karume-gemv-sweep/4` and the records taken before them read as they did. The numbers of the rule they
+  serve are exported with it (`GEMV_MARGIN`, `GEMV_LOWEST_MARGIN`, `GEMV_STEADY_MIN_GROUPS`, `GEMV_STEADY_MAX_SHARE`,
+  `GEMV_STEADY_GROUP_SPREAD`, `GEMV_MIN_PASS_MS`, `gemvRoundsGap`, `gemvBreakEven`), with how the derivation reads a
+  record by its class and timing (`gemvRecordReading`, `gemvTimingRefusal`, `GemvRecordTiming`), which the benchmark
+  page shares. The workbench and the benchmark page make the session when they start.
 - `@karume/runtime/tune`: the GEMV sweep's `explore` candidate set (`runGemvSweep({ candidateSet: "explore" })`), a
   short run of `full`'s row counts. Twelve sentinel cases of the whole case table (`gemvSentinels`,
   `GEMV_SENTINEL_COUNT`: the case nearest to all, then again and again the one farthest from those chosen —
@@ -69,9 +81,86 @@ measurements in `docs/research/`.
   case with `explore` unless `idleSeconds` is given (10 s with the other sets, and in `geometry-sweep`): on an RTX
   3080 Ti two explore runs without idle time took a third less time, and the derivation from them differed from that of
   two runs with 10 s on 28 of 216 decisions, where two pairs each mixing one run of either kind differed on 30.
+- `karume-gemma4-qat` (Gemma 4 26B A4B, recipe only — the repository on Hugging Face carries it from the next
+  upload): 26B ships Google's QAT MTP drafter (`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized-assistant`, its
+  weights on their own int4 grid, borrowing 26B's key/value states and embedding table) as its `drafter` role, so
+  `speculative` works with every expert resident; `expertCache` still refuses `speculative`. The speed sentence of
+  26B's `i4-fast` now says it is of the decode without the drafter.
+- `@karume/runtime`: a geometry profile may carry the grid-fill rule of the GEMM (`gemmGrid`, type `GemmGridRule`): a
+  ladder of tiles walked by the dispatch grid's workgroup count, which in such a table replaces the row-count buckets
+  of linear (and its split-K partial), matmul and bmm. A table injected with `acquireGpu({ geometryProfile })` may
+  carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. Neither the default profile nor any
+  built-in table carries one, so no Session's keys or kernels change.
+- `@karume/runtime/tune`: the geometry sweep's `grid` candidate set (`runGeometrySweep({ candidateSet: "grid" })`):
+  the grid-fill rule's ladder of five tiles on 33 linears and bmms of the default presets (`geometrySweepCases("grid")`,
+  weights in f32, f16, bf16 and int4 as the presets store them), timed in interleaved palindrome rounds at one reps
+  per case, with no quick look (a margin other than 0 is refused) and no re-measurement of the default. The record
+  stays `karume-geometry-sweep/4`; `deriveGeometryProfile` refuses it. The sweep's linear cases may now carry bf16
+  weights. The workbench's `geometry-sweep` entry takes `candidateSet=grid` and summarises each tile against the
+  case's default by the median of its per-round ratios.
+- `@karume/runtime/tune`: `deriveGemmGrid` derives the grid-fill rule's two workgroup counts for a table from its
+  device's grid records, with the ladder (`GEMM_GRID_LADDER`), the K floor and the padding bound the code fixes and
+  the pairs it tries (`GEMM_GRID_LARGEST_MIN_WORKGROUPS`, `GEMM_GRID_MIN_WORKGROUPS`): a pair qualifies when its tile
+  is identical to the default on every case, not slower than the table's tile beyond `1 ÷ (×1.065 × the two rows'
+  gaps)` in any reading (a steady record alone, any other beside a second), and gains at least ×1.05 on the
+  census-weighted total; none qualifying, the table carries no field. The generator takes the records with
+  `--grid-records`. No embedded table was regenerated with it.
 
 ### Changed
 
+- `@karume/runtime/tune`: `deriveLinearGemvChoices` adopts from one steady record. A record is steady when at least 20
+  of its groups have a baseline spread and at most 20 % of those spread beyond ×1.05 (`gemvSteadiness`). A shape a
+  steady record measured is decided by the rule of one steady record: at M = 1 a candidate's gain over the default's
+  choice in the same group must clear margin × its gap × the reference's gap (a row's gap: its second-smallest round
+  ÷ its smallest; the margin `DeriveLinearGemvOptions.margin`, ×1.065 by default) in every steady record that times
+  it, a pass under 20 ms or a reference re-timed beyond that bar being no evidence; its row is not slower than the
+  default's choice at 4 and 8 rows in the same record; a row block clears the bar over the row's own kernel at one row
+  count; and the table's choice stays unless beaten by the bar in the same group. Any other shape is decided by the
+  earlier rule of two records. The field is now the table's choices with the derived ones in place (a shape no record
+  measured keeps the table's choice, and so does a decision of the rule of two records that fewer than two records
+  are evidence for — a lone unsteady record no longer writes the default's choices back). A decision carries its evidence (every candidate timed at M = 1 with its gain,
+  gaps, check and break-even margin, and its row's kernels under each row block), and
+  `redecideLinearGemvChoices(derivation, margin)` decides it again under another margin from the output alone and
+  lists what changes; `decideOneRecord` is the rule itself. The result's `rule` names every number of both rules, and
+  a record's provenance its class. `planGemvMeasurements` counts by the rule the derivation
+  takes for each decision: where a steady record timed the case at M = 1 only a steady record fills a gap
+  (`missingSteady`, which the generator's `--gemv-plan` lists apart and puts in no batch step), elsewhere two records. The generator's header
+  states both rules; its `--gemv-margin` sets the margin (a usage error where the API refuses it, `gemvMarginOf`, now
+  exported; a warning below ×1.03), and its GEMV verdict lines end with the decisions that change at ×1.03. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
+  and, under the new rule, `tableChoice` and `evidence`.
+- `@karume/runtime`: the embedded tables `apple-m5` and `apple-metal-3` hold GEMV choices derived again by the rule
+  of one steady record at ×1.065 from the GEMV records their headers cite, every choice they held kept: `apple-m5`
+  adds two sequential exceptions (int4 `12288 × 1536`, int8 `256 × 2560`); `apple-metal-3` adds five (int4, int8 and
+  int2), gives two bf16 exceptions another variant (`6144 × 1536` and `4096 × 2560`, `c128u16`) and moves four int4
+  g32 parallel rows from a row block of 4 to 2. A sequential variant and a row block write the words of the choice
+  they replace, so no Session's numbers change on those adapters. `nvidia-ampere` (its records are unsteady, so the
+  rule of two records gives its field back) and `nvidia-blackwell` (waiting for a second measurement) are unchanged.
+- The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
+  (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group,
+  and against the device table's choice where the record names it, as the derivation keeps a table's choice),
+  at ×1.065 and at ×1.03 side by side, beside the run's class as the derivation will read the record
+  (`gemvRecordReading`: rounded or missing GPU timestamps are no evidence, however steady) — steady in ns, "this run
+  alone is enough for a table";
+  unsteady, "please run the page once more at another time"; too few groups so far —, and a note after an unsteady
+  run asks for a second one. `unpack.ts` says beside the file it writes how the derivation will read each GEMV
+  record (the same test). The GEMV priors of
+  the time left are 29 and 17 s (were 27 and 15: the re-timing, the ×1.03 carry, the explore set's prediction at ×1.03
+  and a device table's choices add 5.5 and 8.4 % on average over four devices); a run of the two `explore` sets
+  takes about 1 h 12 min.
+- The benchmark app (private): the default run gains the geometry sweep's `grid` set — the GEMM tile ladder, its 33
+  cases at 5 rounds — after the two `explore` sets, with a checkbox of its own; its record is the workbench's
+  `geometry-sweep` record of that set, which the generator's `--grid-records` reads. The page says after the run, and
+  `unpack.ts` beside the file, when its GPU timestamps were rounded or missing (that derivation refuses them). A grid
+  case's prior is 10 s (the page's own run of the set on an RTX 3080 Ti, 337 s); a run of the defaults takes about
+  1 h 17 min. Two records of
+  one file that would take one name get the workbench's `-1` suffix from `unpack.ts`.
+- `@karume/runtime/tune`: the GEMV sweep's `explore` set predicts, of a sentinel's rows, every one at least ×1.03
+  (`GEMV_LOWEST_MARGIN`) faster than the default's choice there (was ×1.10), so that one steady explore record holds
+  the rows a re-decision of the derivation at ×1.03 reads; on the four devices' records the other cases' timed passes
+  grow by 0.6 to 7.5 %.
+- `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
+  the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
+  record — and its re-decision at ×1.03 — reads there.
 - `@karume/runtime/tune`: in every set of the GEMV sweep, the quick look's bar of a class comes only from kernels
   the derivation can adopt — their check, read right after the quick look, held, and no subgroup form (no table row
   holds one). A kernel whose check fails no longer screens out the true best.
@@ -87,6 +176,24 @@ measurements in `docs/research/`.
   time now takes about 36 min (was about 40 min), and the derivation's decisions moved within the repeat noise. The
   record states the floor as `settings.warmStart.loadedMinNs`; the format stays `karume-gemv-sweep/4` (no reader
   needs the field).
+- `@karume/runtime/tune`: the GEMV sweep's case table has the two shapes of 26B A4B's QAT MTP drafter that 12B's
+  drafter does not share — `pre_projection` (i4 g32, n 1024, k 5632) and `post_projection` (n 2816, k 1024) —, 118
+  cases in all (was 116). The drafter's other shapes are 12B's drafter's cases, now labelled for both. The `explore`
+  set's twelve sentinels stay the same cases.
+- `@karume/runtime`: the split-K linear, which only the private Session key `LINEAR_SPLIT_K` selects, is now the split
+  of the GEMM skeleton — the reference GEMM's kernel over one slice of the K tiles, then the existing combine —
+  instead of one thread per output, and takes every weight storage the GEMM reads under f32 compute (f16, bf16,
+  int8, int4, int2 as well as f32); its slices are whole K tiles, so a tile count the slice count does not divide is
+  cut too. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
+  the reference's grid is under-filled (Gemma 4 prefill's narrow projections), and is up to 1.33 times slower where
+  the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change. The workbench's
+  `kernel-check` entry runs a fifteenth check, `linear-splitk`.
+- `@karume/runtime`: the memory estimate counts a linear's node temporaries from the dispatch program execution
+  builds, which it builds only for a linear that has such temporaries — the a8 linear's quantized activations and
+  scales (the same numbers as before) and, under the private key, the split-K linear's partial sums; every other
+  linear is counted as before. An a8 linear on a per-channel int8 weight whose `k` passes the i32 reduction
+  guard now fails the estimate with execution's message, where the estimate returned a number and the Session failed
+  at its first run.
 
 ## [0.24.0] - 2026-11-25
 

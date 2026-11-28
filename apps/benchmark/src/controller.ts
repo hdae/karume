@@ -1,7 +1,7 @@
 /**
  * A run of the benchmark: the planned sweeps one after another, each one workbench record made by
  * the shared code (its per-case loop with idle time, cancel and device-loss rules, its merged record
- * and summary, the record's envelope), with the idle time before the second sweep's first case too,
+ * and summary, the record's envelope), with the idle time before a later sweep's first case too,
  * then the bundle of those records. A run is complete only when every planned sweep finished and its
  * signal never aborted; a complete run downloads the bundle at once. A run a cancel, a device loss or
  * an error stopped keeps what it measured and leaves the download to the person (the page's button),
@@ -18,6 +18,7 @@ import {
   type GemvSweepOptions,
   type GemvSweepProgress,
   type GemvSweepReport,
+  type GemvSweepSession,
   type GeometrySweepOptions,
   type GeometrySweepProgress,
   type GeometrySweepReport,
@@ -61,9 +62,10 @@ export type BenchmarkEvent =
   /** The run's case `index` starts (its sweep acquires a device of its own). */
   | { readonly kind: "case"; readonly index: number }
   | { readonly kind: "progress"; readonly sweep: "gemv"; readonly progress: GemvSweepProgress }
+  /** A geometry sweep's event, of its `explore` set (`geometry`) or its `grid` set (`grid`). */
   | {
       readonly kind: "progress";
-      readonly sweep: "geometry";
+      readonly sweep: "geometry" | "grid";
       readonly progress: GeometrySweepProgress;
     }
   /**
@@ -71,7 +73,11 @@ export type BenchmarkEvent =
    * or a device loss may have cut it short).
    */
   | { readonly kind: "record"; readonly sweep: "gemv"; readonly report: GemvSweepReport }
-  | { readonly kind: "record"; readonly sweep: "geometry"; readonly report: GeometrySweepReport };
+  | {
+      readonly kind: "record";
+      readonly sweep: "geometry" | "grid";
+      readonly report: GeometrySweepReport;
+    };
 
 /** An event and the moment it came (`performance.now()` milliseconds). */
 export type StampedEvent = { readonly at: number; readonly event: BenchmarkEvent };
@@ -90,6 +96,11 @@ export type BenchmarkDeps = {
   readonly pageFacts: () => PageFacts;
   /** The WebGPU implementation (default `navigator.gpu`). */
   readonly gpu?: GPU;
+  /**
+   * The page load's session, made when the page loaded: every GEMV record of its runs names it, so
+   * two runs in one page load are told from runs in two.
+   */
+  readonly session?: GemvSweepSession;
   /** One GEMV sweep call (one case). Default `runGemvSweep`. */
   readonly gemvSweep?: (options: GemvSweepOptions) => Promise<GemvSweepReport>;
   /** One geometry sweep call (one case). Default `runGeometrySweep`. */
@@ -188,6 +199,7 @@ export const runBenchmark = async (
         if (sweep.sweep === "gemv") {
           const outcome = await runGemvPlan(sweep.plan, {
             ...common,
+            ...(deps.session === undefined ? {} : { session: deps.session }),
             sweep: async (options) => {
               const report = await gemvSweep(options);
               emit({ kind: "record", sweep: "gemv", report });
@@ -202,16 +214,17 @@ export const runBenchmark = async (
           loopStop = outcome.stop;
           return gemvSweepResult(sweep.plan, outcome);
         }
+        const set = sweep.sweep;
         const outcome = await runSweepPlan(sweep.plan, {
           ...common,
           sweep: async (options) => {
             const report = await geometrySweep(options);
-            emit({ kind: "record", sweep: "geometry", report });
+            emit({ kind: "record", sweep: set, report });
             return report;
           },
           onEvent: relay((progress: GeometrySweepProgress) => ({
             kind: "progress",
-            sweep: "geometry",
+            sweep: set,
             progress,
           })),
         });

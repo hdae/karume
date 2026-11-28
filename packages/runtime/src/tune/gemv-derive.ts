@@ -53,9 +53,32 @@
  * another format (no older one is read), wall-clock or quantized timing, another adapter, the same
  * record twice.
  *
- * ## The adoption rule (the maintainer, 2026-11-17)
+ * ## The two rules
  *
- * The timing of these small dispatches moves between runs, so one record is not evidence:
+ * A record's class comes from its summaries (gemv-rule.ts's `gemvSteadiness`): steady with at least
+ * 20 groups that have a baseline spread, at most 20 % of them beyond ×1.05. A decision (a sequential
+ * key, a parallel row) one of whose cases a steady record measured at M = 1 with a usable reference
+ * is decided by the rule of one steady record over the steady records (gemv-one-record.ts — the
+ * maintainer, 2026-11-28); any other decision by the rule of two records over every record (below —
+ * the maintainer, 2026-11-17). A failure or a failed check in a current group of any record rules a
+ * candidate out under either.
+ *
+ * The rule of one steady record reads, in each steady record's group, a candidate's time against the
+ * reference's row of the same group — no second record need repeat it —, both rows' gaps (second-
+ * smallest round ÷ smallest) and the reference's re-timing; a row whose pass is shorter than 20 ms
+ * is no evidence. Those readings are the decision's `evidence`, margin-free, and the margin is applied
+ * by `decideOneRecord` alone, so {@link redecideLinearGemvChoices} decides an output again under
+ * another margin by the same code. Where the table the records derive for holds another choice than
+ * the default's, that choice is the one to beat; the field is the table's choices with every
+ * decision's derived choice in place, so a shape no record measured keeps the table's choice — and so
+ * does a decision of the rule of two records that fewer than two records are evidence for, unless a
+ * record rules that choice out (then the default's is written back, as the rule of one steady record
+ * does).
+ *
+ * ## The rule of two records (the maintainer, 2026-11-17)
+ *
+ * The timing of these small dispatches moves between runs, so one record of a device that is not
+ * steady is not evidence:
  *
  * - A candidate replaces the default profile's choice for a shape only when, at M = 1, groups of at
  *   least {@link MIN_RECORDS} different records are evidence for it and it is at least
@@ -93,6 +116,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { canonicalJsonText } from "../format/container/json.ts";
 import {
   assertGeometryProfile,
   DEFAULT_GEOMETRY_PROFILE,
@@ -131,11 +155,38 @@ import {
 import { GEMV_CASES, type GemvCase, gemvCaseOf, type GemvSweepStorage } from "./gemv-cases.ts";
 import { gemvCaseFingerprint, gemvCaseTableId, gemvKernelId } from "./gemv-fingerprint.ts";
 import {
+  decideOneRecord,
+  gemvTableNotHeld,
+  type GemvCandidateEvidence,
+  type GemvKeptRow,
+  type GemvOneRecordEvidence,
+  type GemvOneRecordOutcome,
+  type GemvPairReading,
+  type GemvRowBlockOption,
+  type GemvRowCountEvidence,
+} from "./gemv-one-record.ts";
+import {
   GEMV_SWEEP_FORMAT,
   type GemvSweepChoice,
+  type GemvRetimingUnread,
   type GemvSweepFamilyChoice,
   type GemvSweepRow,
 } from "./gemv-report.ts";
+import {
+  GEMV_MIN_PASS_MS,
+  GEMV_STEADY_GROUP_SPREAD,
+  GEMV_STEADY_MAX_SHARE,
+  GEMV_STEADY_MIN_GROUPS,
+  gemvBreakEven,
+  gemvMarginOf,
+  gemvRecordReading,
+  gemvRoundsGap,
+  type GemvSteadiness,
+  gemvSteadiness,
+  gemvTimingRefusal,
+  isGemvTimestampUnit,
+} from "./gemv-rule.ts";
+import { ROUNDS } from "./measurement.ts";
 
 /** The fewest different records whose groups must be evidence: one record is not evidence. */
 const MIN_RECORDS = 2;
@@ -176,6 +227,14 @@ type RowObservation = {
   readonly choice: GemvSweepChoice;
   readonly kernel?: string;
   readonly perDispatch?: number;
+  /** Dispatches per pass (the rule of one steady record reads the pass's length). */
+  readonly reps?: number;
+  /** The pass's time per round (clamped rounds are 0): the rule of one steady record reads the gap. */
+  readonly rounds?: readonly number[];
+  /** A reference's pass once more after the rounds ÷ `reps` (a record of 2026-11-28 on). */
+  readonly retimedPerDispatch?: number;
+  /** A reference whose pass once more read no time (clamped, 0, or the device lost): no evidence is read against it. */
+  readonly retimingUnread?: GemvRetimingUnread;
   readonly identicalToBaseline?: boolean;
   readonly withinBand?: boolean;
   readonly screened?: true;
@@ -198,6 +257,10 @@ type GemvSweepSource = {
   readonly date: string;
   readonly candidateSet: GemvCandidateSet;
   readonly userAgent?: string;
+  /** The timestamps' unit: the rule of one steady record reads a pass's length in ns only. */
+  readonly unit: "ns" | "deno-raw-tick";
+  /** The record's class by its summaries (whatever the record states of itself). */
+  readonly steadiness: GemvSteadiness;
   readonly adapter: Adapter;
   /** The id of the profile the sweep's device resolved to (absent in a record written before the field). */
   readonly geometryProfile?: string;
@@ -246,6 +309,12 @@ const optionalAt = <T>(
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 const isString = (value: unknown): value is string => typeof value === "string";
 const isTrue = (value: unknown): value is true => value === true;
+const isRetimingUnread = (value: unknown): value is GemvRetimingUnread =>
+  value === "clamped" || value === "zero" || value === "lost";
+/** A row's rounds: finite times of at least 0 (a clamped round is 0). */
+const isRounds = (value: unknown): value is number[] =>
+  Array.isArray(value) &&
+  value.every((round) => typeof round === "number" && Number.isFinite(round) && round >= 0);
 
 const CHOICE_IDS = [
   "gemv-m1",
@@ -342,6 +411,13 @@ const parseRow = (value: unknown, where: string): RowObservation => {
   if (!isBoolean(isBaseline)) throw new Error(`${where}: isBaseline is not a boolean`);
   const kernel = optionalAt(row, "kernel", isString, where);
   const perDispatch = optionalAt(row, "perDispatch", isPositiveNumber, where);
+  const reps = optionalAt(row, "reps", isPositiveInteger, where);
+  const rounds = optionalAt(row, "rounds", isRounds, where);
+  const retimedPerDispatch = optionalAt(row, "retimedPerDispatch", isPositiveNumber, where);
+  const retimingUnread = optionalAt(row, "retimingUnread", isRetimingUnread, where);
+  if (retimingUnread !== undefined && retimedPerDispatch !== undefined) {
+    throw new Error(`${where}: a row has retimingUnread or retimedPerDispatch, not both`);
+  }
   const identicalToBaseline = optionalAt(row, "identicalToBaseline", isBoolean, where);
   const withinBand = optionalAt(row, "withinBand", isBoolean, where);
   const screened = optionalAt(row, "screened", isTrue, where);
@@ -362,6 +438,10 @@ const parseRow = (value: unknown, where: string): RowObservation => {
     choice: parseChoice(row.choice, where),
     ...(kernel === undefined ? {} : { kernel }),
     ...(perDispatch === undefined ? {} : { perDispatch }),
+    ...(reps === undefined ? {} : { reps }),
+    ...(rounds === undefined ? {} : { rounds }),
+    ...(retimedPerDispatch === undefined ? {} : { retimedPerDispatch }),
+    ...(retimingUnread === undefined ? {} : { retimingUnread }),
     ...(identicalToBaseline === undefined ? {} : { identicalToBaseline }),
     ...(withinBand === undefined ? {} : { withinBand }),
     ...(screened === undefined ? {} : { screened }),
@@ -390,12 +470,13 @@ const parseGemvSweepRecord = (
   const timing = objectAt(record.gpuTiming, `${where} gpuTiming`);
   // The wall clock adds the submit-to-completion floor, which moves per pass; quantized timestamps
   // move a small dispatch's minimum by a whole step
-  if (timing.unit !== "ns" && timing.unit !== "deno-raw-tick") {
+  const { unit } = timing;
+  if (!isGemvTimestampUnit(unit)) {
     throw new Error(
       `${where}: gpuTiming.unit is ${JSON.stringify(timing.unit)} (must be ns or deno-raw-tick — a wall-clock record is not read)`,
     );
   }
-  if (timing.quantized !== false) {
+  if (gemvTimingRefusal(timing) === "quantized") {
     throw new Error(
       `${where}: gpuTiming.quantized is ${JSON.stringify(timing.quantized)} (quantized timestamps are not read)`,
     );
@@ -431,12 +512,15 @@ const parseGemvSweepRecord = (
   });
   if (!Array.isArray(record.summaries)) throw new Error(`${where}: summaries is not an array`);
   const groups = new Map<string, GroupObservation & { rows: Map<string, RowObservation> }>();
+  const spreads: { baselineSpread?: number }[] = [];
   record.summaries.forEach((value, index) => {
     const at = `${where} summaries[${index}]`;
     const summary = objectAt(value, at);
     const caseId = stringAt(summary, "caseId", at);
     const { m } = summary;
     if (!isPositiveInteger(m)) throw new Error(`${at}: m is not a positive integer`);
+    const baselineSpread = optionalAt(summary, "baselineSpread", isPositiveNumber, at);
+    spreads.push(baselineSpread === undefined ? {} : { baselineSpread });
     if (!cases.has(caseId)) throw new Error(`${at}: case ${caseId} is not among the planned cases`);
     const profileAt = objectAt(summary.profile, `${at} profile`);
     const key = groupKey(caseId, m);
@@ -474,6 +558,8 @@ const parseGemvSweepRecord = (
     date: stringAt(record, "date", where),
     candidateSet,
     ...(userAgent === undefined ? {} : { userAgent }),
+    unit,
+    steadiness: gemvSteadiness(spreads),
     adapter,
     ...(geometryProfile === undefined ? {} : { geometryProfile }),
     gates: { subgroups, maxComputeWorkgroupsPerDimension: limit },
@@ -936,10 +1022,37 @@ export type LinearGemvDecision = {
   readonly cases: readonly string[];
   /** The default profile's choice (`c32u4`, `parallel-l4`, `staged-l32`, `packed-l32`, `16384`). */
   readonly defaultChoice: string;
-  /** The derived choice (the default's when kept). */
+  /**
+   * Which rule decided it. `one-record`: a steady record measured a case of it at M = 1 with a usable
+   * reference, so the steady records decide by the rule of one steady record, and the choice to beat
+   * is the table's (`tableChoice`). `two-record`: none did, so the records decide by the rule of two
+   * records (×1.10 in every record against the reference's repeated fastest time), and the choice to
+   * beat is the default's. The thread target's is `two-record` (no rule derives it).
+   */
+  readonly path: "one-record" | "two-record";
+  /**
+   * `one-record`, and a `two-record` decision that fewer than two records are evidence for (no
+   * candidate at M = 1, no other row block of the default's row) and whose table's choice no record
+   * rules out (failed, or its check failed, at M = 1): the choice the table the records
+   * derive for holds for the shape (the default's where the table holds it; `no row (…)` for a
+   * parallel decision without a row there).
+   */
+  readonly tableChoice?: string;
+  /** Beside {@link tableChoice}, `parallelShapes`: the row block of the table's row (absent: none). */
+  readonly tableRowBlock?: LinearGemvParallelRows;
+  /**
+   * The derived choice: under `one-record` the table's when kept, under `two-record` the default's
+   * when kept — the table's where fewer than two records are evidence and no record rules it out
+   * ({@link tableChoice}).
+   */
   readonly derivedChoice: string;
+  /**
+   * `kept`: the choice to beat stays — under `one-record` the table's choice with its row block,
+   * under `two-record` the default's (its row block may still move: then `adopted`), or the table's
+   * where fewer than two records are evidence (no evidence moves nothing) and no record rules it out.
+   */
   readonly outcome: "adopted" | "kept";
-  /** Why the default's choice stays (`outcome` kept). */
+  /** Why the choice to beat stays (`outcome` kept), or under `one-record` why the derived choice won. */
   readonly reason?: string;
   /**
    * The candidate {@link gains} belong to: the adopted one, or when kept the one nearest to the
@@ -957,6 +1070,14 @@ export type LinearGemvDecision = {
    * its other row counts against the default's choice there, per group that is evidence.
    */
   readonly rowGains?: readonly LinearGemvRowGain[];
+  /**
+   * `one-record`: what the rule read, per case of the decision (several for a sequential key): every
+   * candidate a steady record timed at M = 1 with its readings — gain, both gaps, the reference's
+   * re-timing and the break-even margin — against the default's choice and the table's, its check,
+   * and the kernels of its row at the other row counts under each row block with theirs. Margin-free:
+   * {@link redecideLinearGemvChoices} decides it again under another margin from this alone.
+   */
+  readonly evidence?: readonly GemvOneRecordEvidence[];
   /** What the records showed that the field does not hold (the subgroup form). */
   readonly notes: readonly string[];
 };
@@ -998,17 +1119,20 @@ export type LinearGemvDerivation = {
   readonly linearGemv?: LinearGemvChoices;
   /** The default profile's choices, which the records measured against. */
   readonly defaults: LinearGemvChoices;
+  /**
+   * The choices of the table the records derive for (the default's where it carries none): what the
+   * field starts from, each decision's derived choice then written in place; the rule of one steady
+   * record keeps them unless beaten, and a shape no decision covers keeps its choice.
+   */
+  readonly tableChoices: LinearGemvChoices;
   /** Per class and shape, in the case table's order; the thread target last. */
   readonly decisions: readonly LinearGemvDecision[];
   /** The groups no evidence comes from because their case is not the current runtime's. */
   readonly stale: readonly LinearGemvStaleGroup[];
   /** The decisions as lines (a generated table's header, a generator's dry run). */
   readonly verdicts: readonly string[];
-  /**
-   * The rule's threshold, and the factor within which a second record repeats a reference's fastest
-   * time for that time to be read.
-   */
-  readonly rule: { readonly minSpeedup: number; readonly referenceRepeat: number };
+  /** The rule's numbers: those of the rule of one steady record, then those of the rule of two records. */
+  readonly rule: LinearGemvRule;
   /** The records used: the adapter, the case table's fingerprint, and each record. */
   readonly provenance: {
     readonly adapter: Adapter;
@@ -1020,8 +1144,31 @@ export type LinearGemvDerivation = {
       readonly candidateSet: GemvCandidateSet;
       readonly userAgent?: string;
       readonly groups: LinearGemvRecordGroups;
+      /** Its class by its summaries. */
+      readonly steadiness: GemvSteadiness;
+      /** Whether the rule of one steady record reads it (steady, timestamps in ns). */
+      readonly steady: boolean;
     }[];
   };
+};
+
+/** The numbers of the derivation's two rules. */
+export type LinearGemvRule = {
+  /** The rule of one steady record: the margin a gain at M = 1 must clear, times the two gaps. */
+  readonly margin: number;
+  /** A record's class: at least this many groups with a baseline spread … */
+  readonly steadyMinGroups: number;
+  /** … of which at most this share spreads beyond {@link LinearGemvRule.steadyGroupSpread}. */
+  readonly steadyMaxShare: number;
+  readonly steadyGroupSpread: number;
+  /** A kernel whose pass is shorter (ms) makes its group no evidence under the rule of one record. */
+  readonly minPassMs: number;
+  /** The rounds a sweep takes by default (a gap is the second-smallest of them ÷ the smallest). */
+  readonly rounds: number;
+  /** The rule of two records: the threshold in every record. */
+  readonly minSpeedup: number;
+  /** The rule of two records: the factor within which a second record repeats a reference's fastest time. */
+  readonly referenceRepeat: number;
 };
 
 /** Options of {@link deriveLinearGemvChoices}. */
@@ -1032,6 +1179,11 @@ export type DeriveLinearGemvOptions = {
    * adapter's answer).
    */
   readonly table: GeometryProfile;
+  /**
+   * The margin of the rule of one steady record (default gemv-rule.ts's `GEMV_MARGIN`, ×1.065; a
+   * finite number of at least 1).
+   */
+  readonly margin?: number;
 };
 
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
@@ -1455,10 +1607,23 @@ const evaluate = (
   };
 };
 
-/** The outcome of one case and class: the adopted candidate, or why the default stays. */
+/**
+ * The outcome of one case and class: the adopted candidate, or why the default stays — and whether
+ * the records judged the case at all (`judged`: groups of {@link MIN_RECORDS} records or more are
+ * evidence for some candidate at M = 1).
+ */
 type CaseOutcome =
   | { readonly kind: "adopted"; readonly evaluation: Evaluation }
-  | { readonly kind: "kept"; readonly reason: string; readonly nearest?: Evaluation };
+  | {
+      readonly kind: "kept";
+      readonly reason: string;
+      readonly nearest?: Evaluation;
+      readonly judged: boolean;
+    };
+
+/** Whether groups of {@link MIN_RECORDS} records or more are evidence for an evaluation at M = 1. */
+const hasEvidence = ({ gains }: Evaluation): boolean =>
+  new Set(gains.map(({ record }) => record)).size >= MIN_RECORDS;
 
 const judgeCase = (
   records: readonly Labelled[],
@@ -1472,11 +1637,588 @@ const judgeCase = (
   const best = largestSmallest(qualifying);
   if (best !== undefined) return { kind: "adopted", evaluation: best };
   const nearest = largestSmallest(evaluations);
-  if (nearest === undefined) return { kind: "kept", reason: "no candidate was measured" };
+  if (nearest === undefined) {
+    return { kind: "kept", reason: "no candidate was measured", judged: false };
+  }
   return {
     kind: "kept",
     reason: `no candidate is ${formatRatio(GEMV_MIN_SPEEDUP)} faster in the groups of ${MIN_RECORDS} or more records that are evidence, with its check held (nearest ${nearest.name}: ${nearest.failure ?? "?"})`,
     nearest,
+    judged: evaluations.some(hasEvidence),
+  };
+};
+
+/**
+ * The reason of a decision of the rule of two records that no two records are evidence for: the
+ * table's choice stays (no evidence is no ground to write the default's back), with why.
+ */
+const unjudgedReason = (reason: string): string =>
+  `fewer than ${MIN_RECORDS} records are evidence for any candidate at M=1, so the table's choice stays (${reason})`;
+
+/*
+ * The rule of one steady record: what it reads of the steady records (margin-free evidence), which
+ * gemv-one-record.ts's `decideOneRecord` turns into a decision at the margin.
+ */
+
+/** Whether the rule of one steady record reads a record: steady by its summaries, timestamps in ns. */
+const readsSteady = (source: GemvSweepSource): boolean =>
+  gemvRecordReading(source.steadiness, { unit: source.unit, quantized: false }) === "one-record";
+
+/** ns per ms: a record read by the rule of one steady record times in ns. */
+const NS_PER_MS = 1e6;
+
+/**
+ * A kernel's row in a steady record's group as the rule of one steady record reads its time, with
+ * its re-timing (absent: not re-timed; `unread`: re-timed, and the pass read no time).
+ */
+type SteadyTime =
+  | {
+      readonly kind: "time";
+      readonly time: number;
+      readonly gap: number;
+      readonly retime?: number | "unread";
+    }
+  | { readonly kind: "none" };
+
+/**
+ * A kernel's time, gap and re-timing in a group, or none: the row is current, timed and without
+ * error, has a gap (two positive rounds or more), and its pass (its smallest round) is no shorter
+ * than gemv-rule.ts's `GEMV_MIN_PASS_MS` — a shorter pass makes the group no evidence.
+ */
+const steadyTime = (state: GroupState | undefined, name: string): SteadyTime => {
+  if (state?.kind !== "current") return { kind: "none" };
+  const row = state.group.rows.get(name);
+  if (row === undefined || rowStaleness(row, state.kernels) !== undefined) return { kind: "none" };
+  return steadyRowTime(row);
+};
+
+/** A row's time, gap and re-timing as {@link steadyTime} reads them, whatever its group. */
+const steadyRowTime = (
+  row: Pick<
+    RowObservation,
+    "error" | "perDispatch" | "reps" | "rounds" | "retimedPerDispatch" | "retimingUnread"
+  >,
+): SteadyTime => {
+  const { perDispatch, reps } = row;
+  if (row.error !== undefined || perDispatch === undefined || reps === undefined) {
+    return { kind: "none" };
+  }
+  // The pass the time is read from: the smallest positive round (perDispatch × reps)
+  const pass = Math.min(...(row.rounds ?? []).filter((round) => round > 0));
+  if (!(pass >= GEMV_MIN_PASS_MS * NS_PER_MS)) return { kind: "none" };
+  const gap = gemvRoundsGap(row.rounds);
+  if (gap === undefined) return { kind: "none" };
+  return {
+    kind: "time",
+    time: perDispatch,
+    gap,
+    ...(row.retimingUnread !== undefined
+      ? { retime: "unread" as const }
+      : row.retimedPerDispatch === undefined
+        ? {}
+        : { retime: row.retimedPerDispatch / perDispatch }),
+  };
+};
+
+/** The reading of two kernels' times in one group (`own` against `other`), or none. */
+const readingOf = (
+  own: SteadyTime,
+  other: SteadyTime,
+  where: { readonly record: string; readonly caseId: string; readonly m: number },
+): GemvPairReading[] => {
+  if (own.kind !== "time" || other.kind !== "time") return [];
+  const gain = other.time / own.time;
+  return [
+    {
+      ...where,
+      gain,
+      gap: own.gap,
+      referenceGap: other.gap,
+      ...(other.retime === undefined ? {} : { retime: other.retime }),
+      breakEven: gemvBreakEven(gain, own.gap, other.gap),
+    },
+  ];
+};
+
+/** One steady record's reading of `name` against `reference` in its group of a case at `m`. */
+const pairReading = (
+  record: Labelled,
+  caseId: string,
+  m: number,
+  name: string,
+  reference: string,
+): GemvPairReading[] => {
+  const state = record.states.get(groupKey(caseId, m));
+  return readingOf(steadyTime(state, name), steadyTime(state, reference), {
+    record: record.source.path,
+    caseId,
+    m,
+  });
+};
+
+/**
+ * How the rule of one steady record reads a candidate's row against its class's reference row of
+ * the same group, as a reader of one record asks it (the benchmark page): the reading — gain, both
+ * gaps, the reference's re-timing and the break-even margin — when the reference's row is one
+ * (`gemvReferenceRefusal`), the candidate's row is evidence with its check held (`gemvRowReading`),
+ * and both rows have a time a steady record's group would be read by (no error, a pass of at least
+ * 20 ms, two positive rounds or more); none otherwise, and none for a record not timed in ns (its
+ * passes' length is not known). Whether the reading clears a margin is `gemvReadingIsEvidence` and
+ * its break-even margin. The derivation reads rows by the same functions, with whether each row is
+ * of the current runtime besides. `record` names the reading's record. Pure.
+ */
+export const gemvSteadyReading = (
+  row: Pick<
+    GemvSweepRow,
+    | "caseId"
+    | "m"
+    | "error"
+    | "screened"
+    | "skipped"
+    | "perDispatch"
+    | "reps"
+    | "rounds"
+    | "retimedPerDispatch"
+    | "retimingUnread"
+    | "isBaseline"
+    | "identicalToBaseline"
+    | "withinBand"
+  >,
+  reference: Pick<
+    GemvSweepRow,
+    | "error"
+    | "perDispatch"
+    | "reps"
+    | "rounds"
+    | "retimedPerDispatch"
+    | "retimingUnread"
+    | "isBaseline"
+    | "identicalToBaseline"
+  >,
+  candidateClass: GemvCandidateClass,
+  unit: string,
+  record = "",
+): GemvPairReading | undefined => {
+  if (unit !== "ns" || gemvReferenceRefusal(reference, candidateClass) !== undefined) {
+    return undefined;
+  }
+  if (gemvRowReading(row, candidateClass, reference.perDispatch).kind !== "evidence") {
+    return undefined;
+  }
+  const [reading] = readingOf(steadyRowTime(row), steadyRowTime(reference), {
+    record,
+    caseId: row.caseId,
+    m: row.m,
+  });
+  return reading;
+};
+
+/** Whether a group's reference for a class is usable (its row is a reference, timed or not repeated). */
+const referenceUsable = (state: GroupState | undefined, candidateClass: GemvCandidateClass) =>
+  state?.kind === "current" &&
+  (state.references[levelOf(candidateClass)].kind === "timed" ||
+    state.references[levelOf(candidateClass)].kind === "unrepeated");
+
+/** One steady record's reading of `name` against its class's reference (the default's choice) at `m`. */
+const classReading = (
+  record: Labelled,
+  gemvCase: GemvCase,
+  m: number,
+  name: string,
+  candidateClass: GemvCandidateClass,
+): GemvPairReading[] =>
+  referenceUsable(record.states.get(groupKey(gemvCase.id, m)), candidateClass)
+    ? pairReading(record, gemvCase.id, m, name, classReference(gemvCase, m, candidateClass))
+    : [];
+
+/** The first failure or failed check of `name` in a current group of any record at `m`. */
+const ruledOutIn = (
+  records: readonly Labelled[],
+  caseId: string,
+  m: number,
+  name: string,
+  candidateClass: GemvCandidateClass,
+): string | undefined => {
+  for (const record of records) {
+    const reading = readGroup(record, caseId, m, name, candidateClass);
+    if (reading.kind === "ruled-out") return reading.reason;
+  }
+  return undefined;
+};
+
+/** What the derivation reads every decision with. */
+type DerivationContext = {
+  /** Every record, in the order given. */
+  readonly records: readonly Labelled[];
+  /** The records the rule of one steady record reads. */
+  readonly steady: readonly Labelled[];
+  readonly kernelsOf: CurrentKernels;
+  readonly defaults: LinearGemvChoices;
+  /** The choices of the table the records derive for (the default's where it carries none). */
+  readonly table: LinearGemvChoices;
+  readonly margin: number;
+};
+
+/**
+ * Whether a steady record measured a case at M = 1 with a usable reference for the class: then the
+ * case's decision of that class is the rule of one steady record's, in the derivation and in the plan.
+ */
+const measuredBySteady = (
+  context: Pick<DerivationContext, "steady">,
+  gemvCase: GemvCase,
+  candidateClass: GemvCandidateClass,
+): boolean =>
+  context.steady.some((record) =>
+    referenceUsable(record.states.get(groupKey(gemvCase.id, 1)), candidateClass),
+  );
+
+/**
+ * The kernels of a row at the judgement's other row counts under each row block of `options`, read
+ * against the default's choice there and, where it runs another kernel than the reference row (`name`
+ * at `lanes` with the row block `reference`), against that row's kernel.
+ */
+const rowOptionsOf = (
+  context: DerivationContext,
+  judgement: CaseJudgement,
+  row: {
+    readonly name: string;
+    readonly lanes: LinearGemvParallelLanes | undefined;
+    readonly reference: LinearGemvParallelRows | undefined;
+  },
+  options: readonly (LinearGemvParallelRows | undefined)[],
+): GemvRowBlockOption[] => {
+  const { gemvCase } = judgement;
+  return options.map((rowBlock) => ({
+    ...(rowBlock === undefined ? {} : { rowBlock }),
+    at: judgement.others.map((m): GemvRowCountEvidence => {
+      const kernel = rowKernelAt(row.name, row.lanes, rowBlock, m);
+      const theirs = rowKernelAt(row.name, row.lanes, row.reference, m);
+      const ruledOut = ruledOutIn(context.records, gemvCase.id, m, kernel, judgement.class);
+      return {
+        m,
+        kernel,
+        readings: context.steady.flatMap((record) =>
+          classReading(record, gemvCase, m, kernel, judgement.class),
+        ),
+        ...(ruledOut === undefined ? {} : { ruledOut }),
+        ...(kernel === theirs
+          ? {}
+          : {
+              block: {
+                reference: theirs,
+                readings: context.steady.flatMap((record) =>
+                  pairReading(record, gemvCase.id, m, kernel, theirs),
+                ),
+              },
+            }),
+      };
+    }),
+  }));
+};
+
+/** A parallel row of `choices` for a case's shape (the first that matches, as the selection takes). */
+const parallelRowOf = (
+  choices: LinearGemvChoices,
+  gemvCase: GemvCase,
+): LinearGemvParallelShape | undefined =>
+  choices.parallelShapes.find((row) => sameParallelShape(row, gemvCase));
+
+/** The parallel name of a choice at M = 1 (`parallel-l8`, `staged-l32`), with its lanes; else none. */
+const parallelNameOf = (
+  name: string,
+): { readonly staged: boolean; readonly lanes: LinearGemvParallelLanes } | undefined => {
+  const match = /^(parallel|staged)-l(\d+)$/.exec(name);
+  const lanes = match === null ? undefined : Number(match[2]);
+  if (match === null || !isLanes(lanes)) return undefined;
+  return { staged: match[1] === "staged", lanes };
+};
+
+/** The class of a kernel of a case at M = 1, by name (the table's choice may be of the other class). */
+const classOfKernel = (gemvCase: GemvCase, name: string): GemvCandidateClass | undefined =>
+  gemvKernelsAt(gemvCase, 1).find((candidate) => candidate.name === name)?.class;
+
+/**
+ * The table's choice for a judgement's case at M = 1 (by kernel name) beside the default's, and why
+ * it is not held: where it is another kernel than the default's choice, it failed or its check failed
+ * in a current group of a record. Both rules read it here, so a table's choice that a record rules
+ * out stays under neither — not even where no record is evidence for any candidate.
+ */
+const tableAtM1 = (
+  context: Pick<DerivationContext, "records" | "table">,
+  judgement: CaseJudgement,
+): { readonly defaultChoice: string; readonly tableChoice: string; readonly ruledOut?: string } => {
+  const { gemvCase } = judgement;
+  const defaultChoice = judgement.reference(1);
+  const tableChoice = gemvProfileChoice(gemvCase, 1, levelOf(judgement.class), context.table).name;
+  const tableClass = classOfKernel(gemvCase, tableChoice) ?? judgement.class;
+  const ruledOut =
+    tableChoice === defaultChoice
+      ? undefined
+      : ruledOutIn(context.records, gemvCase.id, 1, tableChoice, tableClass);
+  return { defaultChoice, tableChoice, ...(ruledOut === undefined ? {} : { ruledOut }) };
+};
+
+/** What the rule of one steady record reads for one case and class (gemv-one-record.ts). */
+const oneRecordEvidence = (
+  context: DerivationContext,
+  judgement: CaseJudgement,
+): GemvOneRecordEvidence => {
+  const { gemvCase } = judgement;
+  const { defaultChoice, tableChoice, ruledOut: tableRuledOut } = tableAtM1(context, judgement);
+  const parallel = judgement.class === "reorder";
+  const defaultRow = parallel ? parallelRowOf(context.defaults, gemvCase) : undefined;
+  const tableRow = parallel ? parallelRowOf(context.table, gemvCase) : undefined;
+  const differs = tableChoice !== defaultChoice;
+  const tableTimed =
+    !differs ||
+    context.steady.some(
+      (record) =>
+        steadyTime(record.states.get(groupKey(gemvCase.id, 1)), tableChoice).kind === "time",
+    );
+  // Against the table's choice only where it is another kernel and still held
+  const againstTable = (name: string): GemvPairReading[] =>
+    !differs || tableRuledOut !== undefined
+      ? []
+      : context.steady.flatMap((record) =>
+          referenceUsable(record.states.get(groupKey(gemvCase.id, 1)), judgement.class)
+            ? pairReading(record, gemvCase.id, 1, name, tableChoice)
+            : [],
+        );
+  const candidates = candidatesOf(context.records, judgement, context.kernelsOf).flatMap(
+    ({ name, choice }): GemvCandidateEvidence[] => {
+      const m1 = context.steady.flatMap((record) =>
+        classReading(record, gemvCase, 1, name, judgement.class),
+      );
+      const vsTable = name === tableChoice ? [] : againstTable(name);
+      if (m1.length === 0 && vsTable.length === 0) return [];
+      const ruledOut = ruledOutIn(context.records, gemvCase.id, 1, name, judgement.class);
+      const { lanes } = familyOf(choice) ?? {};
+      const rows = judgement.rowBlocks
+        ? rowOptionsOf(
+            context,
+            judgement,
+            { name, lanes, reference: undefined },
+            rowBlockOptions(gemvCase.storage, lanes),
+          )
+        : judgement.others.length > 0
+          ? rowOptionsOf(context, judgement, { name, lanes, reference: undefined }, [undefined])
+          : [];
+      return [
+        { candidate: name, ...(ruledOut === undefined ? {} : { ruledOut }), m1, vsTable, rows },
+      ];
+    },
+  );
+  // A kept row may move its row block: the table's row and, where it differs, the default's
+  const keptOf = (choice: string, row: LinearGemvParallelShape | undefined): GemvKeptRow[] => {
+    if (!judgement.rowBlocks || row === undefined || row.packedActivations) return [];
+    return [
+      {
+        choice,
+        ...(row.rowBlock === undefined ? {} : { rowBlock: row.rowBlock }),
+        options: rowOptionsOf(
+          context,
+          judgement,
+          { name: choice, lanes: row.lanes, reference: row.rowBlock },
+          rowBlockOptions(gemvCase.storage, row.lanes).filter(
+            (rowBlock) => rowBlock !== row.rowBlock,
+          ),
+        ),
+      },
+    ];
+  };
+  return {
+    caseId: gemvCase.id,
+    class: judgement.class,
+    defaultChoice,
+    ...(defaultRow?.rowBlock === undefined ? {} : { defaultRowBlock: defaultRow.rowBlock }),
+    tableChoice,
+    ...(tableRow?.rowBlock === undefined ? {} : { tableRowBlock: tableRow.rowBlock }),
+    ...(tableRuledOut === undefined ? {} : { tableRuledOut }),
+    tableTimed,
+    candidates,
+    defaultVsTable: againstTable(defaultChoice),
+    keptRows: [
+      ...keptOf(tableChoice, tableRow),
+      ...(differs ? keptOf(defaultChoice, defaultRow) : []),
+    ],
+  };
+};
+
+/** The M = 1 gains of the candidate an outcome names, as a decision carries them. */
+const outcomeGains = (
+  evidence: GemvOneRecordEvidence,
+  outcome: GemvOneRecordOutcome,
+): LinearGemvGain[] =>
+  (evidence.candidates.find(({ candidate }) => candidate === outcome.candidate)?.m1 ?? []).map(
+    ({ record, caseId, gain }) => ({ record, caseId, gain }),
+  );
+
+/** The decision of a sequential key from its cases' evidence (they must agree, or the table's stays). */
+const sequentialOfEvidence = (
+  head: Omit<
+    LinearGemvDecision,
+    "derivedChoice" | "outcome" | "reason" | "candidate" | "gains" | "path" | "evidence"
+  >,
+  evidence: readonly GemvOneRecordEvidence[],
+  margin: number,
+): LinearGemvDecision => {
+  const outcomes = evidence.map((one) => decideOneRecord(one, margin));
+  const [first] = evidence;
+  if (first === undefined) throw new Error(`The key ${head.shape} has no case`);
+  const tableChoice = first.tableChoice;
+  const names = new Set(outcomes.map(({ choice }) => choice));
+  const agreed = names.size === 1 ? outcomes[0] : undefined;
+  const common = { ...head, path: "one-record", tableChoice, evidence } as const;
+  if (agreed !== undefined) {
+    const shown = agreed.candidate;
+    return {
+      ...common,
+      derivedChoice: agreed.choice,
+      outcome: agreed.choice === tableChoice ? "kept" : "adopted",
+      reason: agreed.reason,
+      ...(shown === undefined ? {} : { candidate: shown }),
+      gains: evidence.flatMap((one, index) => {
+        const outcome = outcomes[index];
+        return outcome === undefined ? [] : outcomeGains(one, outcome);
+      }),
+    };
+  }
+  return {
+    ...common,
+    derivedChoice: tableChoice,
+    outcome: "kept",
+    reason: `the cases that share the key disagree, so the table's choice stays (${evidence
+      .map((one, index) => `${one.caseId} ${outcomes[index]?.choice ?? "?"}`)
+      .join("; ")})`,
+    gains: [],
+  };
+};
+
+/** The name a parallel decision gives a choice that is no parallel row. */
+const noRowName = (name: string): string =>
+  parallelNameOf(name) === undefined && !name.startsWith("no row") ? `no row (${name})` : name;
+
+/** The decision of a parallel row from its case's evidence. */
+const parallelOfEvidence = (
+  head: Omit<
+    LinearGemvDecision,
+    | "derivedChoice"
+    | "outcome"
+    | "reason"
+    | "candidate"
+    | "gains"
+    | "path"
+    | "evidence"
+    | "derivedRowBlock"
+    | "rowGains"
+  >,
+  evidence: GemvOneRecordEvidence,
+  margin: number,
+): LinearGemvDecision => {
+  const outcome = decideOneRecord(evidence, margin);
+  const chosen = evidence.candidates.find(({ candidate }) => candidate === outcome.choice);
+  const rowGains = (
+    chosen?.rows.find(({ rowBlock }) => rowBlock === outcome.rowBlock)?.at ?? []
+  ).flatMap(({ readings }) =>
+    readings.map(({ record, caseId, m, gain }) => ({ record, caseId, m, gain })),
+  );
+  return {
+    ...head,
+    path: "one-record",
+    tableChoice: noRowName(evidence.tableChoice),
+    ...(evidence.tableRowBlock === undefined ? {} : { tableRowBlock: evidence.tableRowBlock }),
+    derivedChoice: noRowName(outcome.choice),
+    ...(outcome.rowBlock === undefined ? {} : { derivedRowBlock: outcome.rowBlock }),
+    outcome: outcome.outcome,
+    reason: outcome.reason,
+    ...(outcome.candidate === undefined ? {} : { candidate: outcome.candidate }),
+    gains: outcomeGains(evidence, outcome),
+    ...(rowGains.length === 0 ? {} : { rowGains }),
+    evidence: [evidence],
+  };
+};
+
+/** A sequential variant by its name (`c32u4`). */
+const variantOfName = (name: string): LinearGemvVariant => {
+  const match = /^c(\d+)u(\d+)$/.exec(name);
+  if (match === null) throw new Error(`${name} is no sequential variant`);
+  return { cols: Number(match[1]), unroll: Number(match[2]) };
+};
+
+/**
+ * The field from `base` (the table's choices) with every decision's derived choice in place: a
+ * sequential key's exception replaced, added, or removed when the derived variant is the general one;
+ * a parallel row replaced in place, added when the shape had none, or removed when the derived choice
+ * is no row. A decision whose derived choice the base already holds changes nothing, and so does a
+ * row with packed activations (never measured). The general variant and the thread target are the
+ * default's.
+ */
+const applyDecisions = (
+  base: LinearGemvChoices,
+  defaults: LinearGemvChoices,
+  decisions: readonly LinearGemvDecision[],
+): LinearGemvChoices => {
+  let shapes: LinearGemvShapeVariant[] = [...base.sequential.shapes];
+  let parallelShapes: LinearGemvParallelShape[] = [...base.parallelShapes];
+  const general = defaults.sequential.variant;
+  for (const decision of decisions) {
+    const [caseId] = decision.cases;
+    const gemvCase = caseId === undefined ? undefined : gemvCaseOf(caseId);
+    if (gemvCase === undefined) continue;
+    if (decision.field === "sequential.shapes") {
+      const variant = variantOfName(decision.derivedChoice);
+      const index = shapes.findIndex((row) => sameSequentialShape(row, gemvCase));
+      const isGeneral = variant.cols === general.cols && variant.unroll === general.unroll;
+      const held = index < 0 ? general : shapes[index]?.variant;
+      if (held?.cols === variant.cols && held.unroll === variant.unroll) continue;
+      const row: LinearGemvShapeVariant = {
+        storage: gemvCase.storage,
+        n: gemvCase.n,
+        k: gemvCase.k,
+        variant,
+      };
+      if (isGeneral) shapes = shapes.filter((_, at) => at !== index);
+      else if (index < 0) shapes = [...shapes, row];
+      else shapes = shapes.map((entry, at) => (at === index ? row : entry));
+      continue;
+    }
+    if (decision.field !== "parallelShapes") continue;
+    const index = parallelShapes.findIndex((entry) => sameParallelShape(entry, gemvCase));
+    const held = parallelShapes[index];
+    if (held?.packedActivations === true) continue;
+    const parallel = parallelNameOf(decision.derivedChoice);
+    if (parallel === undefined) {
+      if (index >= 0) parallelShapes = parallelShapes.filter((_, at) => at !== index);
+      continue;
+    }
+    if (
+      held !== undefined &&
+      held.lanes === parallel.lanes &&
+      (held.stagedActivations === true) === parallel.staged &&
+      held.rowBlock === decision.derivedRowBlock
+    ) {
+      continue;
+    }
+    const row: LinearGemvParallelShape = {
+      storage: gemvCase.storage,
+      n: gemvCase.n,
+      k: gemvCase.k,
+      ...(gemvCase.group === undefined ? {} : { group: gemvCase.group }),
+      lanes: parallel.lanes,
+      packedActivations: false,
+      ...(parallel.staged ? { stagedActivations: true } : {}),
+      ...(decision.derivedRowBlock === undefined ? {} : { rowBlock: decision.derivedRowBlock }),
+    };
+    // The selection takes the first row that matches, so the first one is replaced
+    parallelShapes =
+      index < 0
+        ? [...parallelShapes, row]
+        : parallelShapes.map((entry, at) => (at === index ? row : entry));
+  }
+  return {
+    sequential: { variant: general, shapes },
+    rowsThreadTarget: defaults.rowsThreadTarget,
+    parallelShapes,
   };
 };
 
@@ -1563,40 +2305,20 @@ const reorderJudgement = (
   rowBlocks,
 });
 
-const gainsText = (gains: readonly LinearGemvGain[], records: readonly Labelled[]): string => {
-  const caseCount = new Set(gains.map(({ caseId }) => caseId)).size;
-  return gains
-    .map(({ record, caseId, gain }) => {
-      const label = records.find(({ source }) => source.path === record)?.label ?? record;
-      return `${formatRatio(gain)} ${label}${caseCount > 1 ? ` ${caseId}` : ""}`;
-    })
-    .join(", ");
-};
-
-const rowGainsText = (gains: readonly LinearGemvRowGain[], records: readonly Labelled[]): string =>
-  gains
-    .map(({ record, m, gain }) => {
-      const label = records.find(({ source }) => source.path === record)?.label ?? record;
-      return `${formatRatio(gain)} ${label} M=${m}`;
-    })
-    .join(", ");
-
-/** The sequential key's decision from its cases' (they must agree). */
+/**
+ * The sequential key's decision from its cases' (they must agree): by the rule of one steady record
+ * when a steady record measured a case of the key, otherwise by the rule of two records.
+ */
 const sequentialDecision = (
-  records: readonly Labelled[],
+  context: DerivationContext,
   cases: readonly GemvCase[],
-  defaults: LinearGemvChoices,
-  kernelsOf: CurrentKernels,
-): { readonly decision: LinearGemvDecision; readonly variant?: LinearGemvVariant } => {
+): LinearGemvDecision => {
+  const { records, defaults, kernelsOf } = context;
   const [first] = cases;
   const defaultChoice = variantName(
     defaults.sequential.shapes.find((row) => sameSequentialShape(row, first))?.variant ??
       defaults.sequential.variant,
   );
-  const outcomes = cases.map((gemvCase) => ({
-    gemvCase,
-    outcome: judgeCase(records, identicalJudgement(gemvCase), kernelsOf),
-  }));
   const head = {
     class: "identical",
     field: "sequential.shapes",
@@ -1605,6 +2327,18 @@ const sequentialDecision = (
     defaultChoice,
     notes: [],
   } as const;
+  if (cases.some((gemvCase) => measuredBySteady(context, gemvCase, "identical"))) {
+    return sequentialOfEvidence(
+      head,
+      cases.map((gemvCase) => oneRecordEvidence(context, identicalJudgement(gemvCase))),
+      context.margin,
+    );
+  }
+  const outcomes = cases.map((gemvCase) => ({
+    gemvCase,
+    outcome: judgeCase(records, identicalJudgement(gemvCase), kernelsOf),
+  }));
+  const twoRecord = { ...head, path: "two-record" } as const;
   const adopted = outcomes.flatMap(({ outcome }) =>
     outcome.kind === "adopted" ? [outcome.evaluation] : [],
   );
@@ -1612,14 +2346,11 @@ const sequentialDecision = (
   if (adopted.length === outcomes.length && names.size === 1) {
     const [chosen] = adopted;
     return {
-      decision: {
-        ...head,
-        derivedChoice: chosen.name,
-        outcome: "adopted",
-        candidate: chosen.name,
-        gains: adopted.flatMap(({ gains }) => gains),
-      },
-      variant: familyChoiceOf(chosen).variant,
+      ...twoRecord,
+      derivedChoice: variantName(familyChoiceOf(chosen).variant),
+      outcome: "adopted",
+      candidate: chosen.name,
+      gains: adopted.flatMap(({ gains }) => gains),
     };
   }
   const nearest = outcomes.flatMap(({ outcome }) =>
@@ -1640,41 +2371,95 @@ const sequentialDecision = (
             .map(({ gemvCase, outcome }) => `${gemvCase.id} ${said(outcome)}`)
             .join("; ")})`;
   const shown = nearest.length === 1 ? nearest[0] : undefined;
-  return {
-    decision: {
-      ...head,
-      derivedChoice: defaultChoice,
+  const shownFields = {
+    ...(shown === undefined ? {} : { candidate: shown.name }),
+    gains: shown === undefined ? [] : shown.gains,
+  };
+  // MUST: records that are evidence for no candidate of the key do not move the table's choice
+  // (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
+  if (outcomes.every(({ outcome }) => outcome.kind === "kept" && !outcome.judged)) {
+    const tableChoice = gemvProfileChoice(first, 1, "exact", context.table).name;
+    // MUST: unless a record rules that choice out, as under the rule of one steady record
+    const ruled = cases
+      .map((gemvCase) => ({
+        gemvCase,
+        ruledOut: tableAtM1(context, identicalJudgement(gemvCase)).ruledOut,
+      }))
+      .find(({ ruledOut }) => ruledOut !== undefined);
+    if (ruled?.ruledOut !== undefined) {
+      const where = cases.length === 1 ? ruled.ruledOut : `${ruled.gemvCase.id}: ${ruled.ruledOut}`;
+      return {
+        ...twoRecord,
+        derivedChoice: defaultChoice,
+        outcome: "kept",
+        reason: gemvTableNotHeld(tableChoice, where, reason),
+        ...shownFields,
+      };
+    }
+    return {
+      ...twoRecord,
+      tableChoice,
+      derivedChoice: tableChoice,
       outcome: "kept",
-      reason,
-      ...(shown === undefined ? {} : { candidate: shown.name }),
-      gains: shown === undefined ? [] : shown.gains,
-    },
+      reason: unjudgedReason(reason),
+      ...shownFields,
+    };
+  }
+  return {
+    ...twoRecord,
+    derivedChoice: defaultChoice,
+    outcome: "kept",
+    reason,
+    ...shownFields,
   };
 };
 
-/** The parallel row's decision of one case, and the row it writes when adopted. */
-const parallelDecision = (
-  records: readonly Labelled[],
-  gemvCase: GemvCase,
-  defaults: LinearGemvChoices,
-  kernelsOf: CurrentKernels,
-): { readonly decision: LinearGemvDecision; readonly row?: LinearGemvParallelShape } => {
+/**
+ * Whether the subgroup form would meet the rule of one steady record at the case (a Session option,
+ * not a row: only the decision's notes name it), against the default's choice.
+ */
+const subgroupNote = (context: DerivationContext, gemvCase: GemvCase): string[] => {
+  const evidence = oneRecordEvidence(
+    context,
+    reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"], false),
+  );
+  const outcome = decideOneRecord(
+    { ...evidence, tableChoice: evidence.defaultChoice, keptRows: [] },
+    context.margin,
+  );
+  return outcome.outcome === "adopted" && outcome.candidate !== undefined
+    ? [`${outcome.candidate} meets the rule too (${outcome.reason}): a Session option, not a row`]
+    : [];
+};
+
+/**
+ * The parallel row's decision of one case: by the rule of one steady record when a steady record
+ * measured the case, otherwise by the rule of two records.
+ */
+const parallelDecision = (context: DerivationContext, gemvCase: GemvCase): LinearGemvDecision => {
+  const { records, defaults, kernelsOf } = context;
   const defaultRow = defaults.parallelShapes.find((row) => sameParallelShape(row, gemvCase));
   const defaultChoice =
     defaultRow === undefined
       ? `no row (${gemvBaseline(gemvCase, 1).name})`
       : parallelName(defaultRow);
-  const subgroup = judgeCase(
-    records,
-    reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"], false),
-    kernelsOf,
-  );
+  const path = measuredBySteady(context, gemvCase, "reorder") ? "one-record" : "two-record";
+  const subgroup =
+    path === "one-record"
+      ? undefined
+      : judgeCase(
+          records,
+          reorderJudgement(gemvCase, ["gemv-parallel-subgroup32"], false),
+          kernelsOf,
+        );
   const notes =
-    subgroup.kind === "adopted"
-      ? [
-          `${subgroup.evaluation.name} meets the rule too (${gainsText(subgroup.evaluation.gains, records)}): a Session option, not a row`,
-        ]
-      : [];
+    path === "one-record"
+      ? subgroupNote(context, gemvCase)
+      : subgroup?.kind === "adopted"
+        ? [
+            `${subgroup.evaluation.name} meets the rule too (${gainsText(subgroup.evaluation.gains, labelsOf(records.map(({ source }) => source.path)))}): a Session option, not a row`,
+          ]
+        : [];
   const head = {
     class: "reorder",
     field: "parallelShapes",
@@ -1689,17 +2474,20 @@ const parallelDecision = (
     defaultRow?.rowBlock === undefined ? {} : { derivedRowBlock: defaultRow.rowBlock };
   if (defaultRow?.packedActivations === true) {
     return {
-      decision: {
-        ...head,
-        derivedChoice: defaultChoice,
-        outcome: "kept",
-        reason: "the default takes packed activations, whose kernels the sweep does not measure",
-        gains: [],
-        ...sameRowBlock,
-      },
+      ...head,
+      path,
+      derivedChoice: defaultChoice,
+      outcome: "kept",
+      reason: "the default takes packed activations, whose kernels the sweep does not measure",
+      gains: [],
+      ...sameRowBlock,
     };
   }
   const judgement = reorderJudgement(gemvCase, TABLE_CHOICES.reorder, true);
+  if (path === "one-record") {
+    return parallelOfEvidence(head, oneRecordEvidence(context, judgement), context.margin);
+  }
+  const twoRecord = { ...head, path } as const;
   const outcome = judgeCase(records, judgement, kernelsOf);
   if (outcome.kind === "kept") {
     // M = 1 keeps the default's row: its lanes stay, and another row block may still replace its
@@ -1719,19 +2507,15 @@ const parallelDecision = (
           );
     const other = pickRowBlock(tried);
     if (defaultRow !== undefined && other !== undefined) {
-      const { rowBlock: _rowBlock, ...bare } = defaultRow;
       return {
-        decision: {
-          ...head,
-          derivedChoice: defaultChoice,
-          outcome: "adopted",
-          gains: [],
-          ...(other.rowBlock === undefined ? {} : { derivedRowBlock: other.rowBlock }),
-          rowGains: readOthers(records, judgement, (m) =>
-            rowKernelAt(defaultChoice, defaultRow.lanes, other.rowBlock, m),
-          ).gains,
-        },
-        row: { ...bare, ...(other.rowBlock === undefined ? {} : { rowBlock: other.rowBlock }) },
+        ...twoRecord,
+        derivedChoice: defaultChoice,
+        outcome: "adopted",
+        gains: [],
+        ...(other.rowBlock === undefined ? {} : { derivedRowBlock: other.rowBlock }),
+        rowGains: readOthers(records, judgement, (m) =>
+          rowKernelAt(defaultChoice, defaultRow.lanes, other.rowBlock, m),
+        ).gains,
       };
     }
     // Why no other row block replaced the default's, where one reached the threshold in some group
@@ -1748,43 +2532,60 @@ const parallelDecision = (
             .join("; ")}`,
         ]
       : [];
-    return {
-      decision: {
-        ...head,
+    const nearestFields = {
+      ...(outcome.nearest === undefined ? {} : { candidate: outcome.nearest.name }),
+      gains: outcome.nearest?.gains ?? [],
+    };
+    // MUST: records that are evidence for no candidate at M = 1, and for no other row block of the
+    // default's row, do not move the table's row (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
+    const rowBlockJudged = tried.some(({ at }) => at.some(({ records }) => records >= MIN_RECORDS));
+    const unjudged = !outcome.judged && !rowBlockJudged;
+    const tableRow = parallelRowOf(context.table, gemvCase);
+    const tableChoice =
+      tableRow === undefined
+        ? `no row (${gemvBaseline(gemvCase, 1).name})`
+        : parallelName(tableRow);
+    // MUST: unless a record rules that choice out, as under the rule of one steady record
+    const tableRuledOut = unjudged ? tableAtM1(context, judgement).ruledOut : undefined;
+    if (unjudged && tableRuledOut === undefined) {
+      const rowBlock = tableRow?.rowBlock;
+      return {
+        ...twoRecord,
         notes: [...notes, ...rowBlockNote],
-        derivedChoice: defaultChoice,
+        tableChoice,
+        ...(rowBlock === undefined ? {} : { tableRowBlock: rowBlock }),
+        derivedChoice: tableChoice,
         outcome: "kept",
-        reason: outcome.reason,
-        ...(outcome.nearest === undefined ? {} : { candidate: outcome.nearest.name }),
-        gains: outcome.nearest?.gains ?? [],
-        ...sameRowBlock,
-      },
+        reason: unjudgedReason(outcome.reason),
+        ...nearestFields,
+        ...(rowBlock === undefined ? {} : { derivedRowBlock: rowBlock }),
+      };
+    }
+    return {
+      ...twoRecord,
+      notes: [...notes, ...rowBlockNote],
+      derivedChoice: defaultChoice,
+      outcome: "kept",
+      reason:
+        tableRuledOut === undefined
+          ? outcome.reason
+          : gemvTableNotHeld(tableChoice, tableRuledOut, outcome.reason),
+      ...nearestFields,
+      ...sameRowBlock,
     };
   }
   const { evaluation } = outcome;
-  const { lanes, id } = familyChoiceOf(evaluation);
-  if (lanes === undefined) throw new Error(`${evaluation.name} of ${gemvCase.id} has no lanes`);
-  const row: LinearGemvParallelShape = {
-    storage: gemvCase.storage,
-    n: gemvCase.n,
-    k: gemvCase.k,
-    ...(gemvCase.group === undefined ? {} : { group: gemvCase.group }),
-    lanes,
-    packedActivations: false,
-    ...(id === "gemv-parallel-staged" ? { stagedActivations: true } : {}),
-    ...(evaluation.rowBlock === undefined ? {} : { rowBlock: evaluation.rowBlock }),
-  };
+  if (familyChoiceOf(evaluation).lanes === undefined) {
+    throw new Error(`${evaluation.name} of ${gemvCase.id} has no lanes`);
+  }
   return {
-    decision: {
-      ...head,
-      derivedChoice: evaluation.name,
-      outcome: "adopted",
-      candidate: evaluation.name,
-      gains: evaluation.gains,
-      ...(evaluation.rowBlock === undefined ? {} : { derivedRowBlock: evaluation.rowBlock }),
-      rowGains: evaluation.rowGains,
-    },
-    row,
+    ...twoRecord,
+    derivedChoice: evaluation.name,
+    outcome: "adopted",
+    candidate: evaluation.name,
+    gains: evaluation.gains,
+    ...(evaluation.rowBlock === undefined ? {} : { derivedRowBlock: evaluation.rowBlock }),
+    rowGains: evaluation.rowGains,
   };
 };
 
@@ -1804,6 +2605,7 @@ const threadTargetDecision = (
     shape: "",
     cases: [],
     defaultChoice: target,
+    path: "two-record",
     derivedChoice: target,
     outcome: "kept",
     reason:
@@ -1815,7 +2617,40 @@ const threadTargetDecision = (
   };
 };
 
-const decisionLine = (decision: LinearGemvDecision, records: readonly Labelled[]): string => {
+/** A record's label in the verdict lines, by its path (the path itself for one not among them). */
+type LabelOf = (path: string) => string;
+
+const labelsOf =
+  (paths: readonly string[]): LabelOf =>
+  (path) => {
+    const index = paths.indexOf(path);
+    return index < 0 ? path : `[${index + 1}]`;
+  };
+
+const gainsText = (gains: readonly LinearGemvGain[], labelOf: LabelOf): string => {
+  const caseCount = new Set(gains.map(({ caseId }) => caseId)).size;
+  return gains
+    .map(
+      ({ record, caseId, gain }) =>
+        `${formatRatio(gain)} ${labelOf(record)}${caseCount > 1 ? ` ${caseId}` : ""}`,
+    )
+    .join(", ");
+};
+
+const rowGainsText = (gains: readonly LinearGemvRowGain[], labelOf: LabelOf): string =>
+  gains.map(({ record, m, gain }) => `${formatRatio(gain)} ${labelOf(record)} M=${m}`).join(", ");
+
+/** The break-even margins of the candidate a one-record decision names, at M = 1 (`×1.143 [1]`). */
+const breakEvenText = (decision: LinearGemvDecision, labelOf: LabelOf): string => {
+  const readings = (decision.evidence ?? []).flatMap(
+    (one) => one.candidates.find(({ candidate }) => candidate === decision.candidate)?.m1 ?? [],
+  );
+  return readings.length === 0
+    ? ""
+    : `; break-even ${readings.map(({ breakEven, record }) => `${formatRatio(breakEven)} ${labelOf(record)}`).join(", ")}`;
+};
+
+const decisionLine = (decision: LinearGemvDecision, labelOf: LabelOf): string => {
   const shape = decision.field === "rowsThreadTarget" ? "rowsThreadTarget" : decision.shape;
   const cases =
     decision.cases.length === 0
@@ -1825,20 +2660,27 @@ const decisionLine = (decision: LinearGemvDecision, records: readonly Labelled[]
     decision.candidate === undefined || decision.gains.length === 0
       ? ""
       : decision.outcome === "adopted"
-        ? ` (${gainsText(decision.gains, records)})`
-        : `; ${decision.candidate}: ${gainsText(decision.gains, records)}`;
+        ? ` (${gainsText(decision.gains, labelOf)}${breakEvenText(decision, labelOf)})`
+        : `; ${decision.candidate}: ${gainsText(decision.gains, labelOf)}${breakEvenText(decision, labelOf)}`;
   // A parallel row is named with its row block, the form it takes at M ≥ 2
   const blocked = (choice: string, rowBlock: LinearGemvParallelRows | undefined): string =>
     rowBlock === undefined ? choice : `${choice} with row blocks of ${rowBlock}`;
-  const from = blocked(decision.defaultChoice, decision.defaultRowBlock);
+  const defaultText = blocked(decision.defaultChoice, decision.defaultRowBlock);
+  // Under the rule of one steady record, and where no two records are evidence, the table's choice
+  const from =
+    decision.tableChoice === undefined
+      ? defaultText
+      : blocked(decision.tableChoice, decision.tableRowBlock);
+  const fromText = from === defaultText ? from : `${from} (the default's: ${defaultText})`;
   const rowGains =
     decision.rowGains === undefined || decision.rowGains.length === 0
       ? ""
-      : `; at the other row counts: ${rowGainsText(decision.rowGains, records)}`;
+      : `; at the other row counts: ${rowGainsText(decision.rowGains, labelOf)}`;
+  const rule = decision.path === "one-record" ? "one steady record: " : "";
   const body =
     decision.outcome === "adopted"
-      ? `${from} -> ${blocked(decision.derivedChoice, decision.derivedRowBlock)}${gains}${rowGains}`
-      : `keeps ${from} (${decision.reason ?? "?"})${gains}`;
+      ? `${rule}${fromText} -> ${blocked(decision.derivedChoice, decision.derivedRowBlock)}${gains}${rowGains}`
+      : `${rule}keeps ${fromText} (${decision.reason ?? "?"})${gains}`;
   return [`  - ${shape}${cases}: ${body}`, ...decision.notes.map((note) => `    - ${note}`)].join(
     "\n",
   );
@@ -1846,13 +2688,13 @@ const decisionLine = (decision: LinearGemvDecision, records: readonly Labelled[]
 
 const classLines = (
   decisions: readonly LinearGemvDecision[],
-  records: readonly Labelled[],
+  labelOf: LabelOf,
   head: string,
 ): string[] => {
   const adopted = decisions.filter(({ outcome }) => outcome === "adopted").length;
   return [
     `- ${head}: ${adopted} adopted, ${decisions.length - adopted} kept`,
-    ...decisions.flatMap((decision) => decisionLine(decision, records).split("\n")),
+    ...decisions.flatMap((decision) => decisionLine(decision, labelOf).split("\n")),
   ];
 };
 
@@ -1891,116 +2733,76 @@ const staleGroups = (records: readonly Labelled[]): LinearGemvStaleGroup[] =>
     ),
   );
 
+type ProvenanceRecord = LinearGemvDerivation["provenance"]["records"][number];
+
+/** A record's class as a line reads it. */
+const steadinessText = ({ steadiness, steady }: ProvenanceRecord): string => {
+  const { groups, unsteadyGroups, share } = steadiness;
+  const counted = `${unsteadyGroups} of ${groups} groups beyond ${formatRatio(GEMV_STEADY_GROUP_SPREAD)}${share === undefined ? "" : `, ${(share * 100).toFixed(1)} %`}`;
+  const read = steady ? "read by the rule of one steady record" : "read by the rule of two records";
+  return steadiness.class === "unclassified"
+    ? `no class (${groups} groups with a baseline spread, fewer than ${GEMV_STEADY_MIN_GROUPS}): ${read}`
+    : `${steadiness.class} (${counted}): ${read}${steadiness.class === "steady" && !steady ? " (its timestamps are not in ns)" : ""}`;
+};
+
 /** One record's line. */
-const recordLine = (record: Labelled): string => {
-  const { source, label } = record;
-  const { current, stale, withoutReference, staleRows } = recordGroups(record);
-  return `  - ${label} ${source.path} (${source.date}, set ${source.candidateSet}): ${current + stale} groups — ${current} current, ${stale} not current (their case is not the current one); of the current, ${withoutReference.exact} without a usable reference at exact and ${withoutReference.reorder} at reorder; ${staleRows} rows of current groups not current`;
+const recordLine = (record: ProvenanceRecord, label: string): string => {
+  const { current, stale, withoutReference, staleRows } = record.groups;
+  return `  - ${label} ${record.path} (${record.date}, set ${record.candidateSet}): ${current + stale} groups — ${current} current, ${stale} not current (their case is not the current one); of the current, ${withoutReference.exact} without a usable reference at exact and ${withoutReference.reorder} at reorder; ${staleRows} rows of current groups not current; ${steadinessText(record)}`;
 };
 
 const verdictLinesOf = (
   decisions: readonly LinearGemvDecision[],
-  records: readonly Labelled[],
-): string[] => [
-  `- linearGemv (the GEMV choices of linear), from ${records.length} GEMV sweep records:`,
-  ...records.map(recordLine),
-  ...classLines(
-    decisions.filter(({ field }) => field === "sequential.shapes"),
-    records,
-    "identical class (sequential.shapes, M = 1)",
-  ),
-  ...classLines(
-    decisions.filter(({ field }) => field === "parallelShapes"),
-    records,
-    "reorder class (parallelShapes, M = 1 to 8)",
-  ),
-  ...decisions
-    .filter(({ field }) => field === "rowsThreadTarget")
-    .flatMap((decision) =>
-      decisionLine(decision, records)
-        .split("\n")
-        .map((line) => line.slice(2)),
+  records: readonly ProvenanceRecord[],
+  margin: number,
+): string[] => {
+  const labelOf = labelsOf(records.map(({ path }) => path));
+  return [
+    `- linearGemv (the GEMV choices of linear), from ${records.length} GEMV sweep records (the rule of one steady record at the margin ${formatRatio(margin)}):`,
+    ...records.map((record, index) => recordLine(record, `[${index + 1}]`)),
+    ...classLines(
+      decisions.filter(({ field }) => field === "sequential.shapes"),
+      labelOf,
+      "identical class (sequential.shapes, M = 1)",
     ),
-];
+    ...classLines(
+      decisions.filter(({ field }) => field === "parallelShapes"),
+      labelOf,
+      "reorder class (parallelShapes, M = 1 to 8)",
+    ),
+    ...decisions
+      .filter(({ field }) => field === "rowsThreadTarget")
+      .flatMap((decision) =>
+        decisionLine(decision, labelOf)
+          .split("\n")
+          .map((line) => line.slice(2)),
+      ),
+  ];
+};
+
+/** The rule's numbers at a margin. */
+const ruleOf = (margin: number): LinearGemvRule => ({
+  margin,
+  steadyMinGroups: GEMV_STEADY_MIN_GROUPS,
+  steadyMaxShare: GEMV_STEADY_MAX_SHARE,
+  steadyGroupSpread: GEMV_STEADY_GROUP_SPREAD,
+  minPassMs: GEMV_MIN_PASS_MS,
+  rounds: ROUNDS,
+  minSpeedup: GEMV_MIN_SPEEDUP,
+  referenceRepeat: GEMV_REFERENCE_REPEAT,
+});
 
 /**
- * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from GEMV sweep records of one
- * adapter, by the rule of the module doc: per shape and class, a candidate at least
- * {@link GEMV_MIN_SPEEDUP} faster than the default profile's choice in every group that is evidence
- * — groups of at least two records, read against the reference's repeated fastest time — with its
- * check held in every current group, and at the parallel row's other row counts not slower in any,
- * replaces that choice; otherwise the default's stays. Groups whose case is not current and current
- * groups without a usable reference are reported, not refused; a record that no group
- * could stand for throws with the reason (fail loudly).
+ * The field the decisions give (the table's choices with each decision's derived choice in place),
+ * checked as a profile's; absent when it is the default's choices (a table without the field runs
+ * with them).
  */
-export const deriveLinearGemvChoices = (
-  inputs: readonly GemvSweepInput[],
-  options: DeriveLinearGemvOptions,
-): LinearGemvDerivation => {
-  const sources = readRecords(inputs, options.table);
-  const kernelsOf = currentKernels(options.table);
-  const records = labelled(sources, kernelsOf, options.table.id);
-  const defaults = DEFAULT_GEOMETRY_PROFILE.linearGemv;
-  const cases = GEMV_CASES.filter((gemvCase) =>
-    sources.some((source) => source.cases.has(gemvCase.id)),
-  );
-  // Sequential keys in the order of their first case
-  const keys = new Map<string, GemvCase[]>();
-  for (const gemvCase of cases) {
-    const key = sequentialKey(gemvCase);
-    keys.set(key, [...(keys.get(key) ?? []), gemvCase]);
-  }
-  const sequential = [...keys.values()].map((shared) =>
-    sequentialDecision(records, shared, defaults, kernelsOf),
-  );
-  const parallel = cases.map((gemvCase) =>
-    parallelDecision(records, gemvCase, defaults, kernelsOf),
-  );
-  let shapes: LinearGemvShapeVariant[] = [...defaults.sequential.shapes];
-  for (const { decision, variant } of sequential) {
-    if (variant === undefined) continue;
-    const [gemvCase] = keys.get(decision.shape) ?? [];
-    if (gemvCase === undefined) throw new Error(`No case of the key ${decision.shape}`);
-    const general = defaults.sequential.variant;
-    const index = shapes.findIndex((row) => sameSequentialShape(row, gemvCase));
-    const isGeneral = variant.cols === general.cols && variant.unroll === general.unroll;
-    const row: LinearGemvShapeVariant = {
-      storage: gemvCase.storage,
-      n: gemvCase.n,
-      k: gemvCase.k,
-      variant,
-    };
-    if (isGeneral) shapes = shapes.filter((_, at) => at !== index);
-    else if (index < 0) shapes = [...shapes, row];
-    else shapes = shapes.map((entry, at) => (at === index ? row : entry));
-  }
-  let parallelShapes: LinearGemvParallelShape[] = [...defaults.parallelShapes];
-  for (const { row } of parallel) {
-    if (row === undefined) continue;
-    // The selection takes the first row that matches, so the first one is replaced
-    const index = parallelShapes.findIndex(
-      (entry) =>
-        entry.storage === row.storage &&
-        entry.n === row.n &&
-        entry.k === row.k &&
-        entry.group === row.group,
-    );
-    parallelShapes =
-      index < 0
-        ? [...parallelShapes, row]
-        : parallelShapes.map((entry, at) => (at === index ? row : entry));
-  }
-  const decisions = [
-    ...sequential.map(({ decision }) => decision),
-    ...parallel.map(({ decision }) => decision),
-    threadTargetDecision(records, defaults),
-  ];
-  const changed = decisions.some(({ outcome }) => outcome === "adopted");
-  const choices: LinearGemvChoices = {
-    sequential: { variant: defaults.sequential.variant, shapes },
-    rowsThreadTarget: defaults.rowsThreadTarget,
-    parallelShapes,
-  };
+const fieldOf = (
+  table: LinearGemvChoices,
+  defaults: LinearGemvChoices,
+  decisions: readonly LinearGemvDecision[],
+): LinearGemvChoices | undefined => {
+  const choices = applyDecisions(table, defaults, decisions);
   try {
     assertGeometryProfile({ ...DEFAULT_GEOMETRY_PROFILE, linearGemv: choices });
   } catch (cause) {
@@ -2011,27 +2813,172 @@ export const deriveLinearGemvChoices = (
     }
     throw cause;
   }
-  const stale = staleGroups(records);
-  const [first] = sources;
-  return {
-    ...(changed ? { linearGemv: choices } : {}),
+  return canonicalJsonText(choices) === canonicalJsonText(defaults) ? undefined : choices;
+};
+
+/**
+ * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) from GEMV sweep records of one
+ * adapter, by the rules of the module doc. A shape a steady record measured is decided by the rule
+ * of one steady record at `options.margin` (×1.065 by default): a candidate whose gain over the
+ * default's choice in the same group clears margin × its gap × the reference's gap in every steady
+ * record that times it, its check held in every current group, its row not slower than the default's
+ * choice at the other row counts in those records — and where the table holds another choice, one
+ * that beats that choice by the same bar. Any other shape is decided by the rule of two records:
+ * ×1.10 in every group of two records or more against the reference's repeated fastest time. The
+ * field is the table's choices with the derived ones in place. Groups whose case is not current and
+ * current groups without a usable reference are reported, not refused; a record that no group could
+ * stand for throws with the reason (fail loudly).
+ */
+export const deriveLinearGemvChoices = (
+  inputs: readonly GemvSweepInput[],
+  options: DeriveLinearGemvOptions,
+): LinearGemvDerivation => {
+  const margin = gemvMarginOf(options.margin);
+  const sources = readRecords(inputs, options.table);
+  const kernelsOf = currentKernels(options.table);
+  const records = labelled(sources, kernelsOf, options.table.id);
+  const defaults = DEFAULT_GEOMETRY_PROFILE.linearGemv;
+  const table = options.table.linearGemv ?? defaults;
+  const context: DerivationContext = {
+    records,
+    steady: records.filter(({ source }) => readsSteady(source)),
+    kernelsOf,
     defaults,
+    table,
+    margin,
+  };
+  const cases = GEMV_CASES.filter((gemvCase) =>
+    sources.some((source) => source.cases.has(gemvCase.id)),
+  );
+  // Sequential keys in the order of their first case
+  const keys = new Map<string, GemvCase[]>();
+  for (const gemvCase of cases) {
+    const key = sequentialKey(gemvCase);
+    keys.set(key, [...(keys.get(key) ?? []), gemvCase]);
+  }
+  const decisions = [
+    ...[...keys.values()].map((shared) => sequentialDecision(context, shared)),
+    ...cases.map((gemvCase) => parallelDecision(context, gemvCase)),
+    threadTargetDecision(records, defaults),
+  ];
+  const linearGemv = fieldOf(table, defaults, decisions);
+  const [first] = sources;
+  const provenanceRecords = records.map((record): ProvenanceRecord => ({
+    path: record.source.path,
+    sha256: record.source.sha256,
+    date: record.source.date,
+    candidateSet: record.source.candidateSet,
+    ...(record.source.userAgent === undefined ? {} : { userAgent: record.source.userAgent }),
+    groups: recordGroups(record),
+    steadiness: record.source.steadiness,
+    steady: readsSteady(record.source),
+  }));
+  return {
+    ...(linearGemv === undefined ? {} : { linearGemv }),
+    defaults,
+    tableChoices: table,
     decisions,
-    stale,
-    verdicts: verdictLinesOf(decisions, records),
-    rule: { minSpeedup: GEMV_MIN_SPEEDUP, referenceRepeat: GEMV_REFERENCE_REPEAT },
+    stale: staleGroups(records),
+    verdicts: verdictLinesOf(decisions, provenanceRecords, margin),
+    rule: ruleOf(margin),
     provenance: {
       adapter: first.adapter,
       caseTable: gemvCaseTableId(),
-      records: records.map((record) => ({
-        path: record.source.path,
-        sha256: record.source.sha256,
-        date: record.source.date,
-        candidateSet: record.source.candidateSet,
-        ...(record.source.userAgent === undefined ? {} : { userAgent: record.source.userAgent }),
-        groups: recordGroups(record),
-      })),
+      records: provenanceRecords,
     },
+  };
+};
+
+/** A decision whose derived choice another margin changes. */
+export type LinearGemvChangedDecision = {
+  readonly field: LinearGemvDecision["field"];
+  readonly shape: string;
+  readonly cases: readonly string[];
+  /** The choice and row block under the derivation's margin. */
+  readonly from: { readonly choice: string; readonly rowBlock?: LinearGemvParallelRows };
+  /** Under the other margin. */
+  readonly to: { readonly choice: string; readonly rowBlock?: LinearGemvParallelRows };
+};
+
+/** The return value of {@link redecideLinearGemvChoices}. */
+export type LinearGemvRedecision = {
+  /** The derivation as it is under `margin`: its decisions, field, lines and rule. */
+  readonly derivation: LinearGemvDerivation;
+  /** The decisions whose derived choice or row block differs from the given derivation's. */
+  readonly changed: readonly LinearGemvChangedDecision[];
+};
+
+/**
+ * Decides a derivation's output again under another margin, from the output alone (no record):
+ * every decision of the rule of one steady record is decided again from the evidence it carries by
+ * the same function the derivation calls (gemv-one-record.ts's `decideOneRecord`), every other
+ * decision (the rule of two records, the packed rows, the thread target) stays, the field is built
+ * again from the table's choices the derivation started from, and the decisions that change are
+ * listed. Pure. The decisions' notes (the subgroup form) stay those of the derivation's margin.
+ */
+export const redecideLinearGemvChoices = (
+  derivation: LinearGemvDerivation,
+  margin: number,
+): LinearGemvRedecision => {
+  const checked = gemvMarginOf(margin);
+  const decisions = derivation.decisions.map((decision): LinearGemvDecision => {
+    const { evidence } = decision;
+    if (decision.path !== "one-record" || evidence === undefined) return decision;
+    const {
+      derivedChoice: _choice,
+      derivedRowBlock: _rowBlock,
+      outcome: _outcome,
+      reason: _reason,
+      candidate: _candidate,
+      gains: _gains,
+      rowGains: _rowGains,
+      path: _path,
+      evidence: _evidence,
+      tableChoice: _table,
+      tableRowBlock: _tableRowBlock,
+      ...head
+    } = decision;
+    if (decision.field === "sequential.shapes") {
+      return sequentialOfEvidence(head, evidence, checked);
+    }
+    const [one] = evidence;
+    if (one === undefined) throw new Error(`The decision of ${decision.shape} carries no evidence`);
+    return parallelOfEvidence(head, one, checked);
+  });
+  const changed = derivation.decisions.flatMap((before, index): LinearGemvChangedDecision[] => {
+    const after = decisions[index];
+    if (
+      after === undefined ||
+      (after.derivedChoice === before.derivedChoice &&
+        after.derivedRowBlock === before.derivedRowBlock)
+    ) {
+      return [];
+    }
+    const side = (decision: LinearGemvDecision) => ({
+      choice: decision.derivedChoice,
+      ...(decision.derivedRowBlock === undefined ? {} : { rowBlock: decision.derivedRowBlock }),
+    });
+    return [
+      {
+        field: before.field,
+        shape: before.shape,
+        cases: before.cases,
+        from: side(before),
+        to: side(after),
+      },
+    ];
+  });
+  const linearGemv = fieldOf(derivation.tableChoices, derivation.defaults, decisions);
+  const { linearGemv: _field, ...rest } = derivation;
+  return {
+    derivation: {
+      ...rest,
+      ...(linearGemv === undefined ? {} : { linearGemv }),
+      decisions,
+      verdicts: verdictLinesOf(decisions, derivation.provenance.records, checked),
+      rule: ruleOf(checked),
+    },
+    changed,
   };
 };
 
@@ -2049,8 +2996,19 @@ export type GemvMeasurementPlanning = {
   readonly gates: GemvGates;
   /** The (case, row count) pairs of the `full` set the plan read. */
   readonly groups: number;
-  /** In the case table's order, then by row count. */
+  /**
+   * What records of any class fill (the decisions of the rule of two records: two records needed),
+   * in the case table's order, then by row count — what a batch of narrowed steps measures.
+   */
   readonly missing: readonly GemvMissingMeasurement[];
+  /**
+   * What only a steady record fills, in the same order: the candidates of decisions that the rule of
+   * one steady record takes (a steady record timed the case at M = 1) and that no steady record is
+   * evidence for. A narrowed step's record of a few groups has no class, so no batch step fills
+   * these: a steady record that times the named kernels does (a run of the `full` or the `explore`
+   * set on the device).
+   */
+  readonly missingSteady: readonly GemvMissingMeasurement[];
   /** The groups of the records that are not current. */
   readonly stale: readonly LinearGemvStaleGroup[];
 };
@@ -2065,8 +3023,14 @@ export type PlanGemvMeasurementsOptions = {
  * What the records lack for {@link deriveLinearGemvChoices} to be complete under the current
  * runtime: per case and row count of the `full` set, the candidates the derivation reads there (the
  * `winner` and `no-regression` roles of gemv-candidates.ts's `gemvGroupRole`, on the records' gates)
- * that fewer than two records could be evidence for: a current group whose reference for the
- * candidate's class is usable and whose time is repeated (the module doc's rules), with a current
+ * that the records could not be evidence for by the rule the derivation will take for the
+ * candidate's decision. Where a steady record timed the case at M = 1 with a usable reference for
+ * the class (the identical class: a case of its sequential key), the decision is the rule of one
+ * steady record's, which reads the steady records alone: a candidate no steady record could be
+ * evidence for (a usable reference in its group) is in `missingSteady`, and records of no class
+ * cannot fill it. Elsewhere the rule of two records decides: a candidate fewer than two records
+ * could be evidence for (a current group whose reference for the candidate's class is usable and
+ * whose time is repeated) is in `missing`. Either way it is a current
  * row of the candidate — timed, screened out by the quick look (a screened row is a current look
  * that the candidate did not come near enough to matter; measuring it again would screen it again),
  * or skipped because the record's M = 1 group of the case already left it unadoptable
@@ -2103,7 +3067,23 @@ export const planGemvMeasurements = (
   const table = options.table ?? selectGeometryProfile(first.adapter);
   const kernelsOf = currentKernels(table);
   const records = labelled(sources, kernelsOf, table.id);
+  const steady = { steady: records.filter(({ source }) => readsSteady(source)) };
+  /**
+   * Whether the derivation decides a case's class by the rule of one steady record: the identical
+   * class by its sequential key (a steady record measured one of the key's cases at M = 1), the
+   * reorder class by its parallel row (the case itself) — as {@link deriveLinearGemvChoices} does.
+   */
+  const oneRecordPath = (gemvCase: GemvCase, candidateClass: GemvCandidateClass): boolean =>
+    candidateClass === "identical"
+      ? GEMV_CASES.some(
+          (other) =>
+            sequentialKey(other) === sequentialKey(gemvCase) &&
+            measuredBySteady(steady, other, "identical"),
+        )
+      : measuredBySteady(steady, gemvCase, "reorder");
+  const nameOf = ({ name }: { readonly name: string }): string => name;
   const missing: GemvMissingMeasurement[] = [];
+  const missingSteady: GemvMissingMeasurement[] = [];
   let groups = 0;
   for (const gemvCase of GEMV_CASES) {
     for (const m of gemvRowCountsIn(gemvCase, "full")) {
@@ -2117,11 +3097,25 @@ export const planGemvMeasurements = (
           gemvGroupRole(m, candidate.class) !== "unread" &&
           kernels.has(classReference(gemvCase, m, candidate.class)),
       );
-      const covered = ({ name, class: candidateClass }: (typeof read)[number]): number =>
+      /**
+       * The records that could be evidence for a candidate here: under the rule of two records a
+       * group whose reference's time is repeated, under the rule of one steady record a steady
+       * record's group whose reference is usable (its own time).
+       */
+      const covering = (
+        { name, class: candidateClass }: (typeof read)[number],
+        steady: boolean,
+      ): number =>
         records.filter(({ source, states }) => {
           const state = states.get(groupKey(gemvCase.id, m));
           if (state?.kind !== "current") return false;
-          if (state.references[levelOf(candidateClass)].kind !== "timed") return false;
+          if (
+            steady
+              ? !readsSteady(source) || !referenceUsable(state, candidateClass)
+              : state.references[levelOf(candidateClass)].kind !== "timed"
+          ) {
+            return false;
+          }
           const row = state.group.rows.get(name);
           return (
             row !== undefined &&
@@ -2135,11 +3129,25 @@ export const planGemvMeasurements = (
             rowStaleness(row, state.kernels) === undefined
           );
         }).length;
-      const lacking = read
-        .filter((candidate) => covered(candidate) < MIN_RECORDS)
-        .map(({ name }) => name);
-      if (lacking.length > 0) missing.push({ caseId: gemvCase.id, m, candidates: lacking });
+      // By the rule the derivation will take for the candidate's decision: where a steady record
+      // timed the case at M = 1 only steady records count, and only one fills the gap
+      const lacking = read.filter((candidate) =>
+        oneRecordPath(gemvCase, candidate.class)
+          ? covering(candidate, true) === 0
+          : covering(candidate, false) < MIN_RECORDS,
+      );
+      const add = (to: GemvMissingMeasurement[], names: readonly string[]): void => {
+        if (names.length > 0) to.push({ caseId: gemvCase.id, m, candidates: names });
+      };
+      add(
+        missing,
+        lacking.filter((candidate) => !oneRecordPath(gemvCase, candidate.class)).map(nameOf),
+      );
+      add(
+        missingSteady,
+        lacking.filter((candidate) => oneRecordPath(gemvCase, candidate.class)).map(nameOf),
+      );
     }
   }
-  return { gates, groups, missing, stale: staleGroups(records) };
+  return { gates, groups, missing, missingSteady, stale: staleGroups(records) };
 };

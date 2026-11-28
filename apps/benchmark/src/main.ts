@@ -1,5 +1,5 @@
 /**
- * The page: the GPU it found, the note before a run, the two checkboxes, Start and Cancel; while a
+ * The page: the GPU it found, the note before a run, the three checkboxes, Start and Cancel; while a
  * run goes, the two bars, the time left and the patterns found; at the end, the download. The DOM
  * is only here: what the page says and does is decided by the pure modules beside it (`notes.ts`,
  * `plan.ts`, `progress.ts`, `controller.ts`), which are tested without a page. The run's events are
@@ -10,6 +10,7 @@
 
 import "./style.css";
 
+import { gemvSweepSession } from "@karume/runtime/tune";
 import { readEnvironment } from "@karume/sweep-app-support/environment";
 import { type Checkout, errorText, messageText } from "@karume/sweep-app-support/record";
 
@@ -39,7 +40,7 @@ import { holdWakeLock } from "./wake-lock.ts";
 declare const __BENCHMARK_CHECKOUT__: Checkout;
 
 const HONESTY =
-  "These are candidates from this one run: a table takes a pattern only after a second run on this machine agrees.";
+  "Where this run held steady, a table can take these from it alone; where it did not, only after a second run on this machine agrees.";
 
 /** The adapter, or why the page cannot run on this browser. */
 const probeGpu = async (): Promise<FoundAdapter | string> => {
@@ -81,6 +82,8 @@ const paintBar = (
 };
 
 const main = async (): Promise<void> => {
+  // The page load's session: every GEMV record of its runs names it
+  const session = gemvSweepSession();
   const app = document.querySelector<HTMLElement>("#app");
   if (app === null) throw new Error("The page has no #app element");
   const checkout = __BENCHMARK_CHECKOUT__;
@@ -88,9 +91,10 @@ const main = async (): Promise<void> => {
   const device = element("dl", { className: "device" });
   const deviceNotes = element("div");
   const notes = element("ul", { className: "notes" });
-  const choice: Record<keyof SweepChoice, boolean> = { gemv: true, geometry: true };
+  const choice: Record<keyof SweepChoice, boolean> = { gemv: true, geometry: true, grid: true };
   const gemvBox = element("input", { type: "checkbox", checked: true });
   const geometryBox = element("input", { type: "checkbox", checked: true });
+  const gridBox = element("input", { type: "checkbox", checked: true });
   const start = element("button", { type: "button", textContent: "Start", disabled: true });
   const cancel = element("button", { type: "button", textContent: "Cancel", disabled: true });
   const problem = element("p", { className: "problem", hidden: true });
@@ -147,6 +151,7 @@ const main = async (): Promise<void> => {
         element("legend", { textContent: "Measurements" }),
         element("label", {}, [gemvBox, " GEMV sweep"]),
         element("label", {}, [geometryBox, " Tile geometry sweep"]),
+        element("label", {}, [gridBox, " GEMM tile ladder"]),
       ]),
       element("div", { className: "actions" }, [start, cancel]),
       problem,
@@ -206,6 +211,7 @@ const main = async (): Promise<void> => {
     start.disabled = running !== undefined || view.blocker !== undefined || plan.cases.length === 0;
     gemvBox.disabled = running !== undefined;
     geometryBox.disabled = running !== undefined;
+    gridBox.disabled = running !== undefined;
     cancel.disabled = running === undefined;
   };
   gemvBox.addEventListener("change", () => {
@@ -214,6 +220,10 @@ const main = async (): Promise<void> => {
   });
   geometryBox.addEventListener("change", () => {
     choice.geometry = geometryBox.checked;
+    showPlan();
+  });
+  gridBox.addEventListener("change", () => {
+    choice.grid = gridBox.checked;
     showPlan();
   });
   showPlan();
@@ -253,7 +263,7 @@ const main = async (): Promise<void> => {
   const showEnding = (result: RunEnding, state: ProgressState): void => {
     ending.hidden = false;
     const { bundle } = result;
-    const counts = patternLines(plan, state.patterns).join(". ");
+    const counts = patternLines(plan, state).join(". ");
     endNotes.replaceChildren(
       ...afterRunNotes(bundle.records).map((text) =>
         element("p", { className: "warning", textContent: text }),
@@ -359,6 +369,7 @@ const main = async (): Promise<void> => {
       showPlan();
     };
     void runBenchmark(runPlan, {
+      session,
       signal: controller.signal,
       onEvent: (event) => queue.push(event),
       readEnvironment: () =>

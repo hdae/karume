@@ -151,6 +151,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemmGridRule",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemmRowsRule",
         "kind": "typeAlias"
       },
@@ -681,6 +685,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "DeriveGemmGridOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DeriveGeometryProfileOptions",
         "kind": "typeAlias"
       },
@@ -697,6 +705,38 @@
         "kind": "variable"
       },
       {
+        "name": "GEMM_GRID_LADDER",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_LARGEST_MIN_WORKGROUPS",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MAX_PADDING",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MIN_K",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MIN_WORKGROUPS",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_LOWEST_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_MIN_PASS_MS",
+        "kind": "variable"
+      },
+      {
         "name": "GEMV_MIN_SPEEDUP",
         "kind": "variable"
       },
@@ -705,8 +745,48 @@
         "kind": "variable"
       },
       {
+        "name": "GEMV_STEADY_GROUP_SPREAD",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_STEADY_MAX_SHARE",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMV_STEADY_MIN_GROUPS",
+        "kind": "variable"
+      },
+      {
         "name": "GEOMETRY_MIN_SPEEDUP",
         "kind": "variable"
+      },
+      {
+        "name": "GemmGridCaseOutcome",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridDerivation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridPairVerdict",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridReading",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridRecord",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvCandidateEvidence",
+        "kind": "typeAlias"
       },
       {
         "name": "GemvExploreEvidence",
@@ -721,6 +801,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvKeptRow",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvMeasurementPlanning",
         "kind": "typeAlias"
       },
@@ -729,11 +813,43 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvOneRecordEvidence",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvOneRecordOutcome",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvPairReading",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvRecordTiming",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvReferenceRefusal",
         "kind": "typeAlias"
       },
       {
+        "name": "GemvRowBlockOption",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvRowCountEvidence",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvRowReading",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSteadiness",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSteadinessClass",
         "kind": "typeAlias"
       },
       {
@@ -794,6 +910,10 @@
       },
       {
         "name": "GemvSweepRow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvSweepSession",
         "kind": "typeAlias"
       },
       {
@@ -881,6 +1001,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvChangedDecision",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LinearGemvDecision",
         "kind": "typeAlias"
       },
@@ -897,7 +1021,15 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvRedecision",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LinearGemvRowGain",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvRule",
         "kind": "typeAlias"
       },
       {
@@ -993,11 +1125,23 @@
         "kind": "typeAlias"
       },
       {
+        "name": "decideOneRecord",
+        "kind": "function"
+      },
+      {
+        "name": "deriveGemmGrid",
+        "kind": "function"
+      },
+      {
         "name": "deriveGeometryProfile",
         "kind": "function"
       },
       {
         "name": "deriveLinearGemvChoices",
+        "kind": "function"
+      },
+      {
+        "name": "gemvBreakEven",
         "kind": "function"
       },
       {
@@ -1025,7 +1169,27 @@
         "kind": "function"
       },
       {
+        "name": "gemvMarginOf",
+        "kind": "function"
+      },
+      {
+        "name": "gemvReadingIsEvidence",
+        "kind": "function"
+      },
+      {
+        "name": "gemvRecordReading",
+        "kind": "function"
+      },
+      {
         "name": "gemvReferenceRefusal",
+        "kind": "function"
+      },
+      {
+        "name": "gemvRoundsGap",
+        "kind": "function"
+      },
+      {
+        "name": "gemvRowBlockRefusal",
         "kind": "function"
       },
       {
@@ -1034,6 +1198,14 @@
       },
       {
         "name": "gemvSentinels",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSteadiness",
+        "kind": "function"
+      },
+      {
+        "name": "gemvSteadyReading",
         "kind": "function"
       },
       {
@@ -1053,7 +1225,15 @@
         "kind": "function"
       },
       {
+        "name": "gemvSweepSession",
+        "kind": "function"
+      },
+      {
         "name": "gemvTableCandidate",
+        "kind": "function"
+      },
+      {
+        "name": "gemvTimingRefusal",
         "kind": "function"
       },
       {
@@ -1098,6 +1278,10 @@
       },
       {
         "name": "planGemvMeasurements",
+        "kind": "function"
+      },
+      {
+        "name": "redecideLinearGemvChoices",
         "kind": "function"
       },
       {

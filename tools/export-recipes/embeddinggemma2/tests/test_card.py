@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from _shared.paths import REPO_ROOT
+from _shared.upstream import GEMMA_LICENSE_PAGE, snapshot_revision
 from embeddinggemma2.card import (
     EMBEDDINGGEMMA2_I8_SCREENING,
     EMBEDDINGGEMMA2_I8_SCREENING_SOURCE,
@@ -29,6 +30,7 @@ from embeddinggemma2.card import (
     EMBEDDINGGEMMA2_UPSTREAM_CONTEXT_TOKENS,
     render_embeddinggemma2_model_card,
 )
+from embeddinggemma2.sources import PIN, SNAPSHOT_DIR
 from karume.migrate import card_format_statement
 
 #: The repository the usage snippet names (the dist passes it from the pipeline's declaration).
@@ -124,7 +126,7 @@ def _render(manifest: dict[str, Any] | None = None) -> str:
 class TestWhatTheCardSays:
     def test_it_says_text_tower_only(self) -> None:
         card = _render()
-        assert "the **text tower** of `google/embeddinggemma-2`" in card
+        assert "the **text tower** of [google/embeddinggemma-2]" in card
         assert "cannot embed images, video or audio" in card
 
     def test_it_states_the_token_limit_from_the_manifest_against_upstreams_context(self) -> None:
@@ -261,13 +263,23 @@ class TestWhatTheCardSays:
 
     def test_it_carries_upstreams_precision_statement(self) -> None:
         card = _render()
-        assert "bfloat16 or float32, never float16" in card
+        assert "  > Run inference in `bfloat16` or `float32`. Do not use `float16`.\n" in card
         assert "computes in f32 over the stored bf16 weights" in card
+
+    def test_it_links_the_license_page_its_upstream_card_links(self) -> None:
+        """`license_link` beside the SPDX license is the page the upstream card itself links (its
+        header at the pinned revision — checked against the local snapshot when it is present)."""
+        assert f"license_link: {GEMMA_LICENSE_PAGE}" in _render().split("\n---\n", 1)[0]
+        readme = SNAPSHOT_DIR / "README.md"
+        if not readme.is_file():
+            pytest.skip(f"the upstream card is not on this machine ({readme})")
+        assert snapshot_revision(SNAPSHOT_DIR, "README.md") == PIN.revision
+        assert f'href="{GEMMA_LICENSE_PAGE}"' in readme.read_text(encoding="utf-8")
 
     def test_it_names_the_apache_license(self) -> None:
         card = _render()
         assert "license: apache-2.0" in card
-        assert "licensed **Apache 2.0**" in card
+        assert "licensed **apache-2.0**" in card
         assert "a verbatim copy is in `LICENSE.md`" in card
 
     def test_it_quotes_upstreams_sentence_on_the_use_policy_with_its_link(self) -> None:
@@ -276,7 +288,7 @@ class TestWhatTheCardSays:
             "  > Deployments must adhere to the [Gemma Prohibited Use Policy]"
             "(https://ai.google.dev/gemma/prohibited_use_policy).\n"
         ) in card
-        assert "It is not reproduced here." in card
+        assert "upstream's document, not reproduced here" in card
 
     def test_it_advertises_the_familys_entry_point_and_the_repository(self) -> None:
         card = _render()
@@ -387,7 +399,7 @@ class TestTheVisionTower:
     def test_a_manifest_with_the_tower_says_text_and_images(self) -> None:
         card = _render(_with_vision())
         assert "# EmbeddingGemma 2 Text and Image Embedding — Karume" in card
-        assert "the **text and vision towers** of\n`google/embeddinggemma-2`" in card
+        assert "the **text and vision towers** of\n[google/embeddinggemma-2]" in card
         assert "Built with `vision: true`, the pipeline also fetches the" in card
         assert "cannot embed images" not in card
         assert "neither video nor audio can be embedded" in card
@@ -500,7 +512,7 @@ class TestTheAudioTower:
     def test_a_manifest_with_the_tower_says_text_and_audio(self) -> None:
         card = _render(_with_audio())
         assert "# EmbeddingGemma 2 Text and Audio Embedding — Karume" in card
-        assert "the **text and audio towers** of\n`google/embeddinggemma-2`" in card
+        assert "the **text and audio towers** of\n[google/embeddinggemma-2]" in card
         assert "Built with `audio: true`, the pipeline also fetches the audio" in card
         assert "The vision tower is not carried: neither images nor video can" in card
         assert "cannot embed images, video or audio" not in card
@@ -552,7 +564,7 @@ class TestTheAudioTower:
     def test_a_manifest_with_both_towers_says_text_images_and_audio(self) -> None:
         card = _render(_with_audio(_with_vision(_with_i8())))
         assert "# EmbeddingGemma 2 Text, Image and Audio Embedding — Karume" in card
-        assert "the **text, vision and audio towers**\nof `google/embeddinggemma-2`" in card
+        assert "the **text, vision and audio towers**\nof [google/embeddinggemma-2]" in card
         assert (
             "becomes up to\n  70 soft tokens (a square one 64); an audio becomes one soft" in card
         )

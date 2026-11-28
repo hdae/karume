@@ -107,7 +107,8 @@
  * `attentionOnline` likewise when no attention-bench records are given. Without `base` (or for a
  * family `base` has no entry for), an uncovered family keeps the default and gets no entry. A
  * base's `linearGemv` (the GEMV choices, which only GEMV sweep records decide —
- * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is.
+ * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is, and so is its `gemmGrid` (the
+ * grid-fill rule, which only grid records decide — `deriveGemmGrid` in gemm-grid-derive.ts).
  *
  * ## Shared tables (ADR 0156)
  *
@@ -180,6 +181,7 @@ import {
   isSweepSet,
   type SweepSet,
 } from "./geometries.ts";
+import { GRID_SET } from "./gemm-grid.ts";
 import { casePlan } from "./harness.ts";
 import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
@@ -675,6 +677,13 @@ export const parseSweepReport = (
     throw new Error(
       `${where}: settings.candidateSet ${evaluation} is an evaluation set (perf-ledger ${evaluationSetLedgerId(evaluation)}): ` +
         "it measures cases outside the sweep's case set, and no table is derived from it",
+    );
+  }
+  // MUST: no field is derived from the grid set either: it times the grid-fill rule's ladder on cases
+  // of its own, and only that rule's derivation reads it
+  if (recordedSet === GRID_SET) {
+    throw new Error(
+      `${where}: settings.candidateSet ${GRID_SET} is the grid set: it times the grid-fill rule's ladder on cases outside the sweep's case set, and only the derivation of that rule reads it`,
     );
   }
   const adapter = parsed.adapter;
@@ -3129,10 +3138,14 @@ export const buildGeometryProfile = (
   // The GEMV choices come from GEMV sweep records (`deriveLinearGemvChoices`), never from these: a
   // base's field is carried as it is, so a regeneration of the tile geometry does not drop it
   const linearGemv = carry?.base.linearGemv;
+  // The grid-fill rule likewise comes from grid sweep records (`deriveGemmGrid`) and is carried as it
+  // is: a regeneration of the M buckets leaves it in force
+  const gemmGrid = carry?.base.gemmGrid;
   const table: GeometryProfile = {
     ...fields,
     ...(attentionOnline === undefined ? {} : { attentionOnline }),
     ...(linearGemv === undefined ? {} : { linearGemv }),
+    ...(gemmGrid === undefined ? {} : { gemmGrid }),
   };
   const attentionBench: AttentionBenchProvenance | undefined =
     attention === undefined
@@ -3344,6 +3357,7 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * (a stale entry throws — sweep that family again), and, without `attentionBench`, its
    * `attentionOnline` and attention-bench block likewise (stale: measure the attention bench again).
    * Its `linearGemv` is carried as it is: GEMV sweep records decide it (`deriveLinearGemvChoices`).
+   * So is its `gemmGrid`: grid records decide it (`deriveGemmGrid`).
    * The records must cover every family they have a row of completely (every case of its current
    * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
    * these options. With `shared`, `base` is a shared table of the records' adapters, and a family

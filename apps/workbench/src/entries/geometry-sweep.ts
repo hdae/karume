@@ -7,7 +7,9 @@
  * `karume-geometry-sweep/4` record — the input `deriveGeometryProfile` reads, with no envelope of its own. The evaluation set
  * `k88` (perf-ledger K-88) gets the K-88 summary; no table is derived from its record. The
  * `explore` set measures `full`'s candidates class by class, each call given the rows of the calls
- * before it, so a candidate a case of its class ruled out is skipped in the later cases.
+ * before it, so a candidate a case of its class ruled out is skipped in the later cases. The `grid`
+ * set times the grid-fill rule's ladder on cases of its own in interleaved rounds, with no quick look;
+ * no tile geometry is derived from its record.
  * The run concludes a verdict from its rows (`sweepVerdict` of
  * `@karume/sweep-app-support/geometry-sweep/summary`): a candidate that differs from its default or
  * errored is a `fail`. The parameters, the plan, the run and the record are the shared package's,
@@ -40,7 +42,7 @@ const entry: Entry = {
   id: GEOMETRY_SWEEP_ENTRY_ID,
   title: "Geometry sweep",
   description:
-    "The GEMM tile geometries measured case by case on this GPU (runGeometrySweep, idle time between cases, a quick look before the timing), merged into the one karume-geometry-sweep/4 record deriveGeometryProfile reads. The candidate set explore measures full's candidates class by class and skips, in the later cases of a class, a candidate an earlier one ruled out. The candidate set k88 is an evaluation (perf-ledger K-88): no table is derived from its record.",
+    "The GEMM tile geometries measured case by case on this GPU (runGeometrySweep, idle time between cases, a quick look before the timing), merged into the one karume-geometry-sweep/4 record deriveGeometryProfile reads. The candidate set explore measures full's candidates class by class and skips, in the later cases of a class, a candidate an earlier one ruled out. The candidate set k88 is an evaluation (perf-ledger K-88): no table is derived from its record. The candidate set grid times the grid-fill rule's ladder on cases of its own in interleaved rounds (no quick look); its record is read for that rule's integers only.",
   parameters: GEOMETRY_SWEEP_PARAMETERS,
   run: async ({ parameters, gpuOptions, signal, progress }) => {
     const selection = sweepSelection(parameters);

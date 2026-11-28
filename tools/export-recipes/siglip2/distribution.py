@@ -32,12 +32,12 @@ driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.paths import INPUTS_ROOT
 from _shared.upstream import assert_upstream_provenance, snapshot_revision
 from karume.dist import (
@@ -55,6 +55,7 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
+from karume.modelcard import notice_closing
 
 from .card import (
     SIGLIP2_LICENSE,
@@ -400,11 +401,19 @@ def siglip2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: {@link siglip2.card.SIGLIP2_MAP_HEAD_NORM} — `siglip2.measurements` is the source of truth for
 #: both the number and the format). The size of the difference can only be read as a ratio to the
 #: scale (the L2 norm), so both enter through the same path.
-SIGLIP2_NOTICE_MARKDOWN = f"""# NOTICE
+#:
+#: The notice names the checkpoints of the models built by their repository IDs, so it follows the
+#: models (`dist.ROOT_FILES` passes them): a build of `base` alone must not name so400m.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
+def siglip2_notice_markdown(models: Sequence[str]) -> str:
+    checkpoints = " and ".join(f"`{SIGLIP2_UPSTREAM[model]}`" for model in models)
+    kind = "checkpoint" if len(models) == 1 else "checkpoints"
+    which = "which is" if len(models) == 1 else "which are"
+    return f"""# NOTICE
 
-This repository redistributes a modified form of the SigLIP2 checkpoints listed in `README.md`,
-which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The following changes
-were made:
+This repository redistributes a modified form of the SigLIP2 {kind}
+{checkpoints}, {which} licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The
+following changes were made:
 
 - The **vision tower only** was extracted; the text tower was never read, so zero-shot
   classification and image/text similarity are not possible from this repository.
@@ -418,8 +427,18 @@ were made:
   whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}, the difference is {SIGLIP2_MAP_HEAD_DIFF}.
 - **No quantization**: the stored weights are the source checkpoints' own f32 values.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+{notice_closing("The original checkpoints are")}
 """
+
+
+# SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
+def siglip2_root_files(models: Sequence[str]) -> dict[str, str]:
+    """The legal texts at the repository root for a build of `models` (the driver replaces the
+    Pipeline's fixed set with them — `dist.ROOT_FILES`)."""
+    return {
+        "LICENSE.md": license_markdown(apache_license_2_0()),
+        "NOTICE.md": siglip2_notice_markdown(models),
+    }
 
 
 #: The `--pipeline siglip2` entry (the driver merges it into the core's PIPELINES).
@@ -435,5 +454,6 @@ PIPELINE = Pipeline(
     # The redistribution conditions of the upstream license (Apache 2.0 §4) apply once per
     # distribution repository, so the full text is also read once here regardless of how many
     # assemblies run (ADR 0092 decision 7).
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": SIGLIP2_NOTICE_MARKDOWN},
+    # The driver replaces them with the files of the models a build includes (`dist.ROOT_FILES`).
+    root_files=siglip2_root_files(tuple(SIGLIP2_UPSTREAM)),
 )

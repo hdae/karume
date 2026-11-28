@@ -603,8 +603,8 @@ class TestDepthAnythingModelCard:
     ) -> None:
         """Base / Large are CC BY-NC 4.0. "What is absent" is the fact readers look for first."""
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert "Only the Small checkpoint is Apache-2.0." in card
-        assert "CC BY-NC 4.0" in card
+        assert "Only the Small checkpoint is redistributed" in card
+        assert "upstream licenses Base and Large **cc-by-nc-4.0**" in card
 
     def test_the_title_comes_from_the_upstream_checkpoint_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -619,7 +619,7 @@ class TestDepthAnythingModelCard:
     ) -> None:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "a verbatim copy is in `LICENSE.md`" in card
-        assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
+        assert "listed in full in `NOTICE.md`, per Apache 2.0 §4(b)" in card
 
 
 class TestDepthAnythingLegalText:
@@ -635,7 +635,9 @@ class TestDepthAnythingLegalText:
         plausible, so every other check would pass it.
         """
         out_dir, _ = depth_anything_assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_it_ships_the_modification_notice(self, depth_anything_assembled) -> None:
         out_dir, _ = depth_anything_assembled

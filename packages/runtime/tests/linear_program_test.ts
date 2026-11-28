@@ -29,7 +29,7 @@ import {
   linearI8a8UsesVec4,
   linearI8a8UsesVecFill,
 } from "../src/kernels/linear-i8a8.ts";
-import { linearSplitKCombineKey, linearSplitKPartialKey } from "../src/kernels/linear-splitk.ts";
+import { linearSplitKCombineKey, linearSplitKGemmKey } from "../src/kernels/linear-splitk.ts";
 import {
   quantizeRowsGeometry,
   quantizeRowsKey,
@@ -39,6 +39,7 @@ import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import type { LinearPrologue } from "../src/runtime/fusion-rule.ts";
 import {
   type LinearProgram,
+  linearChoiceHoldsTemps,
   linearI8a8Geometry,
   linearProgramFor,
 } from "../src/runtime/linear-program.ts";
@@ -171,7 +172,10 @@ const CASES: readonly Case[] = [
     shape: { m: 16, n: 64, k: 1536 },
     storage: "f32",
     knobs: { linearSplitK: true },
-    keys: () => [linearSplitKPartialKey(), linearSplitKCombineKey()],
+    keys: () => [
+      linearSplitKGemmKey("f32", true, 4, 16, undefined, gemmRowsGeometry(PROFILE, 16)),
+      linearSplitKCombineKey(),
+    ],
   },
   {
     name: "the M = 1 GEMV, f16 storage",
@@ -436,6 +440,47 @@ describe("linearProgramFor: one representative linear per strategy", () => {
           );
         }
       }
+    }
+  });
+
+  it("writes each temporary in the first dispatch that binds it and only reads it after, as the WGSL declares (the order the memory estimate reads)", () => {
+    let programsWithTemporaries = 0;
+    for (const testCase of CASES) {
+      const program = programOf(testCase);
+      if (program.temps.length > 0) programsWithTemporaries += 1;
+      const written = new Set<number>();
+      for (const dispatch of program.dispatches) {
+        const wgsl = dispatch.wgsl();
+        for (const { binding, operand } of dispatch.bindings) {
+          if (typeof operand !== "object") continue;
+          const access = new RegExp(
+            `@group\\(0\\)\\s*@binding\\(${binding}\\)\\s*var<storage,\\s*(read_write|read)>`,
+          ).exec(wgsl)?.[1];
+          const first = !written.has(operand.temp);
+          written.add(operand.temp);
+          assertEquals(
+            access,
+            first ? "read_write" : "read",
+            `${testCase.name}: ${dispatch.key} binding ${binding} (temporary ${operand.temp})`,
+          );
+        }
+      }
+    }
+    // Exactly the i8a8 path's cases and the split-K GEMM's hold temporaries.
+    assertEquals(
+      programsWithTemporaries,
+      CASES.filter(({ id }) => id === "i8a8" || id === "gemm-splitk").length,
+    );
+  });
+
+  it("says of each strategy whether its program holds temporaries, as the program it builds does (what the memory estimate builds a program for)", () => {
+    for (const testCase of CASES) {
+      const { choice } = choiceOf(testCase);
+      assertEquals(
+        linearChoiceHoldsTemps(choice),
+        programOf(testCase).temps.length > 0,
+        testCase.name,
+      );
     }
   });
 

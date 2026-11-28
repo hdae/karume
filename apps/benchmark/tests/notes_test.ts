@@ -5,7 +5,13 @@ import { recordRun, type WorkbenchRecord } from "@karume/sweep-app-support/recor
 import { describe, expect, it } from "vite-plus/test";
 
 import { durationText } from "../src/estimate.ts";
-import { afterRunNotes, beforeRunNotes, deviceView } from "../src/notes.ts";
+import {
+  afterRunNotes,
+  beforeRunNotes,
+  deviceView,
+  gemvClassText,
+  gridRecordText,
+} from "../src/notes.ts";
 import { planBenchmark } from "../src/plan.ts";
 import { hiddenLog } from "../src/visibility.ts";
 import {
@@ -15,6 +21,8 @@ import {
   GEMV_A,
   gemvReport,
   geometryReport,
+  GRID_A,
+  gridReport,
 } from "./helpers/fakes.ts";
 
 const GPU = {
@@ -51,12 +59,12 @@ describe("deviceView", () => {
 
 describe("beforeRunNotes", () => {
   it("says what runs, how long, what to avoid, why a second run matters and what the file holds", () => {
-    const plan = planBenchmark({ gemv: true, geometry: true }, {});
+    const plan = planBenchmark({ gemv: true, geometry: true, grid: true }, {});
     const notes = beforeRunNotes(plan, 5940);
     expect(notes).toHaveLength(5);
     expect(notes[0]).toMatch(
       new RegExp(
-        `the GEMV sweep .*${gemvSweepCases().length} cases.* and the tile geometry sweep .*78 cases`,
+        `the GEMV sweep .*${gemvSweepCases().length} cases.*, the tile geometry sweep .*78 cases.* and the GEMM tile ladder .*33 cases`,
       ),
     );
     expect(notes[1]).toContain(`How long: ${durationText(5940)}`);
@@ -66,8 +74,11 @@ describe("beforeRunNotes", () => {
   });
 
   it("asks for a choice when no sweep is chosen", () => {
-    const notes = beforeRunNotes(planBenchmark({ gemv: false, geometry: false }, {}), 0);
-    expect(notes[0]).toBe("Choose at least one of the two measurements below.");
+    const notes = beforeRunNotes(
+      planBenchmark({ gemv: false, geometry: false, grid: false }, {}),
+      0,
+    );
+    expect(notes[0]).toBe("Choose at least one of the three measurements below.");
   });
 });
 
@@ -89,9 +100,15 @@ describe("hiddenLog", () => {
 });
 
 describe("afterRunNotes", () => {
-  const plan = planBenchmark({ gemv: true, geometry: true }, { cases: [GEMV_A, CONV3D_A] });
+  const plan = planBenchmark(
+    { gemv: true, geometry: true, grid: true },
+    { cases: [GEMV_A, CONV3D_A, GRID_A] },
+  );
 
-  /** The run's records as the shared record code makes them, the GEMV case's timing `quantized`. */
+  /**
+   * The run's records as the shared record code makes them, the GEMV and the grid case's timing
+   * `quantized` (one browser rounds both).
+   */
   const records = async (quantized: boolean, sweeps = plan.sweeps): Promise<WorkbenchRecord[]> => {
     const signal = new AbortController().signal;
     const timed = (report: GemvSweepReport): GemvSweepReport => ({
@@ -116,7 +133,13 @@ describe("afterRunNotes", () => {
                     stop: { kind: "completed" },
                   })
                 : geometrySweepResult(sweep.plan, {
-                    reports: sweep.plan.caseIds.map((caseId) => geometryReport(caseId)),
+                    reports: sweep.plan.caseIds.map((caseId) =>
+                      sweep.sweep === "grid"
+                        ? gridReport(caseId, {
+                            gpuTiming: { feature: true, unit: "ns", quantized },
+                          })
+                        : geometryReport(caseId),
+                    ),
                     stop: { kind: "completed" },
                   }),
             ),
@@ -133,19 +156,130 @@ describe("afterRunNotes", () => {
     expect(notes[0]).toMatch(/rounded the GPU timestamps to 100 µs/);
     expect(notes[0]).toContain("chrome://flags/#enable-webgpu-developer-features");
     expect(notes[0]).toMatch(/The tile geometry part is still used\.$/);
+    // The grid set's part is refused by its own derivation for the same rounding
+    expect(notes[0]).toContain("Nor will the GEMM tile ladder part");
   });
 
   it("names no geometry part when no geometry sweep ran", async () => {
     const gemvOnly = plan.sweeps.filter(({ sweep }) => sweep === "gemv");
     const notes = afterRunNotes(await records(true, gemvOnly));
     expect(notes).toHaveLength(1);
-    expect(notes[0]).not.toMatch(/tile geometry/);
+    expect(notes[0]).not.toMatch(/tile geometry|tile ladder/);
   });
 
-  it("says nothing when the GEMV timing was not quantized, or the GEMV sweep measured nothing", async () => {
-    expect(afterRunNotes(await records(false))).toEqual([]);
+  it("says the GEMM tile ladder part will not count when it alone ran with rounded GPU timing, and the flag (fault: a grid record read as the explore set's, still used)", async () => {
+    const gridOnly = plan.sweeps.filter(({ sweep }) => sweep === "grid");
+    const notes = afterRunNotes(await records(true, gridOnly));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^The GEMM tile ladder part of this result will not be accepted/);
+    expect(notes[0]).toContain("chrome://flags/#enable-webgpu-developer-features");
+    expect(notes[0]).not.toMatch(/still used/);
+    expect(afterRunNotes(await records(false, gridOnly))).toEqual([]);
+  });
+
+  it("says beside a grid record whether the generator's --grid-records reads it, and nothing beside another", async () => {
+    const [gemv, explore, grid] = await records(false);
+    const [, , rounded] = await records(true);
+    if (
+      gemv === undefined ||
+      explore === undefined ||
+      grid === undefined ||
+      rounded === undefined
+    ) {
+      throw new Error("three records");
+    }
+    expect(gridRecordText(grid)).toBe("for the generator's --grid-records");
+    expect(gridRecordText(rounded)).toBe(
+      "its GPU timestamps were rounded: the generator's --grid-records refuses it",
+    );
+    expect(gridRecordText(gemv)).toBeUndefined();
+    expect(gridRecordText(explore)).toBeUndefined();
+  });
+
+  /** A record's data that is a GEMV sweep record (the merged one of the run). */
+  const isGemvData = (data: unknown): data is GemvSweepReport =>
+    typeof data === "object" &&
+    data !== null &&
+    "format" in data &&
+    data.format === "karume-gemv-sweep/4";
+
+  it("says nothing when the GEMV timing was not quantized and the run was steady, or the GEMV sweep measured nothing", async () => {
+    const steady = (await records(false)).map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              steadiness: { class: "steady" as const, groups: 40, unsteadyGroups: 1, share: 0.025 },
+            },
+          }
+        : record,
+    );
+    expect(afterRunNotes(steady)).toEqual([]);
     const [gemv] = await records(true);
     if (gemv === undefined) throw new Error("no GEMV record");
     expect(afterRunNotes([{ ...gemv, data: undefined }])).toEqual([]);
+  });
+
+  it("asks for one more run after an unsteady GEMV run, and says when a short one has too few groups to tell (faults: unsteady, two cases)", async () => {
+    const made = await records(false);
+    // The trial's two cases: too few groups for a class
+    const [few] = afterRunNotes(made);
+    expect(few).toContain("too few groups");
+    const unsteady = made.map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              steadiness: {
+                class: "unsteady" as const,
+                groups: 40,
+                unsteadyGroups: 20,
+                share: 0.5,
+              },
+            },
+          }
+        : record,
+    );
+    const [again] = afterRunNotes(unsteady);
+    expect(again).toContain("please run the page once more at another time");
+  });
+
+  /** The run's records with the GEMV record's data steady and timed as `timing`. */
+  const steadyTimed = async (timing: { unit: string; quantized: boolean }) =>
+    (await records(false)).map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              gpuTiming: { ...record.data.gpuTiming, ...timing },
+              steadiness: { class: "steady" as const, groups: 40, unsteadyGroups: 1, share: 0.025 },
+            },
+          }
+        : record,
+    );
+
+  it("says a steady GEMV record is enough only when the derivation reads it so: timed in ns, not rounded (faults: rounded, the wall clock, raw ticks)", async () => {
+    const gemvOf = (made: readonly WorkbenchRecord[]) => {
+      const found = made.find((record) => isGemvData(record.data));
+      if (found === undefined) throw new Error("no GEMV record");
+      return found;
+    };
+    const steady = await steadyTimed({ unit: "ns", quantized: false });
+    expect(gemvClassText(gemvOf(steady))).toBe("steady: one record is enough for a table");
+    const rounded = await steadyTimed({ unit: "ns", quantized: true });
+    expect(gemvClassText(gemvOf(rounded))).toBe(
+      "its GPU timestamps were rounded: no GEMV evidence, whatever its class",
+    );
+    expect(afterRunNotes(rounded)[0]).toMatch(/rounded the GPU timestamps to 100 µs/);
+    const wall = await steadyTimed({ unit: "wall", quantized: false });
+    expect(gemvClassText(gemvOf(wall))).toBe(
+      "timed without GPU timestamps: no GEMV evidence, whatever its class",
+    );
+    expect(afterRunNotes(wall)[0]).toMatch(/^The GEMV part of this result will not be accepted/);
+    const ticks = await steadyTimed({ unit: "deno-raw-tick", quantized: false });
+    expect(gemvClassText(gemvOf(ticks))).toContain("a table needs a second record");
   });
 });

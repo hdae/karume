@@ -1016,7 +1016,17 @@ describe("deriveLinearGemvChoices: the derivation", () => {
       ],
     );
     assertEquals(derivation.provenance.adapter, GEMV_ADAPTER);
-    assertEquals(derivation.rule, { minSpeedup: 1.1, referenceRepeat: 1.1 });
+    // The numbers of both rules: one steady record's, then two records'
+    assertEquals(derivation.rule, {
+      margin: 1.065,
+      steadyMinGroups: 20,
+      steadyMaxShare: 0.2,
+      steadyGroupSpread: 1.05,
+      minPassMs: 20,
+      rounds: 5,
+      minSpeedup: 1.1,
+      referenceRepeat: 1.1,
+    });
     assertEquals(derivation.verdicts[1]?.startsWith("  - [1] a.json ("), true);
     assert(
       derivation.verdicts.includes(

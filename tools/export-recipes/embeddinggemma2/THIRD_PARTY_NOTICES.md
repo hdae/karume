@@ -47,6 +47,14 @@ NOTE: this recipe has a distribution recipe (`distribution.py` / `card.py` →
 The distribution carries the Apache-2.0 text (`LICENSE.md`) and a modification notice
 (`NOTICE.md` — upstream ships no `NOTICE` file), in the form of the Gemma 4 distribution. Moving
 the pin to another commit needs this review again.
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card, each linked to the quoted `README.md` at its commit:
+  they are the upstream's own and cannot be measured from the weights (the maintainer's ruling of
+  2026-11-27). `tests/test_dist_driver.py` checks each against a local copy of that card where one
+  is present. Read on 2026-11-27.
+  - `google/embeddinggemma-2` at `f9972ac22e696a105c482202646979e33e4b5a1e` — the numerical
+    precision to run it in, and the use policy (the card quotes it; `NOTICE.md` keeps one line
+    stating it and refers to the card).
 
 ## Upstream inventory
 

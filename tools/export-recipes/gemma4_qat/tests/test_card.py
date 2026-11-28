@@ -17,9 +17,13 @@ from typing import Any
 
 import pytest
 
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
-from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, render_card
+from gemma4_qat.distribution import NOTICE, render_card
+from karume.migrate import card_format_statement
+from karume.modelcard import MEASUREMENTS_LEAD, RUNTIME_SENTENCE
 
 #: The repository ID spelled in the usage snippet (dist passes it from the pipeline's
 #: declaration).
@@ -80,7 +84,13 @@ def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
                     }
                 },
                 "defaultQuant": "i4",
-                "pipelineConfig": {"chunkLength": 3, "capacity": 5, "maxPosition": 7},
+                # The usage section names the recommended sampler (fake values here too).
+                "pipelineConfig": {
+                    "chunkLength": 3,
+                    "capacity": 5,
+                    "maxPosition": 7,
+                    "sampler": {"temperature": 0.25, "topK": 11, "topP": 0.5},
+                },
             }
         },
     }
@@ -131,6 +141,63 @@ class TestQatCardBody:
         assert FAKE_QUANT_DESCRIPTION in card
 
 
+class TestQatCardSections:
+    """docs/spec/distribution-cards.md#sections-and-their-order — the common sections, in order."""
+
+    def test_the_card_takes_the_common_sections_in_order(self) -> None:
+        card = render_card(_two_model_manifest(), REPO)
+        sections = [line for line in card.split("\n") if line.startswith("## ")]
+
+        assert sections == [
+            "## What is this",
+            "## Base weights and attribution",
+            "## Models",
+            "## Usage",
+            "## Model: e2b",
+            "## Model: e4b",
+        ]
+
+    def test_what_is_this_names_the_runtimes_the_reader_and_the_format(self) -> None:
+        card = render_card(_qat_manifest(), REPO)
+        overview = card.split("## What is this")[1].split("\n## ")[0]
+
+        assert f"\n{RUNTIME_SENTENCE}\n" in overview
+        assert "the reader is a pipeline that implements `gemma4-qat/1`." in " ".join(
+            overview.split()
+        )
+        assert card.count(card_format_statement("karume/6")) == 1
+
+    def test_the_usage_loads_this_repository_through_the_mobile_pipeline(self) -> None:
+        usage = render_card(_two_model_manifest(), REPO).split("## Usage")[1].split("\n## ")[0]
+
+        assert 'import { Pipeline } from "jsr:@karume/models/gemma4-qat-mobile";' in usage
+        assert "await using pipeline = await Pipeline.fromPretrained({" in usage
+        assert f'  repo: "{REPO}",' in usage
+        assert '// model: "e2b", // default — available: e2b / e4b' in usage
+        assert "temperature 0.25, top-k 11, top-p 0.5" in usage
+        assert "speculative" not in usage
+
+    def test_e4b_s_measurement_is_a_note_under_its_own_quant_table(self) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — the note of a preset the
+        model ships, under that model's table alone."""
+        manifest = _two_model_manifest()
+        for model in ("e2b", "e4b"):
+            quants = manifest["models"][model]["quants"]
+            quants["i4-fast"] = copy.deepcopy(quants["i4"])
+        card = render_card(manifest, REPO)
+        e2b, e4b = card.split("## Model: e2b")[1].split("## Model: e4b")
+        (note,) = distribution.QAT_MEASUREMENTS["e4b"]
+
+        assert f"- `i4-fast` — {note.statement} ({note.device}, {note.date})." in e4b
+        assert MEASUREMENTS_LEAD not in e2b
+
+    def test_the_tags_begin_with_the_pipeline_tag(self) -> None:
+        front_matter = render_card(_qat_manifest(), REPO).split("---")[1]
+
+        assert "pipeline_tag: text-generation\n" in front_matter
+        assert "tags:\n  - text-generation\n  - webgpu\n" in front_matter
+
+
 def _two_model_manifest() -> dict[str, Any]:
     """Both models in one manifest (the published form), `e2b` the default."""
     manifest = _qat_manifest("e2b")
@@ -158,7 +225,7 @@ class TestQatCardAttribution:
             tokenizer = pins.tokenizer.repo
             assert f"[{tokenizer}](https://huggingface.co/{tokenizer}) at commit" in bullet
             assert f"at commit `{pins.tokenizer.revision}`" in bullet
-            assert "licensed **Apache 2.0**" in bullet
+            assert "licensed **apache-2.0** (as of retrieval;" in bullet
             assert "a verbatim copy is in `LICENSE.md`" in bullet
 
     def test_it_attributes_only_the_models_it_carries(self) -> None:
@@ -175,7 +242,7 @@ class TestQatCardAttribution:
         front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
 
         assert "license: apache-2.0" in front_matter
-        assert f"license_link: {QAT_LICENSE_LINK}" in front_matter
+        assert f"license_link: {GEMMA_LICENSE_PAGE}" in front_matter
         assert "base_model_relation: quantized" in front_matter
 
     def test_the_front_matter_lists_each_base_model_before_its_mobile_checkpoint(self) -> None:
@@ -231,3 +298,22 @@ class TestQatNotice:
 
     def test_it_is_the_notice_the_pipeline_ships(self) -> None:
         assert distribution.PIPELINE.root_files["NOTICE.md"] == NOTICE
+
+    def test_the_card_and_the_notice_spell_the_publisher_as_upstream_authors(self) -> None:
+        """docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence — the publisher
+        of the `google` account is spelled one way on the card and in the notice."""
+        card = render_card(_qat_manifest(), REPO)
+
+        assert "DeepMind" not in NOTICE and "DeepMind" not in card
+        assert NOTICE.startswith(
+            "# NOTICE\n\nThis repository redistributes modified forms of Google's"
+        )
+        assert "checkpoints are released by Google ([technical report](" in card
+
+
+class TestQatLicense:
+    def test_it_ships_the_apache_text_fenced_byte_for_byte(self) -> None:
+        """docs/spec/distribution-cards.md#licensemd — the primary text inside a fence."""
+        assert distribution.PIPELINE.root_files["LICENSE.md"].encode("utf-8") == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )

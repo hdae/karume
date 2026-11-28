@@ -9,16 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
-from _shared.licenses import apache_license_2_0
-from _shared.upstream import hf_upstreams
+from _shared.licenses import apache_license_2_0, license_markdown
+from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
+from gemma4.card import gemma4_model_sections, gemma4_usage
 from gemma4.distribution import (
     GEMMA4_ASSETS,
+    GEMMA4_NOT_DISTRIBUTED,
+    GEMMA4_NOTICE_CHANGES_LEAD,
     GEMMA4_ROLE,
     assert_gemma4_graph,
     assert_gemma4_ple_assets,
     assert_gemma4_tokenizer,
     gemma4_hidden_size,
     gemma4_max_position,
+    gemma4_notice_opening,
     gemma4_pipeline_config,
     gemma4_ple_index,
     gemma4_rope,
@@ -37,14 +41,20 @@ from karume.dist import (
     ir_graph,
 )
 from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     frontmatter,
+    hf_link,
     introduction,
     models,
-    quants,
+    notice_closing,
+    pinned,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .config import (
@@ -144,11 +154,25 @@ def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -
 #: down → all of them — ADR 0104 addendum 2026-09-26).
 QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4-fast"}
 
-#: The one measured sentence added to the description of `i4-fast` (GPU decode ms/step relative
-#: to `i4`). E2B, as before, puts no measurement in its description. E4B has the preset for the
-#: first time, so a single number backing the default is added (within the 200-character limit
-#: of the display field).
-QAT_FAST_MEASURED_NOTE: Mapping[str, str] = {"e2b": "", "e4b": " E4B decode time -42% (B570)."}
+#: Model → what its presets measured, written under its quant table on the card (the
+#: maintainer's ruling of 2026-11-27: a measurement is a note naming its device and date, never a
+#: preset's description). Source: research 2026-09-26-gemma-flag-bench (Intel Arc B570 under Deno
+#: 2.9.6, `tools/flag-bench`: two fixed prompts, one warm-up and two measured runs each, two ABBA
+#: rounds against `i4`; GPU time per decode step by timestamp queries, wall time per decode token
+#: with them off) — the measurement that made `i4-fast` the default (ADR 0104 addendum
+#: 2026-09-26). E4B's note is the one its description carried ("E4B decode time -42% (B570)");
+#: E2B's description carried none, so it has no note.
+QAT_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "e4b": (
+        Measurement(
+            "i4-fast",
+            "the GPU time of a decode step was 41.7% shorter than with `i4`, and the wall time of a"
+            " decode token 29.5% shorter, over two fixed prompts",
+            "Intel Arc B570, Deno",
+            "2026-09-26",
+        ),
+    ),
+}
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
@@ -187,7 +211,7 @@ def qat_quants(model: str) -> Mapping[str, Any]:
             "session": {"numerics": {"level": "reorder"}, "packedStaticQuantize": True},
             "label": "Fixed mixed QAT with parallel GEMV and packed int8",
             "description": "Same QAT weights; parallel GEMV and attention, packed int8 "
-            "activations. Use i4 for reference sums." + QAT_FAST_MEASURED_NOTE[model],
+            "activations. Use i4 for reference sums.",
         },
     }
 
@@ -309,7 +333,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     quant_modes = qat_quants(model)
     return ModelPlan(
         name=model,
-        pipeline="gemma4-qat/1",
+        pipeline=QAT_PIPELINE,
         artifacts=artifacts,
         # The component name is the same single word as the regular Gemma's (the writer
         # `gemma4_qat/export.py` names the container's graph with the same constant —
@@ -339,18 +363,50 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat-mobile"
 
 
+#: The pipeline contract of the mobile QAT line (ADR 0041 §2 — per model): what the plan declares
+#: and what the card describes and refuses otherwise.
+QAT_PIPELINE = "gemma4-qat/1"
+
+#: The HF pipeline tag: the distribution carries only the text decoder (the regular Gemma 4
+#: card's reason — `gemma4.card.GEMMA4_PIPELINE_TAG`).
+QAT_PIPELINE_TAG = "text-generation"
+
+#: The JSR subpath of `@karume/models` whose `Pipeline` reads this line (the card's usage).
+QAT_MODULE = "gemma4-qat-mobile"
+
 #: The SPDX identifier of every pinned upstream ({@link SOURCES} — the weights' and the tokenizer's
-#: repositories) and how the card spells it. A pin with another licence fails the render: the
-#: card's attribution sentence would no longer be true.
+#: repositories), which the card names its license by. A pin with another license fails the
+#: render: the card's attribution sentence would no longer be true. The `license_link` of the
+#: upstream cards at the pinned commits is the Gemma license page (the mobile repositories checked
+#: 2026-11-01, the regular `-it` ones 2026-11-04 — `_shared.upstream.GEMMA_LICENSE_PAGE`).
 QAT_LICENSE = "apache-2.0"
-QAT_LICENSE_NAME = "Apache 2.0"
-#: The `license_link` of the upstream cards at the pinned commits (an Apache 2.0 page on
-#: ai.google.dev — the mobile repositories checked 2026-11-01, the regular `-it` ones 2026-11-04),
-#: and the canonical text that `LICENSE.md` copies verbatim.
-QAT_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
-QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: The technical report the upstream cards link at the pinned commits.
 QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
+
+
+def _qat_overview(manifest: Mapping[str, Any]) -> list[str]:
+    """The "What is this" section: what is distributed and where it runs, what the conversion keeps
+    and has not shown yet, the reader the container needs and the exporter."""
+    checkpoints = " / ".join(hf_link(checkpoint_repo(name)) for name in manifest["models"])
+    return [
+        "## What is this",
+        "",
+        f"A chat distribution: the **text decoder** of {checkpoints},",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
+        "sequence whose first part carries the graph and model descriptors).",
+        RUNTIME_SENTENCE,
+        "String in, string out.",
+        "",
+        "Experimental text-only conversion of the official mobile QAT checkpoints.",
+        "Fixed integers and scales are preserved; activations use static range quantization (SRQ).",
+        "CPU and GPU reductions can cross rounding boundaries and select different tokens.",
+        "Broad quality and long-context validation remain incomplete. MTP is not supported.",
+        "",
+        "- Not readable by transformers (it's a different container with an embedded graph); the",
+        f"  reader is a pipeline that implements `{QAT_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest",
+        f"  is `karume.json` (`{manifest['format']}`).",
+    ]
 
 
 def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
@@ -368,17 +424,15 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         pins = SOURCES[name].pins
         weights, tokenizer = pins.weights, pins.tokenizer
         lines.append(
-            f"- **`{name}`**: the weights are [{weights.repo}](https://huggingface.co/{weights.repo})"
-            f" at commit `{weights.revision}`; the tokenizer is that of its base model"
-            f" [{tokenizer.repo}](https://huggingface.co/{tokenizer.repo}) at commit"
-            f" `{tokenizer.revision}` (Google's glitch-token fixes of 2026-11-03, which the mobile"
-            " repository has not received); both are licensed"
-            f" **{QAT_LICENSE_NAME}** at those commits ([license]({QAT_LICENSE_LINK}) /"
-            f" [full text]({QAT_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: the weights are {pinned(weights.repo, weights.revision)}; the"
+            f" tokenizer is that of its base model {pinned(tokenizer.repo, tokenizer.revision)}"
+            " (Google's glitch-token fixes of 2026-11-03, which the mobile"
+            f" repository has not received); both are licensed **{QAT_LICENSE}**"
+            f" {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
-        "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by Google DeepMind"
-        f" ([technical report]({QAT_TECHNICAL_REPORT})).",
+        "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by"
+        f" {UPSTREAM_AUTHORS['google']} ([technical report]({QAT_TECHNICAL_REPORT})).",
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; the fixed",
         "  quantized integers, their scales and the static activation ranges were kept without",
@@ -386,26 +440,30 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         "  assets that the host gathers; the exit was narrowed to the selected rows' logits and",
         "  hidden states; rotary cos/sin arrive as host-generated inputs. Vision, audio and MTP",
         "  are not included. No retraining and no fine-tuning.",
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model cards linked",
-        "  above, and this repository does not restate it: read them before using it.",
+        *upstream_cards([hf_link(repo) for repo in _qat_base_models(manifest)]),
     ]
     return lines
 
 
+def _qat_base_models(manifest: Mapping[str, Any]) -> list[str]:
+    """Every redistributed upstream: per model its base model (the regular `-it` repository its
+    tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
+    lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know."""
+    upstream: list[str] = []
+    for model in manifest["models"]:
+        checkpoint = checkpoint_repo(model)
+        upstream += [SOURCES[model].pins.tokenizer.repo, checkpoint]
+    return upstream
+
+
+# SPEC: docs/spec/distribution-cards.md#the-model-card
 def render_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
     """Draw the numbers, the model list and the quantization table from the manifest. Keeping the
     fixed values is never called requantization."""
-    require_pipeline(manifest, "gemma4-qat/1")
-    # Every redistributed upstream: per model its base model (the regular `-it` repository its
-    # tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
-    # lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know.
-    upstream: list[str] = []
-    for model in manifest["models"]:
-        checkpoint = checkpoint_repo(model)
-        upstream += [SOURCES[model].pins.tokenizer.repo, checkpoint]
+    require_pipeline(manifest, QAT_PIPELINE)
+    upstream = _qat_base_models(manifest)
     for model in manifest["models"]:
         if SOURCES[model].license != QAT_LICENSE:
             raise ValueError(
@@ -413,7 +471,7 @@ def render_card(
                 f" {QAT_LICENSE}"
             )
     metadata = CardMetadata(
-        pipeline_tag="text-generation",
+        pipeline_tag=QAT_PIPELINE_TAG,
         base_model=tuple(upstream),
         # Against the listed `-it` base models the stored integers and scales are a quantized form
         # (the checkpoint's own QAT values, kept as they are) — the relation the q4_0 QAT line's
@@ -422,27 +480,25 @@ def render_card(
         license=QAT_LICENSE,
         # The same spelling as the upstream cards (and the regular Gemma 4 card), so a reader
         # reaches the one licence page the upstream names.
-        license_link=QAT_LICENSE_LINK,
-        tags=("webgpu", "gemma", "text-generation"),
+        license_link=GEMMA_LICENSE_PAGE,
+        tags=(QAT_PIPELINE_TAG, "webgpu", "gemma"),
     )
-    sections = [
-        frontmatter(metadata),
-        introduction("Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)),
-        [
-            "Experimental text-only conversion of the official mobile QAT checkpoints.",
-            "Fixed integers and scales are preserved; activations use "
-            "static range quantization (SRQ).",
-            "CPU and GPU reductions can cross rounding boundaries and select different tokens.",
-            "Broad quality and long-context validation remain incomplete. MTP is not supported.",
-            "",
-        ],
-        _qat_attribution(manifest),
-        [""],
-        models(manifest),
-    ]
-    for name, model in manifest["models"].items():
-        sections.extend([[f"## {name}", ""], quants(model, host_assets=host_assets)])
-    return render(sections)
+    return render(
+        (
+            frontmatter(metadata),
+            introduction(
+                "Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)
+            ),
+            _qat_overview(manifest),
+            [""],
+            _qat_attribution(manifest),
+            [""],
+            models(manifest),
+            [""],
+            gemma4_usage(manifest, repo, module=QAT_MODULE),
+            *gemma4_model_sections(manifest, host_assets, QAT_MEASUREMENTS),
+        )
+    )
 
 
 #: The notice (Apache 2.0 §4(b)): the upstream checkpoints and **the changes this repository made**.
@@ -451,24 +507,21 @@ def render_card(
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 NOTICE = (
-    """# NOTICE
-
-This repository redistributes modified forms of the Google Gemma 4 mobile QAT checkpoints and of
-the tokenizers of their base models listed below (Google DeepMind), which are licensed under the
-Apache License, Version 2.0 (see `LICENSE.md`). The models actually included are identified in
-`README.md` and `karume.json`; `README.md` names the upstream commits each one was converted from.
-
-"""
+    gemma4_notice_opening(
+        f"{UPSTREAM_AUTHORS['google']}'s Gemma 4 mobile QAT checkpoints and of the tokenizers of"
+        " their base models, listed below"
+    )
+    + "\n"
     + "\n".join(
         f"- `{checkpoint_repo(model)}` and the tokenizer of its base model"
         f" `{SOURCES[model].pins.tokenizer.repo}`"
         for model in CHECKPOINTS
     )
-    + """
-
-The following changes were made:
-
+    + "\n"
+    + GEMMA4_NOTICE_CHANGES_LEAD
+    + """\
 - The **text decoder only** was converted; the vision and audio towers are not included, the
   checkpoint's key/value-cache scales are not used, and no multi-token-prediction (MTP) drafter is
   included.
@@ -487,9 +540,8 @@ The following changes were made:
   host gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
-
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
+    + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
 )
 
 PIPELINE = Pipeline(
@@ -497,5 +549,5 @@ PIPELINE = Pipeline(
     repo_name=repo_name,
     plan=qat_plan,
     card_profiles={"gemma4-qat-mobile": render_card},
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": NOTICE},
+    root_files={"LICENSE.md": license_markdown(apache_license_2_0()), "NOTICE.md": NOTICE},
 )

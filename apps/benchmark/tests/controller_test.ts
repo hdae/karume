@@ -14,12 +14,14 @@ import {
   GEMV_A,
   GEMV_B,
   gemvReport,
+  GRID_A,
+  GRID_B,
   noWait,
 } from "./helpers/fakes.ts";
 
 const PLAN = planBenchmark(
-  { gemv: true, geometry: true },
-  { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B], idleSeconds: 3 },
+  { gemv: true, geometry: true, grid: true },
+  { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B, GRID_A, GRID_B], idleSeconds: 3 },
 );
 
 const PAGE: PageFacts = { hiddenCount: 0, hiddenSeconds: 0, wakeLock: "held" };
@@ -32,8 +34,9 @@ const harness = (
     /** Aborts the run during the n-th GEMV call (1-based), which then measures nothing. */
     readonly abortAtGemvCall?: number;
     /**
-     * Aborts the run during the n-th geometry call (1-based) after it measured everything — a cancel
-     * while the case re-measures its default, where the sweep takes no signal.
+     * Aborts the run during the n-th geometry call (1-based, the grid set's calls after the explore
+     * set's) after it measured everything — a cancel while the case re-measures its default, where
+     * the sweep takes no signal.
      */
     readonly abortAfterGeometryCall?: number;
     /** The page's download (default: kept in `downloads`). */
@@ -87,10 +90,10 @@ const harness = (
 };
 
 describe("runBenchmark", () => {
-  it("runs both sweeps to the end and downloads one complete bundle once, its records one per sweep", async () => {
+  it("runs the three sweeps to the end and downloads one complete bundle once, its records one per sweep", async () => {
     const run = harness();
     const ending = await run.run();
-    expect(run.calls()).toEqual({ gemv: 2, geometry: 2 });
+    expect(run.calls()).toEqual({ gemv: 2, geometry: 4 });
     expect(run.downloads).toHaveLength(1);
     expect(run.downloads[0]).toEqual({ fileName: ending.fileName, text: ending.text });
     expect(ending.downloaded).toBe(true);
@@ -101,29 +104,43 @@ describe("runBenchmark", () => {
     ).toEqual([
       ["gemv-sweep", "done", "pass"],
       ["geometry-sweep", "done", "pass"],
+      ["geometry-sweep", "done", "pass"],
     ]);
+    // The geometry sweep's two records: the explore set's, then the grid set's
+    expect(ending.bundle.records.map((record) => record.entry.parameters["candidateSet"])).toEqual([
+      "explore",
+      "explore",
+      "grid",
+    ]);
+    expect(ending.bundle.sweeps).toEqual(["gemv-sweep", "geometry-sweep", "geometry-sweep"]);
     expect(ending.fileName).toBe(
       "karume-benchmark_browser-nvidia-geforce-rtx-5070-ti_2026-11-26T12-02-00.json",
     );
   });
 
-  it("idles before every case but the run's first, the second sweep's first case included", async () => {
+  it("idles before every case but the run's first, a later sweep's first case included", async () => {
     const run = harness();
     await run.run();
-    expect(run.waits).toEqual([3000, 3000, 3000]);
+    expect(run.waits).toEqual([3000, 3000, 3000, 3000, 3000]);
     const idles = run.events.flatMap(({ event }) => (event.kind === "idle" ? [event.index] : []));
-    expect(idles).toEqual([1, 2, 3]);
+    expect(idles).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("counts the case events over the whole run, and hands every sweep event on", async () => {
     const run = harness();
     await run.run();
     const cases = run.events.flatMap(({ event }) => (event.kind === "case" ? [event.index] : []));
-    expect(cases).toEqual([0, 1, 2, 3]);
+    expect(cases).toEqual([0, 1, 2, 3, 4, 5]);
     const done = run.events.filter(
       ({ event }) => event.kind === "progress" && event.progress.kind === "case",
     );
-    expect(done).toHaveLength(4);
+    expect(done).toHaveLength(6);
+    // The grid set's events are told from the explore set's
+    expect(
+      run.events.flatMap(({ event }) =>
+        event.kind === "progress" && event.progress.kind === "case" ? [event.sweep] : [],
+      ),
+    ).toEqual(["gemv", "gemv", "geometry", "geometry", "grid", "grid"]);
   });
 
   it("on cancel keeps what was measured, downloads nothing and offers it, marked incomplete; the next sweep does not run", async () => {
@@ -153,16 +170,28 @@ describe("runBenchmark", () => {
   });
 
   it("does not download a run cancelled while its last case re-measured: it is incomplete and offered", async () => {
-    const run = harness({ abortAfterGeometryCall: 2 });
+    const run = harness({ abortAfterGeometryCall: 4 });
     const ending = await run.run();
-    expect(run.calls()).toEqual({ gemv: 2, geometry: 2 });
+    expect(run.calls()).toEqual({ gemv: 2, geometry: 4 });
     expect(run.downloads).toEqual([]);
     expect(ending.downloaded).toBe(false);
     expect(ending.measured).toBe(true);
     expect(ending.bundle.complete).toBe(false);
     expect(ending.bundle.stop).toEqual({ kind: "cancelled" });
-    expect(ending.bundle.records.map((record) => record.outcome)).toEqual(["done", "cancelled"]);
+    expect(ending.bundle.records.map((record) => record.outcome)).toEqual([
+      "done",
+      "done",
+      "cancelled",
+    ]);
     expect(ending.fileName).toMatch(/_incomplete\.json$/);
+  });
+
+  it("runs no later sweep once a cancel landed in an earlier one's last case", async () => {
+    const run = harness({ abortAfterGeometryCall: 2 });
+    const ending = await run.run();
+    expect(run.calls()).toEqual({ gemv: 2, geometry: 2 });
+    expect(ending.bundle.records.map((record) => record.outcome)).toEqual(["done", "cancelled"]);
+    expect(ending.bundle.stop).toEqual({ kind: "cancelled" });
   });
 
   it("keeps a complete run's bundle to offer when its download throws, and says why", async () => {

@@ -186,8 +186,27 @@ OUTPUT_CHECKS: Mapping[str, Callable[[Path, Sequence[str]], None]] = {
 #: texts depend on the models built: `Pipeline.root_files` is one fixed set and the core does not
 #: pass it the models, so {@link main} replaces it with this result once the models are resolved
 #: (a build of E2B alone must not carry a NOTICE that names the E4B drafter).
+#: SPEC: docs/spec/distribution-cards.md#files-at-the-repository-root
 ROOT_FILES: Mapping[str, Callable[[Sequence[str]], Mapping[str, str]]] = {
     "gemma4": gemma4_distribution.gemma4_root_files,
+    # One Pipeline builds the three repositories of the Irodori MIT line: each notice names its
+    # own checkpoint and where its components are stored.
+    "irodori": irodori_distribution.irodori_root_files,
+    # The notice names the checkpoint of each model built.
+    "siglip2": siglip2_distribution.siglip2_root_files,
+    # The notices name the upstreams of the models built.
+    "anima": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.OFFICIAL_MODIFICATIONS,
+    ),
+    "anima-extra": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.EXTRA_MODIFICATIONS,
+    ),
+    "anima-2.9b": partial(
+        anima_distribution.anima_root_files,
+        modifications=anima_distribution.ANIMA_2_9B_MODIFICATIONS,
+    ),
 }
 
 #: Keeps the UX of the old `karume dist` (no arguments) on the driver side.

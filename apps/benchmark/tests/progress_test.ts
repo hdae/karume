@@ -1,3 +1,5 @@
+import { gemvSteadiness } from "@karume/runtime/tune";
+import { mergeGemvSweepReports } from "@karume/sweep-app-support/gemv-sweep/record";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { BenchmarkEvent, StampedEvent } from "../src/controller.ts";
@@ -8,6 +10,7 @@ import {
   INITIAL_PROGRESS,
   type ProgressState,
   progressView,
+  steadinessLine,
 } from "../src/progress.ts";
 import {
   ADAPTER,
@@ -20,10 +23,13 @@ import {
   gemvSummary,
   geometryReport,
   geometryRow,
+  GRID_A,
+  GRID_B,
+  gridReport,
 } from "./helpers/fakes.ts";
 
 const PLAN = planBenchmark(
-  { gemv: true, geometry: true },
+  { gemv: true, geometry: true, grid: false },
   { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B], idleSeconds: 10 },
 );
 
@@ -242,11 +248,53 @@ describe("the progress view", () => {
       ],
       [5000, { kind: "record", sweep: "geometry", report: geometryReport(CONV3D_A) }],
     ]);
-    expect(state.patterns).toEqual({ gemv: { found: 2, of: 2 }, geometry: { found: 1, of: 1 } });
+    expect(state.patterns).toEqual({
+      gemv: { atMargin: 2, atLowest: 2, of: 2 },
+      geometry: { found: 1, of: 1 },
+    });
+    // The GEMV count at both margins, then the run's class (two groups: none yet)
     expect(progressView(PLAN, state, 5000).patterns).toEqual([
-      "GEMV: 2 of 2 shapes measured so far have a kernel at least ×1.10 faster than today's choice",
+      "GEMV: 2 of 2 shapes measured so far have a kernel that beats today's choice by ×1.065 times its timing noise (2 by ×1.030)",
+      "Too few GEMV groups so far to tell whether the timings hold steady (2 of the 20 needed)",
       "Tile geometry: 1 of 1 classes measured so far have a geometry at least ×1.05 faster than the default in every case",
     ]);
+  });
+
+  it("says a steady run is enough for a table only when the derivation would read it so: GPU timestamps in ns, not rounded (faults: rounded, the wall clock, raw ticks)", () => {
+    const steady = { class: "steady", groups: 40, unsteadyGroups: 1, share: 0.025 } as const;
+    expect(steadinessLine(steady, { unit: "ns", quantized: false })).toContain(
+      "this run alone is enough for a table",
+    );
+    for (const timing of [
+      { unit: "ns", quantized: true },
+      { unit: "wall", quantized: false },
+    ]) {
+      const line = steadinessLine(steady, timing);
+      expect(line).not.toContain("enough");
+      expect(line).toContain("no evidence for a table");
+    }
+    const ticks = steadinessLine(steady, { unit: "deno-raw-tick", quantized: false });
+    expect(ticks).not.toContain("enough");
+    expect(ticks).toContain("a table needs a second such run");
+  });
+
+  it("keeps the finished GEMV cases' timing as the merged record states it: rounded when any case was", () => {
+    const rounded = fold([
+      ...gemvCase(0, GEMV_A, 0, 1000),
+      [2000, { kind: "case", index: 1 }],
+      [
+        3000,
+        {
+          kind: "record",
+          sweep: "gemv",
+          report: {
+            ...gemvReport(GEMV_B),
+            gpuTiming: { ...gemvReport(GEMV_B).gpuTiming, quantized: true },
+          },
+        },
+      ],
+    ]);
+    expect(rounded.gemvTiming).toEqual({ unit: "ns", quantized: true });
   });
 
   it("does not count the rows of a case that did not finish", () => {
@@ -261,16 +309,31 @@ describe("the progress view", () => {
         },
       ],
     ]);
-    expect(state.patterns.gemv).toEqual({ found: 0, of: 0 });
+    expect(state.patterns.gemv).toEqual({ atMargin: 0, atLowest: 0, of: 0 });
   });
 
-  it("does not count a case its sweep stopped midway as finished, nor its patterns", () => {
+  it("does not count a case its sweep stopped midway as finished, nor its patterns — but its finished groups count in the run's class, as the merged record counts them (fault: the class line over finished cases alone)", () => {
     const state = fold([...gemvCase(0, GEMV_A, 0, 1000, true)]);
     const view = progressView(PLAN, state, 1000);
     expect(view.overall.done).toBe(0);
     expect(state.finished.size).toBe(0);
-    expect(state.patterns.gemv).toEqual({ found: 0, of: 0 });
+    expect(state.patterns.gemv).toEqual({ atMargin: 0, atLowest: 0, of: 0 });
     expect(view.current).toBeUndefined();
+    // The class the page states is the class the merged record states
+    const finished = gemvReport(GEMV_B);
+    const stopped = gemvReport(GEMV_A, { aborted: true });
+    const merged = mergeGemvSweepReports([finished, stopped], {
+      plannedCaseIds: [GEMV_B, GEMV_A],
+      cancelledBetweenCases: false,
+    });
+    const both = fold([
+      [0, { kind: "case", index: 0 }],
+      [1000, { kind: "record", sweep: "gemv", report: finished }],
+      [2000, { kind: "case", index: 1 }],
+      [3000, { kind: "record", sweep: "gemv", report: stopped }],
+    ]);
+    expect(gemvSteadiness(both.gemvSummaries)).toEqual(merged.steadiness);
+    expect(both.gemvSummaries).toEqual(merged.summaries);
   });
 
   it("warns of a device loss", () => {
@@ -288,5 +351,95 @@ describe("the progress view", () => {
     expect(progressView(PLAN, state, 0).warning).toBe(
       "The GPU device was lost (unknown): gone. The run stops after this case.",
     );
+  });
+});
+
+describe("the progress view of the grid set", () => {
+  /** A run of one tile geometry case, then the grid set's two cases. */
+  const GRID_PLAN = planBenchmark(
+    { gemv: true, geometry: true, grid: true },
+    { cases: [CONV3D_A, GRID_A, GRID_B] },
+  );
+
+  /** Grid case `index` of the run (`caseId`) started at `at` and finished at `end`. */
+  const gridCase = (
+    index: number,
+    caseId: string,
+    at: number,
+    end: number,
+  ): (readonly [number, BenchmarkEvent])[] => [
+    [at, { kind: "case", index }],
+    [
+      at,
+      {
+        kind: "progress",
+        sweep: "grid",
+        progress: { kind: "plan", caseId, index: 0, geometries: 5, skipped: 0 },
+      },
+    ],
+    [
+      end,
+      {
+        kind: "progress",
+        sweep: "grid",
+        progress: { kind: "case", summary: { caseId, elapsedMs: end - at, screened: 0 } },
+      },
+    ],
+    [end, { kind: "record", sweep: "grid", report: gridReport(caseId) }],
+  ];
+
+  it("names a grid case's sweep and kind, and its timing as rounds of every tile", () => {
+    const state = fold([
+      [0, { kind: "case", index: 1 }],
+      [
+        0,
+        {
+          kind: "progress",
+          sweep: "grid",
+          progress: { kind: "plan", caseId: GRID_A, index: 0, geometries: 5, skipped: 0 },
+        },
+      ],
+      [
+        0,
+        {
+          kind: "progress",
+          sweep: "grid",
+          progress: { kind: "step", caseId: GRID_A, phase: "timing", done: 3, total: 5 },
+        },
+      ],
+    ]);
+    const view = progressView(GRID_PLAN, state, 0);
+    expect(view.current?.title).toBe(
+      `Case 2 of 3 · GEMM tile ladder · ${GRID_A} (every tile of the ladder)`,
+    );
+    expect(view.current?.text).toBe(
+      "5 geometries · Timing rounds of every tile, interleaved: 3 of 5",
+    );
+  });
+
+  it("counts a finished grid case in the whole run but not among the tile geometry's classes, and gives the grid set no count of its own (fault: the grid record read as a geometry class)", () => {
+    const state = fold(gridCase(1, GRID_A, 0, 12_000));
+    expect(state.finished).toEqual(new Map([[1, 12]]));
+    expect(state.gridCases).toBe(1);
+    expect(state.patterns.geometry).toEqual({ found: 0, of: 0 });
+    expect(state.geometryRecords).toEqual([]);
+    const view = progressView(GRID_PLAN, state, 12_000);
+    expect(view.overall.text).toBe(
+      "1 of 3 cases done (tile geometry 0 of 1 · GEMM tile ladder 1 of 2)",
+    );
+    expect(view.patterns.at(-1)).toBe(
+      "GEMM tile ladder: 1 of 2 cases measured so far — which tile suits which grid size is decided from all of them together, after the run",
+    );
+    // What is left is the second grid case, at the first one's measured 12 s
+    expect(view.remaining).toBe(`${durationText(12).replace(/^u/, "U")} left`);
+  });
+
+  it("does not count a grid case a cancel cut short", () => {
+    const state = fold([
+      [0, { kind: "case", index: 2 }],
+      [500, { kind: "record", sweep: "grid", report: { ...gridReport(GRID_B), aborted: true } }],
+    ]);
+    expect(state.finished.size).toBe(0);
+    expect(state.gridCases).toBe(0);
   });
 });

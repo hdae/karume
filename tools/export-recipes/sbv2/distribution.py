@@ -49,8 +49,9 @@ from typing import Any, NamedTuple
 import numpy as np
 from safetensors import safe_open
 
-from _shared.licenses import cc_by_sa_4_0
+from _shared.licenses import cc_by_sa_4_0, license_markdown
 from _shared.paths import INPUTS_ROOT, MISC_ROOT
+from _shared.upstream import hf_upstreams
 from karume.dist import (
     Artifact,
     DistError,
@@ -64,9 +65,11 @@ from karume.dist import (
     ir_graph,
     table_payload,
 )
+from karume.modelcard import notice_closing
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_JVNV_CORPUS_PAGE,
+    SBV2_JVNV_CORPUS_PAPER,
     SBV2_JVNV_CORPUS_PAPER_URL,
     SBV2_JVNV_LICENSE_URL,
     SBV2_JVNV_PROFILE,
@@ -307,7 +310,8 @@ SBV2_QUANT_ABBREVIATIONS: Mapping[str, str] = {"bert": "text_encoder"}
 #:
 #: `label` / `description` are display fields for selection UIs (ADR 0075 decision 1 — English,
 #: limits of 64 / 200 characters). Being the default is not written there (`defaultQuant` already
-#: points at it — ADR 0075 decision 3).
+#: points at it — ADR 0075 decision 3), and neither is what a preset measured: that is a note of
+#: the card naming its device and date (`SBV2_MEASUREMENTS` in `card.py`).
 #:
 #: NOTE: on the net_g side, i4 became **the main source of the size gain** with the conv1d addendum
 #: (wave J-5b, ADR 0069 addendum 7) — the eligible conv1d weights (≈56MiB) are halved (in the
@@ -320,7 +324,7 @@ SBV2_QUANTS: Mapping[str, Any] = {
         "session": {},
         "label": "Highest fidelity (f16 synthesis)",
         "description": "front and voice in f16 storage, with the int8 text encoder — the largest"
-        " download, and the closest match to the source checkpoint's audio.",
+        " download.",
     },
     "i8": {
         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
@@ -334,21 +338,21 @@ SBV2_QUANTS: Mapping[str, Any] = {
         "session": {"linearCompute": "a8"},
         "label": "int8 with int8 linear activations",
         "description": "The int8 weights with per-token int8 activations in the linear layers —"
-        " faster on GPUs with dp4a, same download as the plain int8 seat.",
+        " the same download as the plain int8 preset.",
     },
     "i8+bert4": {
         "weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"},
         "session": {},
         "label": "Balanced (int8 + int4 text encoder)",
         "description": "int8 synthesis with the text encoder in GPTQ-calibrated int4 (group-32):"
-        " a markedly smaller download that stays audibly level with f32.",
+        " a markedly smaller download.",
     },
     "i4": {
         "weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"},
         "session": {},
         "label": "Smallest (int4)",
-        "description": "Text encoder, front and voice all in int4 group-32 — the smallest download"
-        " and the fastest warm start, with slightly lower tension than f32.",
+        "description": "Text encoder, front and voice all in int4 group-32 — the smallest"
+        " download.",
     },
 }
 
@@ -1071,9 +1075,10 @@ _JVNV_VOICES_REPO = SBV2_JVNV_PROFILE.metadata.base_model[0]
 
 
 def _owner(repo: str) -> str:
-    """The namespace of an HF repository (the only spelling under which upstream names itself as the
-    author)."""
-    return repo.split("/")[0]
+    """The publisher of an HF repository, as every card and notice spells it
+    (`_shared.upstream.UPSTREAM_AUTHORS` — the namespace itself for these two, the only spelling
+    under which upstream names itself as the author)."""
+    return hf_upstreams([repo])[0].author
 
 
 #: The JVNV notice of modifications and attribution (CC BY-SA 4.0 §3(a)(1) and §3(b)). The legal
@@ -1096,20 +1101,21 @@ def _owner(repo: str) -> str:
 #: NOTE: neither upstream repository ships a copyright notice (only HF metadata and a README), so
 #: there is no "copyright notice to retain" under §3(a)(1)(A)(ii). The authors are shown by the
 #: namespaces upstream uses.
+#: SPEC: docs/spec/distribution-cards.md#noticemd
 SBV2_JVNV_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes modified forms of two works licensed under the Creative Commons
-Attribution-ShareAlike 4.0 International license (CC BY-SA 4.0 — the full text is in `LICENSE.md`
-and at <{SBV2_JVNV_LICENSE_URL}>):
+Attribution-ShareAlike 4.0 International license (the full text is in `LICENSE.md` and at
+[{SBV2_JVNV_LICENSE_URL.removeprefix("https://").rstrip("/")}]({SBV2_JVNV_LICENSE_URL})):
 
 - **Voices**: Style-Bert-VITS2 JP-Extra models of JVNV-corpus speakers from
-  <https://huggingface.co/{_JVNV_VOICES_REPO}>
-  (published by `{_owner(_JVNV_VOICES_REPO)}`) — the model card
+  `{_JVNV_VOICES_REPO}` (published by {_owner(_JVNV_VOICES_REPO)}) — the model card
   (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
-  (<{SBV2_JVNV_CORPUS_PAPER_URL}>; corpus page: <{SBV2_JVNV_CORPUS_PAGE}>).
-  The source repository states that the corpus's CC BY-SA 4.0 license carries over to the models.
-- **Text encoder**: <https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}>
-  (published by `{_owner(SBV2_TEXT_ENCODER_MODEL)}`).
+  ([{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}); the
+  [corpus page]({SBV2_JVNV_CORPUS_PAGE})).
+  The voices are licensed under that license because the source repository's model card states
+  that the corpus's license carries over to them (`README.md` quotes it).
+- **Text encoder**: `{SBV2_TEXT_ENCODER_MODEL}` (published by {_owner(SBV2_TEXT_ENCODER_MODEL)}).
 
 The following changes were made:
 
@@ -1124,9 +1130,9 @@ The following changes were made:
   encoder as `i8` / mixed, where the mixed form stores the group-quantizable weights as `i4` and
   everything else as `i8`.
 
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
-The modified forms in this repository are licensed under CC BY-SA 4.0 as well, with no further
-restrictions.
+{notice_closing("The original checkpoints are")}
+The modified forms in this repository are licensed under the Creative Commons
+Attribution-ShareAlike 4.0 International license as well, with no further restrictions.
 """
 
 
@@ -1140,7 +1146,7 @@ def sbv2_jvnv_root_files() -> dict[str, str]:
     no longer a copy). The attribution and the notice of modifications are in `NOTICE.md`.
     """
     return {
-        "LICENSE.md": cc_by_sa_4_0(),
+        "LICENSE.md": license_markdown(cc_by_sa_4_0()),
         "NOTICE.md": SBV2_JVNV_NOTICE_MARKDOWN,
     }
 

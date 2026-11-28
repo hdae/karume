@@ -119,9 +119,10 @@ export const losableGpuContext = (
  * the WebGPU default workgroup count per dimension (65535, which a recipe's dispatch counts are
  * checked against), so a run stops at the transient plan (`invalid transient plan limit`), after
  * every step was planned and every recipe built — enough to observe a refusal raised while either
- * happens, without a GPU. The device parts go through a cast, as in {@link fakeDevice}.
+ * happens, without a GPU. The device parts go through a cast, as in {@link fakeDevice}. `limits`
+ * replaces some of those zeros (the buffer limits a graph with weights needs to be built).
  */
-export const fakeRecipeGpuContext = (): GpuContext => {
+export const fakeRecipeGpuContext = (limits: Partial<RequiredLimits> = {}): GpuContext => {
   const device = fakeDevice({
     createBuffer: (descriptor) =>
       ({
@@ -141,7 +142,7 @@ export const fakeRecipeGpuContext = (): GpuContext => {
       createComputePipelineAsync: () => Promise.resolve({ getBindGroupLayout: () => ({}) }),
     }),
     readAdapterInfo({}),
-    { ...ZERO_LIMITS, maxComputeWorkgroupsPerDimension: 65535 },
+    { ...ZERO_LIMITS, maxComputeWorkgroupsPerDimension: 65535, ...limits },
     new Set(),
   );
 };

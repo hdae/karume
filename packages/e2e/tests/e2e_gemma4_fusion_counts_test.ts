@@ -133,16 +133,20 @@ test.skipIf(!available)(
 
 /**
  * Per (model, component, storage): RoPE and RMS→add of the graph (the same at every M). The
- * distribution's two presets map the same containers, and these fusions apply in both.
+ * distribution's two presets map the same containers, and these fusions apply in both. The two
+ * drafter graphs have the same nodes (12 attentions; their RMS→add pairs at the width 256 of the
+ * drafter's blocks) and differ only in the width of the hidden state they read (1,536 / 2,560), so
+ * E4B's drafter counts as E2B's does.
  */
 const PRESET_FUSIONS = [
   ["e2b", "model", "bf16", { rope: 50, rmsNormAdd: 106 }],
   ["e2b", "drafter", "i8", { rope: 12, rmsNormAdd: 24 }],
   ["e4b", "model", "bf16", { rope: 66, rmsNormAdd: 127 }],
+  ["e4b", "drafter", "i8", { rope: 12, rmsNormAdd: 24 }],
 ] as const;
 
 test.skipIf(!available)(
-  `the real ${family} distribution plans the same fusions at bf16 and bf16-fast (E2B, its drafter, E4B)`,
+  `the real ${family} distribution plans the same fusions at bf16 and bf16-fast (E2B and E4B with their drafters)`,
   async () => {
     const text = await readTextFile(manifestUrl);
     const manifest: ContainerManifest = JSON.parse(text);

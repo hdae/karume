@@ -1,6 +1,8 @@
 """Model card (`README.md`) of the BiRefNet family distributions — a pure function derived
 mechanically from the manifest.
 
+SPEC: docs/spec/distribution-cards.md#the-model-card
+
 The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
 `karume.modelcard`. What lives here is **only the facts specific to the BiRefNet family**: the
 attribution (origin, license, citation, training data) and what this pipeline's card says.
@@ -27,17 +29,24 @@ from typing import Any
 
 from _shared.upstream import hf_upstreams
 from karume.modelcard import (
+    RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
@@ -154,7 +163,7 @@ class BirefnetCheckpoint:
     revision: str
     #: The card's heading (a model upstream markets under a name is called by that name).
     title: str
-    #: First line of the overview (what the weights can do).
+    #: First line of the overview (what the weights are).
     tagline: str
     #: Extra lines of the attribution section (training-data licenses and the like — facts that
     #: differ per upstream).
@@ -170,10 +179,78 @@ class BirefnetCheckpoint:
     stored_dtype: str
     #: The measured execution resources the card states ({@link BirefnetResourceMeasurement}).
     resources: BirefnetResourceMeasurement
+    #: What the upstream card says the weights are, quoted after the first line of the overview
+    #: (`None` for a checkpoint whose card the overview does not quote).
+    description: UpstreamQuote | None = None
 
 
 #: Checked against the source (2026-08-13 — HF model API): both are `license: mit`.
 BIREFNET_LICENSE = "mit"
+
+#: What the two upstream cards state of their training data, their intended use and what the
+#: weights are, quoted verbatim (the maintainer's ruling of 2026-11-27: an upstream's statement the
+#: recipe cannot measure is quoted, not reworded) — the cards at the pinned commits, read
+#: 2026-11-27. BiRefNet_HR's card states the training resolution before its first heading and the
+#: training set under its inference-endpoint section.
+BIREFNET_HR_TRAINING_QUOTES: tuple[UpstreamQuote, ...] = (
+    UpstreamQuote(
+        repo="ZhengPeng7/BiRefNet_HR",
+        revision="a7a562f6fd16021180f2f4348f4de003a2d3d1e1",
+        sections=(),
+        paragraphs=(
+            "This BiRefNet was trained with images in `2048x2048` for higher resolution inference.",
+        ),
+    ),
+    UpstreamQuote(
+        repo="ZhengPeng7/BiRefNet_HR",
+        revision="a7a562f6fd16021180f2f4348f4de003a2d3d1e1",
+        sections=("2. Use inference endpoint locally:",),
+        paragraphs=(
+            "This BiRefNet for standard dichotomous image segmentation (DIS) is trained on"
+            " **DIS-TR** and validated on **DIS-TEs and DIS-VD**.",
+        ),
+    ),
+)
+LUCIDA_QUOTES: tuple[UpstreamQuote, ...] = (
+    UpstreamQuote(
+        repo="egeorcun/lucida",
+        revision="6cbedc9722652dc9a3df91dd871f0c4f3334e922",
+        sections=("Lucida — general-purpose background removal with soft-alpha mastery",),
+        paragraphs=(
+            "Lucida is a BiRefNet-based background-removal / image-matting model fine-tuned to"
+            " excel where most open models fail: **camouflaged objects, transparent materials"
+            " (glass), text & logos, VFX glows, and illustrations** — while staying competitive"
+            " everywhere else.",
+        ),
+    ),
+    UpstreamQuote(
+        repo="egeorcun/lucida",
+        revision="6cbedc9722652dc9a3df91dd871f0c4f3334e922",
+        sections=("Base model & attribution",),
+        paragraphs=(
+            "Illustration data includes [ToonOut](https://huggingface.co/datasets/joelseytre/toonout)"
+            " (CC-BY 4.0).",
+            "Some training datasets (e.g. P3M-10k, COD10K, DIS5K) are distributed for research"
+            " purposes; see the GitHub README for the full dataset/license table and evaluate"
+            " suitability for your use case.",
+        ),
+    ),
+    UpstreamQuote(
+        repo="egeorcun/lucida",
+        revision="6cbedc9722652dc9a3df91dd871f0c4f3334e922",
+        sections=("lucida-m35 + the design pipeline (ComfyUI)",),
+        paragraphs=(
+            "m35 is tuned for **print/POD design artwork** (posters, tee graphics, stickers) and is"
+            " meant to run inside a pipeline, not bare: poster policy (training-free decision"
+            " layer) + SAM3 semantic referee (protective subject evidence) + finish package (color"
+            " decontamination, edge defringe).",
+        ),
+    ),
+)
+
+#: Every quotation of an upstream card the two cards write (checked against the cached cards by
+#: `tests/test_dist_driver.py`).
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (*BIREFNET_HR_TRAINING_QUOTES, *LUCIDA_QUOTES)
 
 BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
     "hr": BirefnetCheckpoint(
@@ -182,10 +259,18 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         title="BiRefNet HR — Karume",
         tagline="the high-resolution general-purpose BiRefNet checkpoint",
         attribution=(
-            "- **Upstream training data**: see the upstream model card and the BiRefNet"
-            " repository. Several of the datasets it draws on (DIS5K, COD10K, HRSOD and"
-            " others) are distributed for research purposes — check them against your own use"
-            " case.",
+            *quotation(
+                BIREFNET_HR_TRAINING_QUOTES[0],
+                "- **Upstream training data**: the upstream model card",
+                indent="  ",
+            ),
+            # A blank line first: a line right after a blockquote would continue the quote.
+            "",
+            *quotation(BIREFNET_HR_TRAINING_QUOTES[1], "  The same card", indent="  "),
+            "",
+            "  Several of the datasets the BiRefNet repository draws on (DIS5K, COD10K, HRSOD and",
+            "  others) are distributed for research purposes — check them against your own use",
+            "  case.",
         ),
         stored_dtype="f16",
         # The total = the runtime estimate's `peakAccountedBytes` (weights + intermediate region +
@@ -228,22 +313,25 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         repo="egeorcun/lucida",
         revision="6cbedc9722652dc9a3df91dd871f0c4f3334e922",
         title="Lucida (BiRefNet) — Karume",
-        tagline=(
-            "a BiRefNet fine-tune aimed at camouflage, transparency, text/logos and illustration"
-        ),
+        tagline="a BiRefNet fine-tune",
+        description=LUCIDA_QUOTES[0],
         attribution=(
             "- **Fine-tune of**:"
             " [ZhengPeng7/BiRefNet_HR](https://huggingface.co/ZhengPeng7/BiRefNet_HR)"
-            " (**mit**) — architecture and initial weights; the upstream copyright notice is"
+            " (licensed **mit**) — architecture and initial weights; the upstream copyright"
+            " notice is"
             " preserved.",
-            "- **Illustration training data** includes"
-            " [ToonOut](https://huggingface.co/datasets/joelseytre/toonout) (**CC-BY-4.0**);"
-            " other sets it draws on (P3M-10k, COD10K, DIS5K) are distributed for research"
-            " purposes — check them against your own use case.",
-            "- **Not included**: `lucida-m35-comfy.safetensors`. That experimental variant has"
-            " the `Normalize` step folded into its first convolution (it expects raw `[0, 1]`"
-            " pixels), so the preprocessing this pipeline applies would be counted twice, and"
-            " upstream ships it to run inside a larger ComfyUI pipeline rather than bare.",
+            *quotation(
+                LUCIDA_QUOTES[1], "- **Training data**: the upstream model card", indent="  "
+            ),
+            *quotation(
+                LUCIDA_QUOTES[2],
+                "- **Not included**: `lucida-m35-comfy.safetensors`. That experimental variant has"
+                " the `Normalize` step folded into its first convolution (it expects raw `[0, 1]`"
+                " pixels), so the preprocessing this pipeline applies would be counted twice; the"
+                " upstream model card",
+                indent="  ",
+            ),
         ),
         stored_dtype="f32",
         # The total = the runtime estimate's `peakAccountedBytes` (weights + intermediate region +
@@ -394,12 +482,12 @@ def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
     )
     # With one preset (HR), write it in the singular — "every quant seat" confuses the reader in a
     # repository with no preset to compare against.
-    seats = "every quant seat stores" if len(dtypes) > 1 else "the quant seat stores"
+    seats = "every quant preset stores" if len(dtypes) > 1 else "the quant preset stores"
     heading = (
         f"**No quantization**: {seats} the source checkpoint's own values"
         f" (the checkpoint itself is stored in {stored}):"
         if lossless
-        else f"**Quantization**: the source checkpoint is stored in {stored}; per quant seat:"
+        else f"**Quantization**: the source checkpoint is stored in {stored}; per quant preset:"
     )
     return [_wrapped(heading, "- "), *(_seat_storage_line(dtype, stored) for dtype in dtypes)]
 
@@ -489,10 +577,12 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
         "",
         "A background-removal distribution, converted into the WebGPU inference runtime",
         "**Karume**'s container format (a `.krm` part sequence whose first part carries the graph",
-        "and model descriptors). Runs as-is in the browser and in Deno.",
+        "and model descriptors).",
+        RUNTIME_SENTENCE,
         "",
         f"The weights are {entry.tagline}.",
-        "",
+        *([] if entry.description is None else ["", *quotation(entry.description, "Its card"), ""]),
+        *([] if entry.description is not None else [""]),
         "- One graph, one call: pixels in, an **8-bit alpha matte** out, at the same size as the",
         "  image you handed over.",
         "- **One model per input resolution.** The resolution is baked into the graph (window",
@@ -508,7 +598,7 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
         "  PNG / JPEG is *not* part of this — use `createImageBitmap` in the browser, or any",
         "  decoder in Deno.",
         "- **Compositing is yours.** The pipeline returns the matte, not a cut-out: whether alpha",
-        "  goes into an RGBA buffer, gets composited over a flat colour, or is fed to a colour",
+        "  goes into an RGBA buffer, gets composited over a flat color, or is fed to a color",
         "  decontamination pass is a decision this repository should not make for you.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{BIREFNET_SUPPORTED_PIPELINE}`.",
@@ -528,13 +618,13 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
     return [
         "## Base weights and attribution",
         "",
-        f"- **Weights**: [{entry.repo}](https://huggingface.co/{entry.repo}), licensed"
+        f"- **Weights**: {pinned(entry.repo, entry.revision)}, licensed"
         f" **{BIREFNET_LICENSE}** (as of retrieval) — a verbatim copy of the license, carrying"
         " the copyright notices that apply to this repository, is in `LICENSE.md`.",
         *entry.attribution,
         f"- **Architecture**: BiRefNet ([{BIREFNET_PAPER}](https://{BIREFNET_PAPER})).",
-        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
-        "  container format. No retraining and no fine-tuning; the stored values per quant seat",
+        f"{changes_made_here()} conversion into the Karume",
+        "  container format. No retraining and no fine-tuning; the stored values per quant preset",
         "  are listed below. The graph is the upstream",
         "  `forward` with layout-only rewrites (windowing, the shifted-window roll, spatial",
         "  padding and the patch merges were folded into equivalent operations — bit-exact),",
@@ -544,6 +634,7 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
         "  with the bilinear upsample it used to follow (both are linear, so they commute — this",
         "  removes two full-resolution intermediates).",
         *birefnet_storage_lines(checkpoint, _seat_dtypes(default_model(manifest))),
+        *upstream_cards([hf_link(entry.repo)]),
     ]
 
 

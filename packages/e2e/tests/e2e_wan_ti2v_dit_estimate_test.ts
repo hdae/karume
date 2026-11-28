@@ -8,7 +8,7 @@
  * allocates them (the same fusion plan's step list and the same device-free bookkeeping,
  * fused-step-layout.ts), and so the linear prologue and the attention's absorbed permutes, the
  * online attention's quantization temporaries, and the a8 linears' quantized activations and scales
- * (`linearI8a8TempBytes`). A plain node it approximates as one dispatch reading its inputs and
+ * (the temporaries of the dispatch program execution builds, `linearProgramFor`). A plain node it approximates as one dispatch reading its inputs and
  * writing its outputs, which its kernels may not bind that way, so the equality is a measurement
  * on this graph, not a property of the construction. The estimate gets the Session's options and
  * the device's limits and facts, as a pipeline passes them.

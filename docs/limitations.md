@@ -262,15 +262,18 @@ The attention follows upstream's masks with the block on sliding layers only, no
 
 ## Gemma 4 26B A4B: every expert resident, a 16 GB GPU with about 0.8 GB to spare
 
-26B A4B ships text only, without a drafter (so `speculative` is refused) and without its vision tower (ADR
-[0145](decisions/0145-gemma4-26b-moe-resident.md) decision 1). All 128 experts of every layer stay in VRAM: the text weights are
+26B A4B ships text only, with its QAT MTP drafter and without its vision tower (ADR
+[0145](decisions/0145-gemma4-26b-moe-resident.md) decision 1; the published repository carries the drafter from its next
+upload). `speculative` needs every expert resident: the pipeline refuses it with `expertCache`. The drafter is not yet measured in a browser: the VRAM headroom it leaves on a 16 GB GPU
+and its acceptance are open. All 128 experts of every layer stay in VRAM: the text weights are
 13.4 GiB, and the browser needs about 14.3 GB of CacheStorage quota for one origin.
 
 - **Memory**: in Chrome on the RTX 5070 Ti (16 GB) the model at capacity 4096 used about 14.1 GB of dedicated GPU memory (the
   maintainer's reading of 2026-11-08), leaving about 0.8 GB. A larger capacity, or another tab using the GPU, can go past it. Dawn
   on D3D12 pages heaps over PCIe past its budget instead of failing an allocation (from Dawn's code, not observed), so a model that
   does not fit gets slow instead of stopping, and `capacity: "fit"` and the headroom check may report a fit there; the manifest
-  keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`.
+  keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`. The reading is without the drafter, whose
+  weights come on top.
 - **Prefill**: `expert_linear` runs each of a chunk's T × 8 rows on its own expert's weights; for the long rows of gate_up
   the rows that picked one expert share the walk of its weight row (the grouped form), still with one multiply-add per row
   and element, and the down projection has no grouping of rows by expert. 26B's dense parts have neither the RMS→add
@@ -712,7 +715,7 @@ applies), and so are the two quantization temporaries of linear i8a8 (ADR
 for the options it is given: a fusion or compute option the Session gets and the estimate does not is
 planned at the runtime default, and the windows it folds are counted unfused. It also has no adapter:
 it plans its fusions with the default geometry profile's GEMV choices, and a Session plans them with
-those of its adapter's table. The two differ in one place. The linear → `static_quantize` fusion folds
+those of its adapter's table. The two differ in two places. The linear → `static_quantize` fusion folds
 a linear whose shape has a parallel row, and each embedded table has rows on shapes the default has
 none for: `nvidia-blackwell` (the RTX 5070 Ti's table) on 20 (5 of them bf16 linears of regular
 Gemma 4 E2B and E4B), `apple-metal-3` (the Apple M2's) on 13 (2 bf16; its 11 integer shapes are
@@ -737,7 +740,15 @@ at 1, 4 and 8 rows are the same step for step under both sets of choices, and so
 distributions at their `bf16`, `i4`, `i4-gemvpar` and `i4-fast` presets. That comparison was made with
 `nvidia-blackwell`'s choices; the shapes the other three tables add are bf16 ones, among those, or
 `apple-m5`'s int4 output head, which no `static_quantize` follows (the recipe inserts none around the
-head), so no Gemma 4 linear of theirs feeds a `static_quantize` either. A table
+head), so no Gemma 4 linear of theirs feeds a `static_quantize` either. The second place is the
+private split-K key (`LINEAR_SPLIT_K`): the estimate also resolves each linear's strategy with the
+default choices, and the split-K GEMM's entry comes after the GEMV family's, so a float-stored linear
+of 2 to 8 rows at `reorder` whose shape has a parallel row only in the adapter's table takes the
+split-K GEMM in the estimate and the parallel GEMV in the Session. The estimate then counts the
+split's partial sums (`slices · rows · N · 4` bytes) where the Session allocates none, an overcount:
+bf16 `1536 × 2048` at 4 rows under `nvidia-ampere`'s choices counts 196,608 bytes that the RTX 3080
+Ti's Session does not allocate (a core-lane test states it). No level, preset or profile selects the
+split, so only a Session built with the key is in this position. A table
 injected with `acquireGpu({ geometryProfile })` that names other parallel shapes is in the same
 position, and nothing checks it. The `unaccounted` field
 lists what is not counted, verbatim — ① fusion the options passed do not describe ② the quantization
@@ -751,9 +762,14 @@ model: ④ and ⑤ are outside it, and the checks that compare it with a device 
 MOSS-Image and Anima stage checks, gemma's `fitCapacity`; unchanged on 2026-11-11, when the numbers of
 several stages went down — ADR 0093 addendum).
 The estimate does not repeat every refusal of execution: a linear that execution rejects for its
-weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`,
-`k` over the i8a8 reduction guard) is counted and gets a number, and an external rule's dispatch is
-not checked for its workgroup counts or params. Such a Session fails at its first run.
+weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`)
+is counted and gets a number, so is a linear whose one dispatch execution refuses for its shape (a
+GEMM whose `m · k` or `n · k` passes u32), and an external rule's dispatch is not checked for its
+workgroup counts or params. Such a Session fails at its first run. A linear whose dispatch program
+holds node temporaries (the i8a8 path, and the split-K GEMM under its private key) is counted from
+that program, which the estimate builds as execution does, and only for such a linear: a program
+execution refuses to build fails the estimate with execution's class and message — a per-channel
+i8a8 linear whose `k` passes the reduction guard with `ExecutionError`.
 **The in-node temporaries of attention are counted** — the score S and the row statistics of the
 states form (the row statistics only for plans whose resolved attention form requires them; 0 bytes
 for plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization
@@ -909,32 +925,35 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   default but in the table of the device that gains from it. Each of the four measured devices has a table derived
   from its own GEMV sweep records. Such a table starts from the default's exceptions: it keeps the ones its records
   give no evidence about, and replaces one only when its records adopt another variant over it, which takes ×1.10
-  in every group — a device on which an inherited exception is slower by less keeps it.
+  in every group under the rule of two records (`nvidia-ampere`, `nvidia-blackwell`), or ×1.065 times the two
+  kernels' gaps in every steady record under the rule of one steady record (`apple-metal-3` and `apple-m5`,
+  regenerated so on 2026-11-28) — a device on which an inherited exception is slower by less keeps it.
   - `nvidia-ampere` (RTX 3080 Ti, Node, Vulkan): the default's 22, and 50 of its own — 37 int4 and 11 int8 shapes of
     the QAT models and their MTP drafters, the bf16 output head of regular E2B, `262144 × 1536`, and bf16
     `10240 × 2560` (×1.10 to ×1.88).
   - `nvidia-blackwell` (RTX 5070 Ti, Chrome, D3D12): the default's 22, two of them with its own variant (bf16
     `1536 × 256` `c16u8` and `4096 × 2560` `c16u16`, ×1.11 to ×1.21), and 41 int4 and int8 shapes of its own.
-  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 15 of them with its own variant of 32 to 256
-    columns per workgroup (×1.10 to ×1.54), and 65 int4 and int8 shapes of its own. The M2's records compare every
-    sequential variant they time with the baseline (what an `exact` Session runs with the default profile) word for
-    word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So each of
-    the table's 80 adopted exceptions writes the baseline's words on Metal in every record that timed it (216
-    groups of its 14 records): the general variant's on its 65 own shapes, the default's exception's on the 15
+  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 17 of them with its own variant of 32 to 256
+    columns per workgroup (×1.10 to ×1.54 on 15; ×1.070 and ×1.089 on bf16 `6144 × 1536` and `4096 × 2560`, which
+    the rule of one steady record replaced), and 70 int2, int4 and int8 shapes of its own. The M2's records compare
+    every sequential variant they time with the baseline (what an `exact` Session runs with the default profile)
+    word for word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So
+    each of the table's 87 adopted exceptions writes the baseline's words on Metal in every record that timed it
+    (238 groups of its 14 records): the general variant's on its 70 own shapes, the default's exception's on the 17
     others. Not every variant does: 423 of the 2,768 sequential-variant rows the records time at one row besides the
     baseline — all of int2, int4 and int8 cases and all of read-ahead depths other than 4; no bf16 row — write other
     words than the baseline there, and none of them is adopted. On 13 of the default's 22 shapes the records also
     time the general variant against the default's exception, with the same words; on the other 9 the quick look
     left it untimed, so on those shapes the default's exception has not been compared with the general variant on
-    Metal. **The 7 exceptions of the default that the table keeps are not thereby shown faster on the M2**: they stay
-    because no variant reaches ×1.10 over them, and the general variant reads ×1.02 to ×1.04 faster than the
-    default's exception on `6144 × 1536` and `12288 × 1536`, ×1.04 to ×1.07 on `4096 × 2560`, ×0.995 to ×1.03 on
-    `10752 × 2560`, ×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to ×0.87 on `1536 × 2048` (`256 × 1536`: not
-    timed). Over the 13 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
+    Metal. **The 5 exceptions of the default that the table keeps are not thereby shown faster on the M2**: they stay
+    because no variant qualifies over them, and the general variant reads ×1.03 to ×1.04 faster than the default's
+    exception on `12288 × 1536`, ×0.995 to ×1.03 on `10752 × 2560`, ×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to
+    ×0.87 on `1536 × 2048` (`256 × 1536`: not timed). Over the 13 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
     11 on the M2: there the default's exceptions do not meet the default's rule that no measured device is slower
     with a row.
-  - `apple-m5` (Apple M5, Chrome, Metal): the default's 22, each with the default's variant (no variant reaches
-    ×1.10 over one), and 43 int4 and int8 shapes of its own (×1.10 to ×1.77). As on the M2, a variant is adopted
+  - `apple-m5` (Apple M5, Chrome, Metal): the default's 22, each with the default's variant (no variant qualifies
+    over one), and 45 int4 and int8 shapes of its own (×1.10 to ×1.77 on 43; ×1.123 and ×1.087 on int4
+    `12288 × 1536` and int8 `256 × 2560`, which the rule of one steady record added). As on the M2, a variant is adopted
     only where its words equal the baseline's in every record: 1,466 of the 3,524 sequential-variant rows its two
     records compare with the baseline at one row write other words there — int2, int4 and int8 cases at 1, 2, 8
     and 16 words read ahead; none at 4 and no bf16 row — and none of them is adopted.
@@ -942,7 +961,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   default's (other lanes on 14 of the default's rows, one of them bf16; 11 rows on shapes the default has none for, 2
   of them bf16; the staged form or another row block on the rest); `nvidia-blackwell` 62 apart from the default's
   (other lanes on 23 of the default's rows, one of them bf16; 20 rows on shapes the default has none for, 5 of them
-  bf16; the staged form or another row block on the rest); `apple-metal-3` 65 apart from the default's (other lanes
+  bf16; the staged form or another row block on the rest); `apple-metal-3` 69 apart from the default's (other lanes
   on 35 of the default's rows, 4 of them bf16; 13 rows on shapes the default has none for, 2 of them bf16; the staged
   form cleared or another row block on the rest); `apple-m5` 66 apart from the default's (other lanes on 18 of the
   default's rows, none of them bf16; 17 rows on shapes the default has none for, 6 of them bf16; another row block on
@@ -955,7 +974,8 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); with the rows
   derived on 2026-11-19, `nvidia-blackwell` and `apple-metal-3` were measured end to end on E2B alone and
   `nvidia-ampere` was not ([research](research/2026-11-19-gemv-tables-across-devices.md) §3) — measurements taken
-  before the derivation of 2026-11-21 that the three tables hold now —, and no test runs a
+  before the derivation of 2026-11-21 that the three tables hold now (`apple-metal-3` with what the rule of one
+  steady record added on 2026-11-28) —, and no test runs a
   table's rows on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
   only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's presets only `bf16-fast` declares
   that level (in the recipe and the local mirror, not published yet), so only its Sessions run the bf16 rows.

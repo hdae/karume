@@ -36,6 +36,7 @@ export const KERNEL_CHECK_IDS = [
   "fusion-twins",
   "attention-online-tiled",
   "attention-band",
+  "linear-splitk",
 ] as const;
 export type KernelCheckId = (typeof KERNEL_CHECK_IDS)[number];
 

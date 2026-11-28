@@ -427,6 +427,15 @@ type GemmSpec =
       readonly weightGroupShift?: number;
       /** Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}). */
       readonly geometry?: GemmGeometry;
+      /**
+       * The split-K partial (src/kernels/linear-splitk.ts): the K tiles are cut into this many
+       * runs, slice `wid.z` sums its run from 0 in the skeleton's order, and the epilogue stores
+       * its accumulators into `partials` (slice-major, `[slices, m, n]`) without the bias, which
+       * the combine pass adds last. The count is baked into the WGSL (and the key), because the
+       * split's numbers depend on it. MUST: when omitted the generated code does not move by a
+       * single byte — the plain linear's snapshots are the detector.
+       */
+      readonly splitSlices?: number;
     }
   | ({
       /**
@@ -1176,8 +1185,9 @@ const store = (
   mask = false,
   rowOffset = false,
   band = false,
+  /** The prefix of every output index (the batch base; the split-K partial's slice base). */
+  base = batchBase(op, "cbase"),
 ): string => {
-  const base = batchBase(op, "cbase");
   /**
    * The absolute query row of the mask's row and the band's predicate (turned back into an index
    * into the full M only with the row window).
@@ -1321,6 +1331,29 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
 };
 
 /**
+ * The header of the K tile loop: every tile in ascending order, or — for the split-K partial
+ * (`slices` given) — the run of tiles of slice `wid.z`. The tiles are dealt out as evenly as whole
+ * tiles allow: each slice takes `tiles / slices` of them and the first `tiles % slices` slices one
+ * more, in order, so the runs tile `[0, tiles)` without a gap or an overlap whether or not the count
+ * divides. A slice's run is summed from 0 in the same ascending order as the plain loop; with one
+ * slice the run is every tile.
+ *
+ * MUST: the bounds are built from `wid.z` and the uniform only (workgroup-uniform), the premise of
+ * the inner `workgroupBarrier`'s uniformity requirement (the same rule as `kExtent`).
+ * MUST: omitted, the plain loop's line, byte for byte.
+ */
+const kTileLoop = (slices: number | undefined): string =>
+  slices === undefined
+    ? "  for (var t = 0u; t < tiles; t = t + 1u) {"
+    : `  // Slice wid.z of ${slices}: the K tiles [t_first, t_end), tiles / ${slices} of them and one more
+  // for the first tiles % ${slices} slices (the runs cover every tile once, in order)
+  let slice_tiles = tiles / ${slices}u;
+  let slice_extra = tiles % ${slices}u;
+  let t_first = wid.z * slice_tiles + min(wid.z, slice_extra);
+  let t_end = t_first + slice_tiles + select(0u, 1u, wid.z < slice_extra);
+  for (var t = t_first; t < t_end; t = t + 1u) {`;
+
+/**
  * One shader with the fragments for head / extra Dims fields / prologue / fillA / fillB / store
  * inserted.
  *
@@ -1337,6 +1370,9 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
  * MUST: the expression passed is **workgroup-uniform** (built only from `workgroup_id` and
  * uniforms). This is the premise for the inner `workgroupBarrier` to meet WGSL's uniformity
  * requirement; passing a lane-dependent value makes shader creation itself fail.
+ *
+ * `slices` is the split-K partial's slice count ({@link kTileLoop}); omitted, the loop runs over
+ * every K tile and the generated code does not move by a single byte.
  */
 const skeleton = (
   geometry: GemmGeometry,
@@ -1350,6 +1386,7 @@ const skeleton = (
   accInit = gemmAccumulatorInit(geometry),
   compute: GemmCompute = "f32",
   kExtent = "dims.k",
+  slices?: number,
 ): string => {
   const tileM = gemmTileM(geometry);
   const nQuads = gemmColumnQuads(geometry);
@@ -1391,7 +1428,7 @@ ${prologue}
   // to meet WGSL's uniformity requirement
   let tiles = (${kExtent} + ${GEMM_TILE_K - 1}u) / ${GEMM_TILE_K}u;
 ${accInit}
-  for (var t = 0u; t < tiles; t = t + 1u) {
+${kTileLoop(slices)}
 ${fillTiles}
     workgroupBarrier();
     // ${geometry.regM + gemmQuadsPerThread(geometry)} shared loads (${gemmQuadsPerThread(
@@ -2084,13 +2121,35 @@ ${fillBStatePv(geometry)}`,
     "k_live",
   );
 
+/**
+ * linear's kernel, and with `splitSlices` its split-K partial: the same prologue, fills and
+ * inner-product loop over the K tiles of slice `wid.z` only ({@link kTileLoop}), and the plain
+ * epilogue without the bias, stored at the slice's base of `partials` (binding 4, where the plain
+ * kernel binds `out`; binding 3, the bias, is not declared — the combine pass adds it).
+ */
 const linearVariantWgsl = (
   geometry: GemmGeometry,
   weight: WeightStorage,
   v4: boolean,
   compute: GemmCompute = "f32",
   groupShift?: number,
+  splitSlices?: number,
 ): string => {
+  if (splitSlices !== undefined) {
+    // Every weight storage the skeleton reads under f32 compute: the decode happens at the tile
+    // fill, which the split does not touch. The f16 compute variant is an approximation of its own
+    // (rounded tiles); a split of it is not built.
+    if (compute !== "f32") {
+      throw new CodegenError(
+        `linear split-K: the split partial runs under f32 compute only (compute=${compute})`,
+      );
+    }
+    if (!Number.isSafeInteger(splitSlices) || splitSlices < 1) {
+      throw new CodegenError(
+        `linear split-K: the slice count must be a positive integer (got ${splitSlices})`,
+      );
+    }
+  }
   // i8 weights × f16 compute (w8a16) is not built; it MAY be reopened when a speed measurement on an
   // FP16 2:1 device shows a gain (re-graded 2026-10-18 — ADR 0028 decision 4). On machines with a 1:1
   // ALU ratio it does not work as a speed option, and as a quality option it is a separate ruling once
@@ -2124,24 +2183,55 @@ const linearVariantWgsl = (
     );
   }
   const element = v4 ? "vec4<f32>" : "f32";
+  const split = splitSlices !== undefined;
   return skeleton(
     geometry,
-    `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32${weightNote(weight)}${
-      compute === "f16" ? ", f16 tile compute" : ""
-    }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
-    `@group(0) @binding(1) var<storage, read> x: array<${element}>;
+    split
+      ? `// karume linear split-K partial (x[m,k] · wᵀ[k,n] over the K tiles of slice wid.z of ${splitSlices}, no bias, f32${weightNote(
+          weight,
+        )}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`
+      : `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32${weightNote(weight)}${
+          compute === "f16" ? ", f16 tile compute" : ""
+        }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    split
+      ? `@group(0) @binding(1) var<storage, read> x: array<${element}>;
+@group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
+@group(0) @binding(4) var<storage, read_write> partials: array<${element}>;`
+      : `@group(0) @binding(1) var<storage, read> x: array<${element}>;
 @group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${element}>;`,
     weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4),
-    `${quadDims(v4)}${prologueA(geometry, "linear", v4)}
+    `${quadDims(v4)}${
+      split
+        ? `  // The base of slice wid.z in partials [slices, m, n]${v4 ? " (in quads)" : ""}
+  let pbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
+`
+        : ""
+    }${prologueA(geometry, "linear", v4)}
 ${prologueBLinear(geometry, weight)}`,
     `${fillA(geometry, "x", v4, undefined, compute)}
 ${fillBLinear(geometry, "w", weight, v4, compute, groupShift)}`,
-    store(geometry, "out", "linear", v4, true),
+    split
+      ? store(
+          geometry,
+          "partials",
+          "linear",
+          v4,
+          false,
+          false,
+          "f32",
+          false,
+          false,
+          false,
+          "pbase + ",
+        )
+      : store(geometry, "out", "linear", v4, true),
     "",
     gemmAccumulatorInit(geometry),
     compute,
+    "dims.k",
+    splitSlices,
   );
 };
 
@@ -3043,7 +3133,14 @@ export const gemmWgsl = (spec: GemmSpec): string => {
   }
   switch (spec.op) {
     case "linear":
-      return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute, spec.weightGroupShift);
+      return linearVariantWgsl(
+        geometry,
+        spec.weight,
+        spec.v4,
+        spec.compute,
+        spec.weightGroupShift,
+        spec.splitSlices,
+      );
     case "conv1d":
       if (spec.weight === "i2") {
         throw new CodegenError(

@@ -217,6 +217,33 @@ const readRowsRules = <Geometry>(
 const readGemmRows = (value: unknown, path: string): GemmRowsRule[] =>
   readRowsRules(value, path, (geometry, at) => readGemmGeometry(geometry, at, ["form"]));
 
+/**
+ * `gemmGrid` (the grid-fill rule): the ladder's geometries may carry the skeleton form; the counts
+ * are integers and the padding bound a number. The ladder's order and the ranges are
+ * {@link assertGeometryProfile}'s job.
+ */
+const readGemmGrid = (value: unknown, path: string): NonNullable<GeometryProfile["gemmGrid"]> => {
+  const fields = readRecord(value, path, ["ladder", "keepLargest", "minWorkgroups", "maxPadding"]);
+  const ladderPath = child(path, "ladder");
+  const keepPath = child(path, "keepLargest");
+  const keepLargest = readRecord(fields.keepLargest, keepPath, ["minWorkgroups", "minK"]);
+  const maxPadding = fields.maxPadding;
+  return {
+    ladder: readArray(fields.ladder, ladderPath).map((geometry, index) =>
+      readGemmGeometry(geometry, `${ladderPath}[${index}]`, ["form"]),
+    ),
+    keepLargest: {
+      minWorkgroups: readInteger(keepLargest.minWorkgroups, child(keepPath, "minWorkgroups")),
+      minK: readInteger(keepLargest.minK, child(keepPath, "minK")),
+    },
+    minWorkgroups: readInteger(fields.minWorkgroups, child(path, "minWorkgroups")),
+    maxPadding:
+      typeof maxPadding === "number" && Number.isFinite(maxPadding)
+        ? maxPadding
+        : fail(child(path, "maxPadding"), `is not a finite number (${show(maxPadding)})`),
+  };
+};
+
 /** `i8a8.linear` (ADR 0115 addendum decision 14). */
 const readI8a8Linear = (value: unknown, path: string): I8a8RowsRule[] =>
   readRowsRules(value, path, readI8a8Geometry);
@@ -466,7 +493,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     parsed,
     ROOT,
     ["id", "gemmRows", "attention", "conv2d", "i8a8"],
-    ["match", "attentionOnline", "linearGemv", "provenance"],
+    ["match", "attentionOnline", "linearGemv", "gemmGrid", "provenance"],
   );
   const attention = readRecord(fields.attention, "attention", ["qk", "pv"]);
   const conv2d = readRecord(fields.conv2d, "conv2d", ["rows64", "rows32"]);
@@ -495,6 +522,9 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     ...(fields.linearGemv === undefined
       ? {}
       : { linearGemv: readLinearGemv(fields.linearGemv, "linearGemv") }),
+    ...(fields.gemmGrid === undefined
+      ? {}
+      : { gemmGrid: readGemmGrid(fields.gemmGrid, "gemmGrid") }),
     ...(fields.provenance === undefined
       ? {}
       : { provenance: readProvenance(fields.provenance, "provenance") }),

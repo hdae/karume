@@ -678,7 +678,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- gemma4 26B (the q4_0 mirror; it ships no drafter) ---------------------
+  // --- gemma4 26B (the q4_0 mirror; its drafter's rows are not derived) ------
   {
     // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
