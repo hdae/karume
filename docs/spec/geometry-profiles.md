@@ -464,19 +464,25 @@ measures nothing and changes no default value.
     parameter of the derivation (`DeriveLinearGemvOptions.margin`), ×1.065 by default (`GEMV_MARGIN`): the least
     margin that covers 99 % of the gains' differences between records of one device is ×1.060, ×1.066 and ×1.058 on
     the three steady devices (M = 1, table candidates, 3,633, 4,414 and 8,338 rows), and without the gap term it
-    would be ×1.063, ×1.083 and ×1.080. Against a reference that is the default's choice, 0 of 1,481 adoptions is
-    slower than ×1/1.02 by the other records (0 of 1,051 by records of another day), and 15 of 1,369 clear winners
+    would be ×1.063, ×1.083 and ×1.080. Against a reference that is the default's choice, 0 of 1,491 adoptions is
+    slower than ×1/1.02 by the other records (0 of 1,061 by records of another day), and 14 of 1,369 clear winners
     are refused where the rule of two records refuses 135 of 1,108. ×1.065 bounds the error between records of one
-    session; it is no bound across sessions: across days it is exceeded in 0.7 % (Apple M5), 1.8 and 3.8 % (RTX 5070
-    Ti) and 2.5 % (Apple M2) of the rows, because single kernels move between sessions by more than ×1.065 in 0.6 to
-    0.9 % of the cases with nothing to see inside a record. The reference's re-timing is evidence of its own: in
-    today's data only the reference alone moved by more than ×1.065 in 7 of 2,932 groups, all at M = 1.
+    session (in the fit it is missed in 0.85, 1.04 and 0.68 % of the rows of the RTX 5070 Ti, the Apple M2 and the
+    Apple M5 — the M2's least margin is ×1.066); it is no bound across sessions: across days it is exceeded in 0.8 %
+    (Apple M5), 1.9 and 3.8 % (RTX 5070 Ti) and 2.8 % (Apple M2) of the rows, because single kernels move between
+    sessions by more than ×1.065 in 0.6 to 1.1 % of the cases with nothing to see inside a record. The reference's
+    re-timing is evidence of its own: in today's data only the reference alone moved by more than ×1.065 in 7 of 2,932
+    groups, all at M = 1. (These counts are of the margin as built, ×1.065, re-run on 2026-11-28 with the
+    adjudication's scripts. The adjudication itself had run them at ×1.0672 — e^0.065, its margin taken in log
+    space — and reported 1,481, 1,051, 15 of 1,369, 0.7 / 1.8 / 3.8 / 2.5 % and 0.6 to 0.9 %; on the existing records
+    the two margins decide 8 single-record decisions differently — 7 sequential exceptions that qualify by ×1.068 to
+    ×1.078 and one parallel row's row block. The maintainer kept ×1.065.)
   - *At the other row counts of a parallel row* (M = 4 and 8) the kernel the derived row runs there must have a time
     in every steady record whose reading at M = 1 was evidence — the same record —, and in every reading there that is
     evidence it is not slower than the default's choice in the same group: a gain of at least 1, no margin either way.
     That bar passes 3 of 1,299 rows that other records read slower than ×1/1.02 and refuses 3 of 10,684 they read at
-    least ×1.02 faster; 1 ÷ (margin × gaps) would pass 37 to 51 % of the slower rows, margin × gaps refuse 5.5 to 7.6 %
-    of the faster ones. The one place the margin touches M = 4 and 8 is the re-timing of the reference (above): a
+    least ×1.02 faster; 1 ÷ (margin × gaps) would pass 36 to 47 % of the slower rows, margin × gaps refuse 5.2 to 7.5 %
+    of the faster ones (37 to 51 % and 5.5 to 7.6 % at the adjudication's ×1.0672). The one place the margin touches M = 4 and 8 is the re-timing of the reference (above): a
     reading there whose reference's re-timing departs beyond margin × the two gaps is no evidence, so in that record
     the row has no time at that row count — which refuses it, never lets it pass. How often that happens has no
     measured rate yet: no record before 2026-11-28 re-times a reference.
@@ -486,16 +492,17 @@ measures nothing and changes no default value.
     or more every one is at least the margin × the two kernels' gaps (the reference's time cancels in the ratio, so the
     noise is the two gaps). Among several, the one whose smallest ratio is largest.
   - *Several candidates*: among those that qualify, the one whose smallest gain at M = 1 is largest. Two records of one
-    device pick different winners in 5.2, 20.3 and 13.0 % of the pairs (6.9, 16.7 and 9.9 % under the rule of two
-    records), mostly near ties.
+    device pick different winners in 5.3, 19.6 and 13.3 % of the pairs (6.9, 16.7 and 9.9 % under the rule of two
+    records; 5.2, 20.3 and 13.0 % at ×1.0672), mostly near ties.
   - *The table's choice*: where the table the records derive for holds another choice than the default's for the
     shape (a sequential exception, a parallel row, or no row where the default has one), that choice stays unless a
     candidate that qualifies — or the default's choice itself — beats it by the bar of M = 1 in the same group, in
     every steady record that times both, the largest gain over the default's choice then taken; a table's choice that
     no steady record timed at M = 1 stays as it is, its row block too; one that failed or whose check failed in a
     current group is no longer held, and the default's choice is the one to beat. With the table's choice kept so, 0 of
-    544, 2 of 321 and 0 of 439 choices move between records of one device, and the time behind the best by further
-    records falls from 0.12 / 0.88 / 0.66 % to 0.05 / 0.24 / 0.23 %. A kept row may still move its row block by the
+    546, 2 of 326 and 0 of 446 choices move between records of one device, and the time behind the best by further
+    records falls from 0.14 / 0.81 / 0.65 % to 0.05 / 0.23 / 0.23 % (at ×1.0672: 0 of 544, 2 of 321, 0 of 439; 0.12 /
+    0.88 / 0.66 % to 0.05 / 0.24 / 0.23 %). A kept row may still move its row block by the
     rule above, against its own. The sweep times the device table's choices for this
     ([workbench.md](workbench.md#how-the-gemv-sweep-times-a-row-count)); a record taken before it times them only where
     they are candidates of its set.

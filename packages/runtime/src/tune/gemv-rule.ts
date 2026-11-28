@@ -19,10 +19,12 @@
  *
  * Source: the least margin that covers 99 % of the gains' differences between records of one device
  * is ×1.060, ×1.066 and ×1.058 on the three steady devices (M = 1, the candidates a table can hold;
- * 3,633, 4,414 and 8,338 rows); against a reference that is the default's choice, 0 of 1,481 adoptions
+ * 3,633, 4,414 and 8,338 rows); against a reference that is the default's choice, 0 of 1,491 adoptions
  * is slower than ×1/1.02 by the other records. It bounds the error between records of one session:
- * across days it is exceeded in 0.7 to 3.8 % of the rows, because single kernels move between
- * sessions by more than ×1.065 in 0.6 to 0.9 % of the cases with nothing to see inside a record.
+ * across days it is exceeded in 0.8 to 3.8 % of the rows, because single kernels move between
+ * sessions by more than ×1.065 in 0.6 to 1.1 % of the cases with nothing to see inside a record.
+ * (Counts of ×1.065 itself; the adjudication ran its replays at e^0.065 = ×1.0672, and the two
+ * margins decide 8 single-record decisions of the existing records differently.)
  */
 export const GEMV_MARGIN = 1.065;
 

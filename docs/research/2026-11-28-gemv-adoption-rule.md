@@ -152,3 +152,38 @@ reference kernel at M = 1 (`replay_m1.ts`).
 - Few pairs across sessions: the RTX 5070 Ti over three days, the M5 over two, the M2 over 17 hours.
 - The truth is the median gain of the other records, often one or two of them, so it moves too; binomial upper
   bounds assume independent rows, which a group's rows are not.
+
+## Addendum (2026-11-28, after the implementation's review): the margin the replays ran at
+
+The adjudication's scripts take the margin in log space, `a = 0.065`, so every count of "×1.065" above was replayed at
+e^0.065 = ×1.0672, and every count of "×1.03" at e^0.03 = ×1.0305. The rule as built is ×1.065 (`GEMV_MARGIN`, kept by
+the maintainer) and ×1.03 (`GEMV_LOWEST_MARGIN`). On the existing records the two forms of ×1.065 decide 8 single
+steady-record decisions differently (RTX 5070 Ti 3, Apple M2 2, Apple M5 3: 7 sequential exceptions that qualify by
+×1.068 to ×1.078, one parallel row's row block). The same scripts, run again with `a = ln 1.065` and `ln 1.03` (the
+copies and their outputs under `outputs/misc/gemv-rule-2026-11-28/fix/rerun/`; the unmodified copies reproduce every
+earlier output byte for byte, the verbose harm lists of `later_pairs.ts` aside), give at the built margins:
+
+| Count | At ×1.0672 (above) | At ×1.065 |
+| --- | --- | --- |
+| One record, reference = the default's choice: adopted, harmful, clear winners refused | 1,481, 0, 15 of 1,369 | 1,491, 0, 14 of 1,369 |
+| same, ×1.03 × gaps | 1,679, 0, 3 of 1,369 | 1,685, 0, 3 of 1,369 |
+| Time behind the best (×1.065 / ×1.03) | 0.94 / 0.46 % | 0.91 / 0.45 % |
+| Truth from another day only (×1.065 / ×1.03) | 1,051 / 1,217, 0 harmful | 1,061 / 1,222, 0 harmful |
+| Table already holds a winner (×1.065 / ×1.03) | 19 / 35 of 3,160 | 19 / 35 of 3,160 |
+| Bound missed in the fit, M = 1 table rows (RTX 5070 Ti / M2 / M5) | 0.83 / 0.86 / 0.60 % | 0.85 / 1.04 / 0.68 % |
+| Bound missed across sessions (5070 Ti 11-19, 11-27 / M5 / M2) | 3.81, 1.75 / 0.67 / 2.54 % | 3.81, 1.94 / 0.75 / 2.77 % |
+| A kernel's own move beyond ×1.065 across sessions | 19 of 2,031 / 2,251 / 3,312 | 22 / 20 / 21 |
+| M = 4 and 8: 1 ÷ (margin × gaps) passes of the slower rows; margin × gaps refusals of the faster | 37 to 51 %; 5.5 to 7.6 % | 36 to 47 %; 5.2 to 7.5 % |
+| Two records pick different winners | 5.2, 20.3, 13.0 % | 5.3, 19.6, 13.3 % |
+| With the table's choice kept: choices that move; time behind the best | 0/544, 2/321, 0/439; 0.12 / 0.88 / 0.66 → 0.05 / 0.24 / 0.23 % | 0/546, 2/326, 0/446; 0.14 / 0.81 / 0.65 → 0.05 / 0.23 / 0.23 % |
+| Whole derivation on pairs of complete records, steady devices: adopted rows slower than the default at a row count | 0 of 450 / 262 / 946 | 0 of 454 / 264 / 958 |
+
+Unchanged by the margin: the class of a record, the least margins (×1.060, ×1.066, ×1.058), the reference alone beyond
+×1.065 in 7 of 2,932 groups of the steady devices, the bar of 1 at M = 4 and 8 (3 of 1,299 and 3 of 10,684), and the
+2 of 74 harmful adoptions of the six small RTX 3080 Ti records read as steady. At ×1.065 the Apple M2's own fit is
+missed in 1.04 % of its rows: its least margin, ×1.066, is above the built one. The specification quotes the counts of
+×1.065.
+
+Not re-run at ×1.065: the RTX 3080 Ti's replays of one unsteady record and of pairs (`later_pairs.ts` on that device,
+`later_replay.ts`) — readings the built rule does not make, since an unsteady record adopts nothing alone —, so the
+28 of 972, 5 of 467 and 3 of 411 above stay counts of ×1.0672.
