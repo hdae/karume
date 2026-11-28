@@ -18,6 +18,7 @@ import {
   type GemvSweepOptions,
   type GemvSweepProgress,
   type GemvSweepReport,
+  type GemvSweepSession,
   type GeometrySweepOptions,
   type GeometrySweepProgress,
   type GeometrySweepReport,
@@ -90,6 +91,11 @@ export type BenchmarkDeps = {
   readonly pageFacts: () => PageFacts;
   /** The WebGPU implementation (default `navigator.gpu`). */
   readonly gpu?: GPU;
+  /**
+   * The page load's session, made when the page loaded: every GEMV record of its runs names it, so
+   * two runs in one page load are told from runs in two.
+   */
+  readonly session?: GemvSweepSession;
   /** One GEMV sweep call (one case). Default `runGemvSweep`. */
   readonly gemvSweep?: (options: GemvSweepOptions) => Promise<GemvSweepReport>;
   /** One geometry sweep call (one case). Default `runGeometrySweep`. */
@@ -188,6 +194,7 @@ export const runBenchmark = async (
         if (sweep.sweep === "gemv") {
           const outcome = await runGemvPlan(sweep.plan, {
             ...common,
+            ...(deps.session === undefined ? {} : { session: deps.session }),
             sweep: async (options) => {
               const report = await gemvSweep(options);
               emit({ kind: "record", sweep: "gemv", report });

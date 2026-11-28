@@ -162,10 +162,31 @@ maintainer's ruling of 2026-11-06).
      - The fused attention was not reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies`
        are already the single decisions its consumers call. Its kernels are not selected by level; its levels are
        recorded when item 4 selects by them.
-     - The linear→static_quantize rule keeps its own conditions and its own builder; the memory estimate and the
-       verification cache do not read dispatch programs yet.
-     - The split-K linear: f32 storage only; not counted by the memory estimate; no module in `packages/kernel-checks`
-       (so no browser check); slower than the reference kernel at K = 1536. A fast form would reuse the GEMM skeleton.
+     - The linear→static_quantize rule keeps its own conditions and its own builder; the verification cache does not
+       read dispatch programs yet (the memory estimate counts a linear's node temporaries from its program).
+     - The split-K linear (the split of the GEMM skeleton since 2026-11-28, every storage under f32 compute —
+       [research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)): left are its selection by level with a
+       per-profile thread target, the per-device evidence for that target, and the sha rows of the `reorder` presets it
+       would move (perf-ledger K-115). Before any level selects it, the selection must settle:
+       - **The A/B band at large K** (the maintainer's ruling): `LINEAR_SPLITK_AB_BAND = 2` follows ADR 0147's rule
+         (at least 4 × the worst measured |split − reference GEMM| / op band, at most 2 × the f64 band) only up to
+         about K = 10240. On the kernel-check's bands fixture (m 37, 2 to 16 slices, RTX 3080 Ti) the worst is 0.457 at
+         K = 8960 (4 × = 1.83) and 0.710 at K = 16384 (2.84) and 0.859 at K = 32768 (3.44) (n 68 on the default
+         geometry; f32, bf16, i4 g32 and i2 at 8960, f32 and bf16 above); on every storage, n 68 and 69 and both band
+         geometries it is 0.498 at K = 10240 (1.99, f32 at 16 slices) and 0.606 at K = 12288 (2.42, i4 g128 at 16
+         slices). Gemma 4's down projections (K = 10240 and 12288), where the split pays, lie at that edge
+         ([research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)). The selection needs either a K ceiling
+         or a band that scales with K.
+       - **The f64 band's meaning at large K** (the same open point): on inputs outside the kernel-check fixture's
+         scale (|x| from 1e-3 to 1e3, an offset of +10, × 100) both the reference GEMM and the split leave the op band,
+         by 5 to 70 times, and stay near each other against the error model eps · Σ|x·w|; in one bf16 case (K 4096,
+         8 slices, the first half of K positive and the second negative) only the split leaves it, 1.065 against the
+         reference's 0.839.
+       - **The binding limit**: the selection does not read `maxStorageBufferBindingSize`, so a linear whose output
+         fits but whose partial sums (`slices × m × n × 4` bytes) do not makes the Session fail. It must fall back to
+         the reference GEMM instead.
+       - **f16 compute**: under the key with `linearCompute: "f16"` a Session runs `gemm-f16` without a word. Whether
+         a Session should refuse the pair instead is open.
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
   4. **Requirement levels** ([spec/numerics.md](spec/numerics.md)):
      - The regression corpus ([spec/verification.md](spec/verification.md#the-regression-corpus)): entries for the f16
@@ -251,7 +272,39 @@ maintainer's ruling of 2026-11-06).
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table would
          allow it): their evidence is the device's sweep records;
        - the choice between sequential variants a few percent apart moves with the records given, and the narrowed
-         sweeps measured four hand-picked variants (the planner still lists the others).
+         sweeps measured four hand-picked variants (the planner still lists the others);
+       - **the rule of one steady record (built 2026-11-28 —
+         [spec](spec/geometry-profiles.md#deriving-the-gemv-choices),
+         [research](research/2026-11-28-gemv-adoption-rule.md)) and the embedded tables**: the four tables that carry
+         GEMV choices were derived under the rule of two records and are not regenerated yet. What the existing records
+         derive under the new rule, per device and against each embedded table, at ×1.065 and at ×1.03, is in
+         `outputs/misc/gemv-rule-2026-11-28/impl/table-diff-<device>.md` (outside git) for the maintainer to rule on —
+         the margin among it (×1.065 by default; ×1.03 is the alternative). Until `apple-m5` is regenerated, its
+         regeneration case (`tools/geometry-profiles/tests/regeneration_test.ts`) is red on a machine that has its two
+         GEMV records: they now derive other choices than the table holds. A table derived at another margin takes it
+         on the generator's command line (`--gemv-margin`, 2026-11-28), whose verdict lines also list what ×1.03 would
+         change;
+       - left as they are after the implementation's reviews (2026-11-28), each open:
+         - a reference whose re-timing pass throws makes its row a failure row, as a failed round does, so the group
+           loses its candidates' gains and its class count (the conservative choice; leaving the re-timing absent would
+           read the group untested);
+         - the planner's batch runs its two passes in one workbench session, which the adjudication's same-session
+           versus cross-session reading of the rule of two records cares about; the derivation does not read
+           `session` yet;
+         - a reading of the rule of one steady record names its record by path; the kernel fingerprint and the
+           record's sha256 are reached through the row and the provenance, and a held check shows only as no
+           `ruledOut`;
+         - the explore set's quick look still screens at ×1.10 against the fastest of the class
+           (`EXPLORE_QUICK_LOOK_MARGIN`), so a runner-up that either margin would adopt after the fastest fails at
+           M = 4 or 8 may already be screened at M = 1 — not measured;
+       - a device between steady and unsteady has no record: the class's 20 % is a point inside an empty band (the
+         steady devices' records read at most 15.2 %, the RTX 3080 Ti's at least 31.8 %), no integrated GPU, no thermally
+         limited laptop and no unsteady device in a browser was measured, and the six RTX 3080 Ti records of 12 or 13
+         groups that read as steady show what a wrong call costs (2 of 74 adoptions harmful);
+       - a pair gate (a row's quick time against its final time, within ×1.05) made one record of the RTX 3080 Ti as
+         safe as two in the replays, measured on that one unsteady device only: not in the rule;
+       - the row block's thread target at `exact` per device stays its own item (the rule for the thread target from
+         the `row-blocks` set, below).
      - The benchmark page for collaborators (`apps/benchmark`, [the spec](spec/benchmark.md)) is built and has run
        under Node + Dawn only. Open: a run in a browser on the development machine and on a collaborator's device
        (two-level progress, the estimate, the download at the end, a cancelled run); where it is hosted (a static
@@ -308,6 +361,26 @@ maintainer's ruling of 2026-11-06).
          refusing a record per op family (the record's measured-candidate fingerprint is one value per record); the
          quick look on the geometry sweep's evaluation set `k88`, whose summary compares every candidate with the
          table's (run it at margin 0).
+     - **The GEMM tile from the grid fill** (filed 2026-11-28, the maintainer's item; ADR
+       [0157](decisions/0157-gemm-tile-from-grid-fill.md) proposed, perf-ledger K-116,
+       [research 2026-11-28](research/2026-11-28-gemm-grid-fill.md)): the tile of linear, matmul and bmm chosen from the
+       dispatch grid's workgroup count by an optional table field instead of the M buckets. The field, its checks and
+       the selection at the three call sites are built
+       ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)), and so is the sweep's `grid` set that times
+       the ladder ([spec](spec/workbench.md#the-geometry-sweeps-grid-set)), and the derivation of the two integers with
+       the generator's `--grid-records` ([spec](spec/geometry-profiles.md#deriving-the-grid-fill-rule)); no table
+       carries the field. Left, in this order:
+       - G4: `nvidia-ampere` regenerated from grid records of the RTX 3080 Ti and this machine's corpus census rows
+         rewritten — waits for the maintainer's confirmation, gated by the full `vp test` with every output row
+         unchanged (the dry run of 2026-11-28 on two records, its integers and the would-be table diff:
+         [research](research/2026-11-28-gemm-grid-fill.md) §5);
+       - G5: the end-to-end Session A/B (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at
+         P = 1K and 4K) against the same table without the field — K-116's kill criterion;
+       - G6: other devices (their own grid records; ladders with the skeleton forms where their tables carry forms) and
+         the grid set on the benchmark page's explore run;
+       - outside the rule's scope, each its own item if taken up: the i8a8 linear (keyed by M only too, not measured
+         at small N), the states-shaped and row-block attention (they read the default bucket table directly), conv1d /
+         conv2d / conv3d and the fused attention's fixed fields.
   7. **Weights from outside the exporter** ([spec/single-file.md](spec/single-file.md),
      [spec/convert.md](spec/convert.md), [spec/safetensors.md](spec/safetensors.md); manifest `karume/6` — ADR
      [0153](decisions/0153-manifest-v6-name-map.md)). `fromSingleFile` on the pipelines, the counterpart of diffusers'

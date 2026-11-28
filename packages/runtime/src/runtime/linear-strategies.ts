@@ -130,8 +130,8 @@ export type LinearKnobs = {
   readonly linearGemvRowsThreadTarget: number | undefined;
   /**
    * Whether the split-K GEMM may take the linears it is eligible for (the internal option
-   * `LINEAR_SPLIT_K` of session-types.ts — no public option admits it until a preset can declare
-   * `reorder`, ADR 0152 decision 2).
+   * `LINEAR_SPLIT_K` of session-types.ts — no level selects it; SPEC:
+   * docs/spec/numerics.md#strategies-admitted-only-by-a-private-key).
    */
   readonly linearSplitK: boolean;
 };
@@ -188,9 +188,20 @@ export type LinearChoice =
   | { readonly id: "integer-gemv"; readonly variant: IntegerGemvVariant }
   | { readonly id: "i8a8" }
   | { readonly id: "planes-gemv"; readonly variant: PlanesGemvVariant }
-  | { readonly id: "gemm-splitk"; readonly slices: LinearSplitKSlices }
+  | LinearSplitKChoice
   | LinearGemvChoice
   | LinearGemmChoice;
+
+/**
+ * The split-K GEMM: the slice count, and the reference GEMM's output form and i4 group length (the
+ * partial is the split of that kernel).
+ */
+export type LinearSplitKChoice = {
+  readonly id: "gemm-splitk";
+  readonly slices: LinearSplitKSlices;
+  readonly v4: boolean;
+  readonly groupSize: number | undefined;
+};
 
 /** The default GEMM skeleton: its compute, its output form and the i4 group length of the weight. */
 export type LinearGemmChoice = {
@@ -468,13 +479,14 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
     },
   },
   // The split-K GEMM (src/kernels/linear-splitk.ts): the same products added slice by slice. Only
-  // where the internal option allows it, for an f32-stored weight under f32 compute whose reduction
-  // is long enough to cut. It comes after the GEMV family, so the few-row linears keep their kernels.
+  // where the internal option allows it, under f32 compute (any storage the GEMM skeleton reads),
+  // for a reduction long enough to cut. It comes after the packed and i8a8 entries and the GEMV
+  // family, so the linears they take keep their kernels; f16 compute keeps its own GEMM.
   {
-    choose: ({ knobs, weightStorage, compute, k }) => {
-      if (!knobs.linearSplitK || weightStorage !== "f32" || compute !== "f32") return undefined;
+    choose: ({ knobs, compute, k, v4, groupSize }) => {
+      if (!knobs.linearSplitK || compute !== "f32") return undefined;
       const slices = linearSplitKSlices(k);
-      return slices === undefined ? undefined : { id: "gemm-splitk", slices };
+      return slices === undefined ? undefined : { id: "gemm-splitk", slices, v4, groupSize };
     },
   },
   // The default GEMM skeleton (the reference kernel under f32 compute).

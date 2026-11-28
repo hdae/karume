@@ -20,7 +20,8 @@
  * means a different key, and the device-lifetime pipeline cache cannot mix them up.
  *
  * The scope (the paths that read the profile) is only the row-count buckets of matmul / bmm /
- * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, the i8a8 linear (row-count
+ * linear (or, in a table that carries it, the grid-fill rule that replaces them for those three —
+ * {@link GeometryProfile.gemmGrid}), ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, the i8a8 linear (row-count
  * buckets of its own — ADR 0115 addendum decision 14) / fused attention ①QK / ③PV, and the w8a8
  * implicit GEMM of conv3d (one geometry for every conv3d shape — ADR 0115 addendum 2026-10-26). The
  * `gemmRows` bucket table is shared by the 3 paths matmul / bmm /
@@ -46,6 +47,8 @@ import {
   GEMM_ROWS_BUCKETS,
   GEMM_TILE,
   type GemmGeometry,
+  gemmTileM,
+  gemmTileN,
 } from "./gemm-geometry.ts";
 import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWorkgroupStorageBytes } from "./gemm.ts";
 import {
@@ -79,6 +82,46 @@ export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGe
  * `Number.POSITIVE_INFINITY`.
  */
 export type I8a8RowsRule = { readonly maxRows: number; readonly geometry: I8a8Geometry };
+
+/**
+ * The grid-fill rule of the GEMM of linear / matmul / bmm ({@link GeometryProfile.gemmGrid}). The
+ * tile is a step of `ladder` chosen from the shape's dispatch grid ({@link gemmGridStep}):
+ *
+ * - the first tile (the largest) when `k ≥ keepLargest.minK`, its grid has at least
+ *   `keepLargest.minWorkgroups` workgroups and its padding is at most `maxPadding`;
+ * - otherwise the first of the other tiles whose grid has at least `minWorkgroups` workgroups and
+ *   whose padding is at most `maxPadding`;
+ * - otherwise the last tile.
+ *
+ * A grid's workgroup count is `ceil(n / tileN) · ceil(m / tileM) · batch` and its padding the
+ * area the tiles cover over the output's, `(ceil(n / tileN) · tileN · ceil(m / tileM) · tileM) /
+ * (m · n)` ({@link gemmGridWorkgroups}, {@link gemmGridPadding}). The two workgroup counts are the
+ * device's (a table derives them from its device's grid sweep records); the K floor and the padding
+ * bound are facts of the shapes the rule was fitted on, written into the field with the ladder so
+ * that the field states the whole rule it runs.
+ *
+ * MUST: the ladder is in strictly decreasing tile area, and every tile passes the geometry check —
+ * a ladder out of order would skip its smaller tiles silently ({@link assertGeometryProfile}).
+ * SPEC: docs/spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm
+ */
+export type GemmGridRule = {
+  /** The tiles, largest first. A tile may carry the skeleton form (not the counter decode). */
+  readonly ladder: readonly GemmGeometry[];
+  /** When the largest tile is kept: its grid's least workgroup count, and the least K. */
+  readonly keepLargest: { readonly minWorkgroups: number; readonly minK: number };
+  /** The least workgroup count of a smaller tile's grid. */
+  readonly minWorkgroups: number;
+  /** The largest padding a tile is taken at (tile area over output area, at least 1). */
+  readonly maxPadding: number;
+};
+
+/** The shape of one GEMM dispatch: `m × k` by `k × n`, `batch` matrices on the grid's z axis. */
+export type GemmShape = {
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly batch: number;
+};
 
 /**
  * The op families of the geometry sweep: the unit a table's evidence stands on, and the unit its
@@ -231,7 +274,10 @@ export type GeometryProfile = {
     readonly architecture?: string;
     readonly description?: string;
   };
-  /** linear / matmul / bmm (row-count buckets). */
+  /**
+   * linear / matmul / bmm (row-count buckets). Not read by those ops in a table that carries
+   * {@link gemmGrid}.
+   */
   readonly gemmRows: readonly GemmRowsRule[];
   /**
    * ①QK / ③PV of fused attention f32. S is materialised between the two stages, so each stage may
@@ -286,6 +332,16 @@ export type GeometryProfile = {
    * SPEC: docs/spec/geometry-profiles.md#the-gemv-choices-of-linear
    */
   readonly linearGemv?: LinearGemvChoices;
+  /**
+   * The grid-fill rule of linear / matmul / bmm ({@link GemmGridRule}): the tile is chosen from the
+   * workgroup count of the dispatch grid instead of the row count alone. Present, it replaces
+   * {@link gemmRows} for those three ops — a walk down its ladder ({@link gemmShapeGeometry}) —, and
+   * `gemmRows` is not read by them. Absent (the default profile and every table without the field),
+   * `gemmRows` applies as it always has, so every key, WGSL and dispatch is unchanged.
+   * Grid sweep records decide it (`deriveGemmGrid` of `@karume/runtime/tune`).
+   * SPEC: docs/spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm
+   */
+  readonly gemmGrid?: GemmGridRule;
   /**
    * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
    * decision 4, per op family since its addendum 2026-11-12). Only the generator
@@ -1036,6 +1092,85 @@ const rulesOf = <Geometry>(
   });
 };
 
+/** Guard that a count of the grid-fill rule is a positive u32 integer. */
+const assertGridCount = (value: unknown, where: string, path: string): number => {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 0xffff_ffff) {
+    throw new CodegenError(
+      `${where}: gemmGrid.${path} must be a positive integer (${String(value)})`,
+    );
+  }
+  return value;
+};
+
+/**
+ * The semantic check of a grid-fill rule ({@link GemmGridRule}): two tiles or more in strictly
+ * decreasing tile area, each passing {@link assertGemmGeometry} and carrying no counter decode
+ * (conv2d's alone), positive integer counts, and a padding bound that is a finite number of at least
+ * 1 (below 1 no tile fits). Fails loudly: a ladder out of order leaves its later tiles unreachable
+ * by the walk, and a missing count would turn every comparison false.
+ */
+const assertGemmGridRule = (rule: GemmGridRule, where: string): void => {
+  const { ladder } = rule;
+  if (!Array.isArray(ladder)) throw new CodegenError(`${where}: gemmGrid.ladder is not an array`);
+  if (ladder.length < 2) {
+    throw new CodegenError(
+      `${where}: gemmGrid.ladder has ${ladder.length} tile${ladder.length === 1 ? "" : "s"} (the rule walks down two or more)`,
+    );
+  }
+  ladder.forEach((geometry, index) => {
+    const path = `gemmGrid.ladder[${index}]`;
+    assertGemmFieldsIn(geometry, where, path, { form: true, decode: false });
+    assertGemmGeometry(geometry, `${where}: ${path}`);
+    if (index === 0) return;
+    const previous = ladder[index - 1];
+    const area = gemmTileM(geometry) * gemmTileN(geometry);
+    const previousArea = gemmTileM(previous) * gemmTileN(previous);
+    if (!(area < previousArea)) {
+      throw new CodegenError(
+        `${where}: gemmGrid.ladder is not in strictly decreasing tile area ([${index - 1}] ${gemmTileM(previous)}x${gemmTileN(previous)} → [${index}] ${gemmTileM(geometry)}x${gemmTileN(geometry)} — the walk would never reach a later tile)`,
+      );
+    }
+  });
+  assertGridCount(rule.keepLargest.minWorkgroups, where, "keepLargest.minWorkgroups");
+  assertGridCount(rule.keepLargest.minK, where, "keepLargest.minK");
+  assertGridCount(rule.minWorkgroups, where, "minWorkgroups");
+  if (!Number.isFinite(rule.maxPadding) || rule.maxPadding < 1) {
+    throw new CodegenError(
+      `${where}: gemmGrid.maxPadding must be a finite number of at least 1 (${String(rule.maxPadding)} — no tile covers less than the output)`,
+    );
+  }
+};
+
+/**
+ * The grid-fill rule read from an unknown value (the shape guard of {@link assertGeometryProfile}):
+ * an object of `ladder` (an array without holes of geometries), `keepLargest` (`minWorkgroups`,
+ * `minK`), `minWorkgroups` and `maxPadding`. Its meaning is {@link assertGemmGridRule}'s job.
+ */
+const gemmGridOf = (value: unknown, where: string): GemmGridRule => {
+  const fields = recordOf(value, where, "gemmGrid");
+  if (!Array.isArray(fields.ladder)) {
+    throw new CodegenError(`${where}: gemmGrid.ladder is not an array`);
+  }
+  const ladder = denseEntriesOf(fields.ladder, where, "gemmGrid.ladder").map((entry, index) =>
+    gemmGeometryOf(entry, where, `gemmGrid.ladder[${index}]`),
+  );
+  const keepLargest = recordOf(fields.keepLargest, where, "gemmGrid.keepLargest");
+  if (typeof fields.maxPadding !== "number") {
+    throw new CodegenError(
+      `${where}: gemmGrid.maxPadding is not a number (${fields.maxPadding === undefined ? "missing" : typeof fields.maxPadding})`,
+    );
+  }
+  return {
+    ladder,
+    keepLargest: {
+      minWorkgroups: assertGridCount(keepLargest.minWorkgroups, where, "keepLargest.minWorkgroups"),
+      minK: assertGridCount(keepLargest.minK, where, "keepLargest.minK"),
+    },
+    minWorkgroups: assertGridCount(fields.minWorkgroups, where, "minWorkgroups"),
+    maxPadding: fields.maxPadding,
+  };
+};
+
 /**
  * The shape of `provenance` (field types, and a shared table's adapter list by
  * {@link sharedAdaptersViolation}). Matching its content is the job of `geometryProfileMismatch` in
@@ -1335,6 +1470,7 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
   if (fields.attentionOnline !== undefined)
     assertAttentionOnlineShape(fields.attentionOnline, where);
   if (fields.linearGemv !== undefined) assertLinearGemvShape(fields.linearGemv, where);
+  if (fields.gemmGrid !== undefined) assertGemmGridRule(gemmGridOf(fields.gemmGrid, where), where);
   if (fields.provenance !== undefined) assertProvenanceShape(fields.provenance, where);
 };
 
@@ -1417,6 +1553,9 @@ export const assertGeometryProfileWithinLimits = (
   const i8a8 = (name: string, geometry: I8a8Geometry): void =>
     check(name, geometry, i8a8WorkgroupStorageBytes(geometry));
   profile.gemmRows.forEach((rule, index) => gemm(`gemmRows[${index}]`, rule.geometry));
+  profile.gemmGrid?.ladder.forEach((geometry, index) =>
+    gemm(`gemmGrid.ladder[${index}]`, geometry),
+  );
   gemm("attention.qk", profile.attention.qk);
   gemm("attention.pv", profile.attention.pv);
   gemm("conv2d.rows64", profile.conv2d.rows64);
@@ -1535,6 +1674,101 @@ export const gemmRowsGeometry = (profile: GeometryProfile, rows: number): GemmGe
   assertU32Params("Geometry selection", { "row count M": rows });
   assertGemmRowsRules(profile.gemmRows, `Geometry profile '${profile.id}'`);
   return ruleFor(profile.gemmRows, rows).geometry;
+};
+
+/** The workgroup count of a tile's dispatch grid on a shape: `ceil(n / tileN) · ceil(m / tileM) · batch`. */
+export const gemmGridWorkgroups = (geometry: GemmGeometry, shape: GemmShape): number =>
+  Math.ceil(shape.n / gemmTileN(geometry)) * Math.ceil(shape.m / gemmTileM(geometry)) * shape.batch;
+
+/**
+ * A tile's padding on a shape: the area its grid covers over the output's,
+ * `(ceil(n / tileN) · tileN · ceil(m / tileM) · tileM) / (m · n)` (1 when the tiles divide the
+ * output).
+ */
+export const gemmGridPadding = (geometry: GemmGeometry, shape: GemmShape): number => {
+  const tileM = gemmTileM(geometry);
+  const tileN = gemmTileN(geometry);
+  return (
+    (Math.ceil(shape.n / tileN) * tileN * Math.ceil(shape.m / tileM) * tileM) / (shape.m * shape.n)
+  );
+};
+
+/**
+ * Whether a tile's padding is within the rule's bound. Compared as products of integers (exact
+ * below 2^53), so a padding of exactly the bound is in whatever the division would round to.
+ */
+const withinPadding = (geometry: GemmGeometry, shape: GemmShape, maxPadding: number): boolean => {
+  const tileM = gemmTileM(geometry);
+  const tileN = gemmTileN(geometry);
+  const covered = Math.ceil(shape.n / tileN) * tileN * Math.ceil(shape.m / tileM) * tileM;
+  return covered <= maxPadding * shape.m * shape.n;
+};
+
+/**
+ * The step of the grid-fill rule's ladder a shape takes (the walk of {@link GemmGridRule}): 0 when
+ * the largest tile is kept, else the first smaller tile whose grid is full enough and whose padding
+ * is within the bound, else the last. Pure; the rule and the shape are checked by the caller
+ * ({@link gemmShapeGeometry}).
+ */
+export const gemmGridStep = (rule: GemmGridRule, shape: GemmShape): number => {
+  const [largest] = rule.ladder;
+  if (
+    shape.k >= rule.keepLargest.minK &&
+    gemmGridWorkgroups(largest, shape) >= rule.keepLargest.minWorkgroups &&
+    withinPadding(largest, shape, rule.maxPadding)
+  ) {
+    return 0;
+  }
+  for (let step = 1; step < rule.ladder.length; step += 1) {
+    const tile = rule.ladder[step];
+    if (
+      gemmGridWorkgroups(tile, shape) >= rule.minWorkgroups &&
+      withinPadding(tile, shape, rule.maxPadding)
+    ) {
+      return step;
+    }
+  }
+  return rule.ladder.length - 1;
+};
+
+/**
+ * Looks up the tile geometry of one GEMM of linear / matmul / bmm from its shape (the three call
+ * sites: the GEMM and the split-K partial of src/runtime/linear-program.ts, `buildMatmul` and
+ * `buildBmm` of src/runtime/recipe-builders/linear.ts). With the profile's grid-fill rule
+ * ({@link GeometryProfile.gemmGrid}) the tile is the ladder's step for the shape
+ * ({@link gemmGridStep}); without it, the `gemmRows` rule of the row count M
+ * ({@link gemmRowsGeometry} — exactly the lookup before the rule existed, so a table without the
+ * field keeps every key and byte of WGSL). bmm's M is the row count of one matrix and its batch
+ * the grid's z axis; linear and matmul have a batch of 1.
+ *
+ * MUST: the derivation phase passes **the return value of this one call** to the key, the WGSL and
+ * the dispatch alike (the same discipline as {@link gemmRowsGeometry}).
+ * SPEC: docs/spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm
+ */
+export const gemmShapeGeometry = (profile: GeometryProfile, shape: GemmShape): GemmGeometry => {
+  const rule = profile.gemmGrid;
+  if (rule === undefined) return gemmRowsGeometry(profile, shape.m);
+  const where = `Geometry profile '${profile.id}'`;
+  assertU32Params("Geometry selection", {
+    "row count M": shape.m,
+    "column count N": shape.n,
+    "reduction length K": shape.k,
+    batch: shape.batch,
+  });
+  for (const [name, value] of [
+    ["M", shape.m],
+    ["N", shape.n],
+    ["K", shape.k],
+    ["batch", shape.batch],
+  ] as const) {
+    if (value < 1) {
+      throw new CodegenError(
+        `Geometry selection: ${name} is ${value} (a GEMM without outputs or terms has no grid to fill)`,
+      );
+    }
+  }
+  assertGemmGridRule(rule, where);
+  return rule.ladder[gemmGridStep(rule, shape)];
 };
 
 /**

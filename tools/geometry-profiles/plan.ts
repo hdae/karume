@@ -1,21 +1,31 @@
 /**
  * The generator's plan of GEMV measurements (`--gemv-plan`): what the GEMV sweep records at hand
- * lack for `deriveLinearGemvChoices` to be complete under the current runtime — per case and row
- * count, the candidates fewer than two records could be evidence for (`planGemvMeasurements` of
- * `@karume/runtime/tune`) — written as a workbench batch (`karume-workbench-batch/1`) whose steps
- * measure exactly that, twice. With no record at hand the batch is the whole measurement (the `full`
- * set, twice). Pure over the records; the command writes the file.
+ * lack for `deriveLinearGemvChoices` to be complete under the current runtime, by the rule the
+ * derivation will take for each decision (`planGemvMeasurements` of `@karume/runtime/tune`). What
+ * records of any class fill — per case and row count, the candidates of decisions of the rule of two
+ * records that fewer than two records could be evidence for — is written as a workbench batch
+ * (`karume-workbench-batch/1`) whose steps measure exactly that, twice. What only a steady record
+ * fills — the candidates of decisions of the rule of one steady record that no steady record could
+ * be evidence for — is listed apart and never a step: a step's record of a few groups has no class,
+ * so it cannot close that gap; a run of the `full` or `explore` set that is steady does. With no
+ * record at hand the batch is the whole measurement (the `full` set, twice). Pure over the records;
+ * the command writes the file.
  *
  * A step is one `gemv-sweep` run of the `full` set narrowed to cases, row counts and candidates
  * that miss the same: the (case, row count) pairs that miss one list of candidates are grouped, and
- * their cases grouped again by the row counts they miss it at. The references (the baseline and the
- * default's choice at `reorder`) are measured with every step by the sweep itself.
+ * their cases grouped again by the row counts they miss it at. A step holds fewer groups (cases × row
+ * counts) than a record needs for a class (`GEMV_STEADY_MIN_GROUPS`), a larger one split by its cases:
+ * a step's record must stay with the rule of two records it was planned for — one that read steady
+ * would move its cases' decisions to the rule of one steady record, which its rows alone do not
+ * complete. The references (the baseline and the default's choice at `reorder`) are measured with
+ * every step by the sweep itself.
  *
  * SPEC: docs/spec/geometry-profiles.md#planning-the-gemv-measurements
  */
 
 import type { GeometryProfile } from "@karume/runtime";
 import {
+  GEMV_STEADY_MIN_GROUPS,
   type GemvMissingMeasurement,
   gemvSweepCases,
   planGemvMeasurements,
@@ -28,8 +38,19 @@ export const BATCH_FORMAT = "karume-workbench-batch/1";
 /** Where the workbench reads untracked batches, repository-relative (its `UNTRACKED_BATCHES_DIRECTORY`). */
 export const UNTRACKED_BATCHES_DIRECTORY = "inputs/workbench/batches";
 
-/** How many times the batch measures what is missing: one record is not evidence. */
+/**
+ * How many times the batch measures what is missing: twice. Every step makes a record of fewer groups
+ * than a class needs ({@link PLAN_STEP_MAX_GROUPS}), and a record without a class is evidence only
+ * beside a second (the rule of two records) — even on a steady device.
+ */
 export const PLAN_PASSES = 2;
+
+/**
+ * The most groups (cases × row counts) a step holds: one fewer than a record needs for a class, so a
+ * step's record never reads steady and moves no decision from the rule of two records it was planned
+ * for to the rule of one steady record.
+ */
+export const PLAN_STEP_MAX_GROUPS = GEMV_STEADY_MIN_GROUPS - 1;
 
 /** One step of the batch: the workbench's `{ id, parameters }`. */
 export type PlanStep = {
@@ -57,7 +78,10 @@ export type PlanBatch = {
 export type GemvPlan = {
   readonly batchId: string;
   readonly batch?: PlanBatch;
+  /** What the batch measures (records of any class fill it). */
   readonly missing: readonly GemvMissingMeasurement[];
+  /** What no batch step fills: a steady record that times the kernels named does. */
+  readonly missingSteady: readonly GemvMissingMeasurement[];
   /** What a person reads: what is missing, what is not current, the steps. */
   readonly lines: readonly string[];
 };
@@ -89,15 +113,21 @@ export const planSteps = (missing: readonly GemvMissingMeasurement[]): PlanStep[
       byRows.set(key, entry);
     }
     for (const entry of byRows.values()) {
-      steps.push({
-        id: "gemv-sweep",
-        parameters: {
-          candidateSet: "full",
-          cases: entry.cases,
-          rows: entry.rows.map(String),
-          candidates: names,
-        },
-      });
+      // A step of more groups is split by its cases, in table order
+      const width = Math.floor(PLAN_STEP_MAX_GROUPS / entry.rows.length);
+      if (width < 1)
+        throw new Error(`A step at ${entry.rows.length} row counts holds too many groups`);
+      for (let start = 0; start < entry.cases.length; start += width) {
+        steps.push({
+          id: "gemv-sweep",
+          parameters: {
+            candidateSet: "full",
+            cases: entry.cases.slice(start, start + width),
+            rows: entry.rows.map(String),
+            candidates: names,
+          },
+        });
+      }
     }
   }
   return steps;
@@ -126,10 +156,11 @@ export const gemvPlan = (input: {
       batch: {
         format: BATCH_FORMAT,
         title: `GEMV sweep for ${profileId}: the whole measurement, twice`,
-        description: `Written by ${command} with no GEMV sweep record at hand: the full set (M = 1, 4 and 8, every candidate), ${PLAN_PASSES} times — the derivation reads groups of two records or more.`,
+        description: `Written by ${command} with no GEMV sweep record at hand: the full set (M = 1, 4 and 8, every candidate), ${PLAN_PASSES} times — one record is enough only when it is steady, two are needed otherwise.`,
         steps,
       },
       missing: [],
+      missingSteady: [],
       lines: ["No GEMV sweep record given: the batch measures everything (the full set), twice."],
     };
   }
@@ -137,33 +168,47 @@ export const gemvPlan = (input: {
     records.map(({ report, path, sha256 }) => ({ report, path, sha256 })),
     input.table === undefined ? {} : { table: input.table },
   );
-  const { missing, stale } = planning;
+  const { missing, missingSteady, stale } = planning;
   const pass = planSteps(missing);
-  const measurements = missing.reduce((sum, { candidates }) => sum + candidates.length, 0);
+  const count = (list: readonly GemvMissingMeasurement[]): number =>
+    list.reduce((sum, { candidates }) => sum + candidates.length, 0);
   const lines = [
-    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (fewer than two records could be evidence for the candidate: a current group with its row, read against a usable reference whose fastest time a second record repeats).`,
+    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${count(missing)} candidate measurements that records of any class fill (decisions of the rule of two records, where no steady record timed the case at M = 1: fewer than two records could be evidence for the candidate — a current group with its row, read against a fastest time of the reference a second record repeats).`,
+    ...(missingSteady.length === 0
+      ? []
+      : [
+          `Only a steady record fills ${count(missingSteady)} candidate measurements in ${missingSteady.length} groups: a steady record timed their case at M = 1, so the rule of one steady record decides them and reads steady records alone, and none times these kernels against a usable reference. No step of the batch fills them (a step's record of a few groups has no class): run the full or the explore set on the device until a run is steady:`,
+          ...missingSteady.map(
+            ({ caseId, m, candidates }) => `  - ${caseId} M=${m}: ${candidates.join(", ")}`,
+          ),
+        ]),
     `Groups of the records that are not current: ${stale.length}.`,
     ...(pass.length === 0
-      ? ["Nothing is missing: the derivation is complete under the current runtime."]
+      ? [
+          missingSteady.length === 0
+            ? "Nothing is missing: the derivation is complete under the current runtime."
+            : "No batch step can fill what is missing: only a steady record does (above).",
+        ]
       : [
-          `Each pass has ${pass.length} step${pass.length === 1 ? "" : "s"} (the batch runs the pass ${PLAN_PASSES} times):`,
+          `Each pass has ${pass.length} step${pass.length === 1 ? "" : "s"} (the batch runs the pass ${PLAN_PASSES} times), each of at most ${PLAN_STEP_MAX_GROUPS} groups (cases × row counts), one fewer than a record needs for a class: a step's record must stay with the rule of two records it was planned for, so a larger step is split by its cases:`,
           ...pass.map(
             ({ parameters }, index) =>
               `  ${index + 1}. ${parameters.cases?.length ?? 0} cases at M=${parameters.rows?.join(", ") ?? "?"}: ${parameters.candidates?.length ?? 0} candidates (${parameters.candidates?.join(", ") ?? ""})`,
           ),
         ]),
   ];
-  if (pass.length === 0) return { batchId, missing, lines };
+  if (pass.length === 0) return { batchId, missing, missingSteady, lines };
   const steps = Array.from({ length: PLAN_PASSES }, () => pass).flat();
   return {
     batchId,
     batch: {
       format: BATCH_FORMAT,
       title: `GEMV sweep for ${profileId}: what the derivation lacks, twice`,
-      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates fewer than two of those records could be evidence for; each step measures them with the references, and the steps run ${PLAN_PASSES} times.`,
+      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates of decisions of the rule of two records that fewer than two of those records could be evidence for; each step measures them with the references, and the steps run ${PLAN_PASSES} times. A step holds at most ${PLAN_STEP_MAX_GROUPS} groups (cases × row counts), one fewer than a record needs for a class, so its record stays with the rule of two records it was planned for. What only a steady record fills is not in the batch.`,
       steps,
     },
     missing,
+    missingSteady,
     lines,
   };
 };

@@ -6,6 +6,7 @@
  * {@link RunHost}.
  */
 
+import type { GemvSweepSession } from "@karume/runtime/tune";
 import type { ParameterValues } from "@karume/sweep-app-support/parameters";
 import {
   type Checkout,
@@ -48,6 +49,8 @@ export type RunHost<Saved> = {
   /** The record's environment, read from an adapter the host requests itself. */
   readonly readEnvironment: () => Promise<RecordEnvironment>;
   readonly readCheckout: () => Promise<Checkout>;
+  /** The page load's or process's session, which a sweep's record names (absent: none). */
+  readonly session?: GemvSweepSession;
   readonly gpuOptions: GpuOptions;
   readonly openDistribution: OpenDistribution;
   readonly openInput: OpenInput;
@@ -83,6 +86,7 @@ export const runEntry = async <Saved>(
     context: {
       parameters: run.parameters,
       gpuOptions: host.gpuOptions,
+      ...(host.session === undefined ? {} : { session: host.session }),
       signal: run.signal,
       progress: run.progress,
       openDistribution: host.openDistribution,

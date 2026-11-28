@@ -25,6 +25,7 @@ import {
   type SweepSet,
 } from "./geometries.ts";
 import { familiesOf } from "./families.ts";
+import { GRID_SET } from "./gemm-grid.ts";
 import {
   candidateSetCaseSetIds,
   candidateSetDefaultKernelsIds,
@@ -112,7 +113,10 @@ export type GeometrySweepOptions = {
    * class, the first case of a class with every candidate, and a candidate that a case of the class
    * screened out, failed, found not identical to the default or timed slower than the default is not
    * measured in the later cases of the class (a skipped row each). `settings.cases` of its record
-   * lists the cases in that measuring order.
+   * lists the cases in that measuring order. The `grid` set (gemm-grid.ts) times the grid-fill
+   * rule's ladder on its own case table (`geometrySweepCases("grid")`) in interleaved palindrome
+   * rounds, with no quick look and no re-measurement of the default (harness.ts's `sweepGridCase`);
+   * its records are read for that rule's integers alone, never for a table's fields.
    */
   readonly candidateSet?: SweepSet;
   /** The op families to sweep (default: all families). */
@@ -156,6 +160,7 @@ export type GeometrySweepOptions = {
    * candidates whose quick time is at most this many times the default's are timed in full; the
    * others are rows with their quick time and `screened: true`, which no derivation reads as
    * evidence. 0 turns the quick look off (every geometry is timed); any other value below 1 throws.
+   * The `grid` set takes no quick look (its record states 0): any other value than 0 throws there.
    */
   readonly quickLookMargin?: number;
   /**
@@ -271,7 +276,17 @@ export const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
-  const quickLookMargin = quickLookMarginOf(options.quickLookMargin);
+  if (
+    candidateSet === GRID_SET &&
+    options.quickLookMargin !== undefined &&
+    options.quickLookMargin !== 0
+  ) {
+    throw new Error(
+      `The grid set times every ladder tile in interleaved rounds and takes no quick look: leave quickLookMargin unset or 0 (${options.quickLookMargin})`,
+    );
+  }
+  const quickLookMargin =
+    candidateSet === GRID_SET ? 0 : quickLookMarginOf(options.quickLookMargin);
   const chosen = table.filter(
     (sweepCase) =>
       ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),

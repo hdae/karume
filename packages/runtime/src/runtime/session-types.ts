@@ -281,10 +281,11 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
  * split-K GEMM (src/kernels/linear-splitk.ts) take the linears it is eligible for.
  *
  * The kernel is a `reorder` strategy (ADR 0152 decision 2): only the order of the additions differs
- * from the reference kernel. A preset cannot declare `reorder` yet, and a public option naming one
- * kernel is what that declaration replaces, so until then the strategy is admitted only here — by the
- * kernel's own tests and by measurements. The memory estimate does not read this option: it counts
- * such a linear as a plain one and misses the temporary of the partial sums.
+ * from the reference kernel. The level `reorder` does not select it: its gain depends on how full the
+ * reference GEMM's grid is on the adapter, and no adapter has a measurement that would let a level
+ * choose it, so the strategy is admitted only here — by the kernel's own tests and by measurements
+ * (SPEC: docs/spec/numerics.md#strategies-admitted-only-by-a-private-key). The memory estimate
+ * takes the same key (`EstimateOptions`) and counts the partial sums of a linear that takes it.
  */
 export const LINEAR_SPLIT_K: unique symbol = Symbol("karume.linearSplitK");
 

@@ -10,8 +10,9 @@
  *    measured with every candidate;
  * 2. every other case measures, at M = 1, the references, the winners of its nearest sentinel of
  *    the same storage ({@link gemvExploreSelection}: of the sequential variants and of the plain or
- *    staged parallel rows, the fastest and every other one the derivation could adopt there, whose
- *    checks held) and their neighbours on the candidate grid; a case for which no sentinel of its
+ *    staged parallel rows, the fastest and every other one the derivation could adopt there at the
+ *    lowest margin its output is re-decided under, whose checks held) and their neighbours on the
+ *    candidate grid; a case for which no sentinel of its
  *    storage has winners measures every candidate. A neighbour is what finds the winner when the
  *    prediction is one step off; without them the prediction alone loses it on most shapes of a
  *    device whose winners vary.
@@ -28,7 +29,6 @@
 import {
   GEMV_COLS,
   GEMV_LANES,
-  GEMV_MIN_SPEEDUP,
   GEMV_UNROLLS,
   type GemvCandidateClass,
   gemvParallelName,
@@ -36,13 +36,16 @@ import {
   gemvSequentialName,
 } from "./gemv-candidates.ts";
 import { GEMV_CASES, type GemvCase, type GemvSweepStorage } from "./gemv-cases.ts";
+import { GEMV_LOWEST_MARGIN } from "./gemv-rule.ts";
 
 /**
  * How many cases of a table are sentinels. Replayed on the GEMV sweep records of two devices
  * (2026-11-19, two runs each, the derivation's decisions against those of the full records): 6, 8,
  * 12 and 16 sentinels leave 18, 14, 8 and 5 of 214 decisions different on the Apple M2 and 1, 0, 0
  * and 0 of 116 on the RTX 5070 Ti. Twelve is where the M2's count stops falling fast; each sentinel
- * costs the whole grid of one case.
+ * costs the whole grid of one case. NOTE: that replay ran under the rule of two records and the
+ * prediction at ×1.10 of its time; it has not been run again under the rule of one steady record and
+ * the prediction at {@link GEMV_LOWEST_MARGIN}, which measures more of each case, not less.
  */
 export const GEMV_SENTINEL_COUNT = 12;
 
@@ -229,9 +232,15 @@ const heldRows = (
 /**
  * The candidates of one grid a sentinel predicts, fastest first (none when it has no row of the grid
  * whose check held): its fastest row of the grid, and every other one the derivation could adopt in
- * this group — at least {@link GEMV_MIN_SPEEDUP} faster than the class's reference there, the
- * default's choice at `level` at M = 1 (`exact` for the sequential variants, the baseline;
- * `reorder` for the plain and staged rows), only the fastest when that reference has no time. Rows
+ * this group — at least gemv-rule.ts's {@link GEMV_LOWEST_MARGIN} (×1.03) faster than the class's
+ * reference there, the default's choice at `level` at M = 1 (`exact` for the sequential variants,
+ * the baseline; `reorder` for the plain and staged rows), only the fastest when that reference has
+ * no time. The lowest margin an output may be re-decided under, not the default ×1.065: a gap is at
+ * least 1, so a row the rule of one steady record adopts at any margin of at least ×1.03 is at least
+ * ×1.03 faster than the reference in its group, and the prediction keeps every such row of the
+ * sentinel — so that one steady explore record holds what a re-decision at ×1.03 reads as well as
+ * what ×1.065 reads. (The prediction was ×1.10, the rule of two records' threshold, until
+ * 2026-11-28.) Rows
  * a few percent apart are equally the sentinel's winners as far as its one group tells, and the
  * case's own winner may lie next to any of them on the grid: on an RTX 3080 Ti (the two `full`
  * records of 2026-11-26/27) staged-l32 led staged-l16 by 1 to 2 % at the nearest i4 sentinel, and
@@ -257,7 +266,7 @@ const gridWinners = (
   return [
     first.candidate,
     ...others
-      .filter((row) => time / row.perDispatch >= GEMV_MIN_SPEEDUP)
+      .filter((row) => time / row.perDispatch >= GEMV_LOWEST_MARGIN)
       .map(({ candidate }) => candidate),
   ];
 };
@@ -290,10 +299,11 @@ const predicted = (
  * The candidates a case that is no sentinel measures at M = 1, by name (the sweep measures the
  * references whatever the list holds): the fastest sequential variant of the nearest sentinel of the
  * case's storage that has one, with every other sequential variant of that sentinel at least
- * {@link GEMV_MIN_SPEEDUP} faster than the default's choice at `exact` (the baseline) there; the
+ * {@link GEMV_LOWEST_MARGIN} faster than the default's choice at `exact` (the baseline) there; the
  * fastest plain or staged parallel row of the nearest sentinel of that storage that has one, with
- * every other plain or staged row of that sentinel at least {@link GEMV_MIN_SPEEDUP} faster than the
- * default's choice at `reorder` there (both {@link gridWinners}); and the grid neighbours of each. A
+ * every other plain or staged row of that sentinel at least {@link GEMV_LOWEST_MARGIN} faster than
+ * the default's choice at `reorder` there (both {@link gridWinners}); and the grid neighbours of
+ * each. The device table's choices are measured besides, as references. A
  * subgroup row does not predict (a table holds no such row), and neither does a sentinel of another
  * storage.
  *

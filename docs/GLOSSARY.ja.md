@@ -284,6 +284,10 @@
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | adapter ごとに選ぶ静的な表。GEMM の幾何（op × 行数バケット）と linear の GEMV の選択（`linearGemv`: 逐次 GEMV の変種と形状ごとの例外・行ブロックのスレッド数の目標・並列 GEMV の行）を持つ。どの表にも合わない adapter は既定プロファイル | — | ADR 0115・spec/geometry-profiles.md |
+| grid-fill rule (`gemmGrid`) △ | グリッド充填の規則 | linear・matmul・bmm の GEMM のタイルを、行数だけでなくディスパッチのグリッドの workgroup 数から選ぶ、プロファイルの任意の欄。大きい順のタイルのラダーを上から見て、グリッドが十分に埋まる最初のタイルを取る。この欄を持つ表では行数バケットの代わりになり、持たない表（既定プロファイルと今の組み込みの表すべて）は従来どおり | — | ADR 0157・spec/geometry-profiles.md |
+| grid set (geometry sweep) △ | grid の候補集合（幾何の掃引） | グリッド充填の規則のラダーの 5 タイルだけを、専用の 33 ケース（各モデルの linear・bmm）で交互の往復ラウンドで測る集合。予備計測も既定の測り直しもしない。記録はタイルの幾何の導出には入らない | — | spec/workbench.md |
+| grid-fill derivation (`deriveGemmGrid`) △ | グリッド充填の規則の導出 | その機の grid 記録から、表のグリッド充填の規則の 2 つの整数を決めること。固定の候補の組のうち、どのケースでも出力が既定と同じで、今の表のタイルより（2 行の gap と margin を見込んで）遅くなく、全体の重み付きの GEMM 時間が ×1.05 以上速いものから、いちばん速い組を採る。無ければ欄を持たない | — | spec/geometry-profiles.md |
+| ladder (grid-fill rule) △ | ラダー | グリッド充填の規則が上から順に見るタイルの並び（大きい順）。今は 128×128・64×64・64×32・32×32・16×16 の 5 つ | — | ADR 0157 |
 | measured / predicted / default (geometry profile levels) △ | 実測 / 予測 / 既定（プロファイルの段階） | adapter が走らせる表の 3 段階。実測 = adapter の description で合う、その機の記録から導いた表。予測 = vendor と architecture だけで合う表（同じ architecture のほかの機で測った幾何を走らせる）。既定 = どの表にも合わず既定プロファイル。Chrome はフラグなしでは description を返さないので、ブラウザの利用者は予測か既定になる | — | spec/geometry-profiles.md・ADR 0156 |
 | shared table (shared derivation) △ | 共有の表（共有の導出） | 同じ vendor と architecture の 2 台以上の掃引記録から導く予測の表。機ごとに 1 つの adapter として読み、どの機でもその機の既定に対して採用の規則を満たす幾何だけを採る。機をまたいで時間を比べたりまとめたりしない。タイルの幾何だけを持つ（`apple-metal-3-shared`） | — | spec/geometry-profiles.md・ADR 0156 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
@@ -301,8 +305,15 @@
 | skipped (geometry sweep row) △ | 測らなかった行（幾何の掃引） | 探索用の候補集合が、同じ区分の前のケースで外れた候補をそのケースで測らずに残した行。幾何の名前だけを持ち、採用の根拠にならない | — | spec/workbench.md |
 | benchmark app △ | ベンチマークのページ | 外部の協力者が自分の GPU で 2 つの掃引の探索用の集合を走らせ、進み具合・残り時間・見つかった改善の候補を見て、結果を 1 つのファイルで送り返すための private のブラウザアプリ（`apps/benchmark`） | — | spec/benchmark.md |
 | benchmark file (`karume-benchmark/1`) △ | ベンチマークの結果ファイル | ベンチマークの 1 回の実行が残す JSON。workbench が書くのと同じ記録に、実行の時刻・最後まで走ったか（止まった理由）・URL の試行の指定・ページが隠れていたかを添えたもの。`unpack.ts` が workbench の置き場所に記録を書き戻す | — | spec/benchmark.md |
-| optimisable pattern (benchmark) △ | 改善の候補（ベンチマークの） | ベンチマークのページが数える「見つかったもの」。導出と同じ閾値・判定・除外で読む: GEMV は M = 1 のグループで表が持てる候補が既定の選択より ×1.10 以上速く、チェックが通ったもの。幾何は区分のどのケースでも既定より ×1.05 以上速く、出力が既定と同じで、そのケースが比の材料から外れていないもの。1 回の実行での候補で、表に入るのは 2 回目の実行が一致してから | — | spec/benchmark.md |
-| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る。利得は基準の再現された最速の時間に対して読む） | — | spec/geometry-profiles.md |
+| optimisable pattern (benchmark) △ | 改善の候補（ベンチマークの） | ベンチマークのページが数える「見つかったもの」。導出と同じ規則・判定・除外で読む: GEMV は M = 1 のグループで表が持てる候補が、同じグループの既定の選択に対して安定な記録 1 本の規則を満たし、チェックが通ったもの（余裕 ×1.065 と ×1.03 で並べて数え、実行の分類を添える）。幾何は区分のどのケースでも既定より ×1.05 以上速く、出力が既定と同じで、そのケースが比の材料から外れていないもの。実行が安定なら GEMV の分は 1 回で表に入れられ、そうでなければ 2 回目の実行が一致してから | — | spec/benchmark.md |
+| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること。安定な記録が測った形状は「安定な記録 1 本の規則」、それ以外は「記録 2 本の規則」で決める（下の行） | — | spec/geometry-profiles.md |
+| steady record (GEMV sweep) △ | 安定な記録 | ベースラインのばらつき（`baselineSpread`）を持つグループが 20 以上あり、そのうち ×1.05 を超えるものが 20 % 以下の掃引記録。超えるものが多ければ不安定、20 未満なら分類なし（不安定として読む） | 安定記録・定常記録 | glossary.md |
+| gap (GEMV sweep row) △ | ギャップ（ラウンドの） | 行のラウンドの 2 番目に小さい値 ÷ 最小値。最小が偶然の 1 回でないかの目安。採用のバーは 余裕 × 候補のギャップ × 基準のギャップ | 隙間・差分 | glossary.md |
+| margin (GEMV derivation) △ | 余裕（採用の） | 安定な記録 1 本の規則で、利得が 2 つのギャップに掛けて越えなければならない倍率。既定 ×1.065、導出の引数。出力を決め直す下限は ×1.03 | マージン・閾値 | glossary.md |
+| break-even margin (GEMV derivation) △ | 採用できる最大の余裕 | 読みの 利得 ÷（ギャップ × 基準のギャップ）。その余裕までならその利得は採用のバーを越える。出力が候補ごとに持つので、別の余裕を測り直さずに当てられる | 損益分岐点 | glossary.md |
+| rule of one steady record / rule of two records △ | 安定な記録 1 本の規則 / 記録 2 本の規則 | GEMV の導出の 2 つの採用規則。前者は安定な記録の同じグループの基準に対して 余裕 × ギャップ × ギャップ を越え、表の選択はそのバーで負けるまで残す（2026-11-28）。後者は 2 本以上の記録のすべてで、基準の再現された最速時間に対して ×1.10（2026-11-17） | 1 記録規則・2 記録規則 | glossary.md |
+| re-timed reference (GEMV sweep) △ | 基準の測り直し | ラウンドの後に、グループの基準（ベースライン・既定の reorder の選択・機種の表の選択）をもう 1 回だけ測ること（`retimedPerDispatch`）。ラウンドの最小からバーを越えてずれたグループは、その読みの根拠にならない | 再計測・リタイム | glossary.md |
+| sweep session (GEMV sweep record) △ | 掃引のセッション | ページの読み込み・プロセスの起動ごとに 1 つ作る乱数の id とその起点。記録に id と起点からの時間を書くので、同じセッションの 2 本と別のセッションの 2 本を見分けられる | — | glossary.md |
 | steadiness bound (GEMV sweep) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えた M = 1 のグループは、掃引が M = 4 / 8 で測らない候補を決める根拠にしない。導出はこの値を読まない | — | glossary.md |
 | reference (GEMV derivation) △ | 基準（のカーネル） | 候補の利得を読む相手。今の既定プロファイルがその形状・行数で走らせるカーネル（出力の語が同じ種類の候補は `exact` の選択、加算順が違う種類の候補は `reorder` の選択）。記録がどの既定の下で作られたかは問わず、その記録が計時していれば使う | 参照（sha256 の参照値と混ぜない） | spec/geometry-profiles.md |
 | repeated reference time (GEMV derivation) △ | 再現された最速の時間 | 基準のカーネルの、与えた記録全体での最速の時間。別の記録が ×1.10 以内の時間を持つときだけ使う。無ければその形状・行数は根拠にならない | — | spec/geometry-profiles.md |

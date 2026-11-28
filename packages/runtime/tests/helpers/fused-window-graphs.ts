@@ -5,14 +5,15 @@
  * slot table of a real Session). The ten built-in rules (adaLN in both of its forms, rmsNormRope also
  * in the Wan form whose window defers k's nodes), two external rules (the single-dispatch
  * `test/gelu_mul` and `test/gelu_mul_staged`, which stages the gelu value in a step temporary; the
- * staged one also after a dead region, and the single-dispatch one also binding an intermediate), and
- * the i8a8 linear with and without a folded producer.
+ * staged one also after a dead region, and the single-dispatch one also binding an intermediate), the
+ * i8a8 linear with and without a folded producer, and the split-K linear (the private
+ * `LINEAR_SPLIT_K`) with its partial sums.
  *
  * The expected numbers stay in the tests (moving hand-derived constants here would make the checks
  * tautological — the rule of estimate-graphs.ts).
  */
 
-import type { SessionOptions } from "../../src/runtime/executor.ts";
+import { LINEAR_SPLIT_K, type SessionOptions } from "../../src/runtime/executor.ts";
 import {
   defineRule,
   type FusionMatch,
@@ -747,5 +748,33 @@ export const a8LinearAfterDeadRegion = (): FusedWindowCase => {
     name: "a8 linear after a dead region",
     graph,
     inputs: inputsOf(graph),
+  };
+};
+
+/**
+ * `linear(x, w, b)` with `x [4, 512]` and `w [16, 512]` stored as f32 under the private key
+ * `LINEAR_SPLIT_K` — the split-K GEMM at 2 slices: the partial pass and the combine, with one node
+ * temporary, the partial sums `[2, 4, 16]`.
+ */
+export const splitKLinearCase = (): FusedWindowCase => {
+  const [rows, k, n] = [4, 512, 16];
+  const graph = declaration({
+    inputs: [{ name: "x", ...f32([rows, k]) }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: { w: f32([n, k]), b: f32([n]), y: f32([rows, n]) },
+    nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+  });
+  return {
+    name: "split-K linear",
+    counter: "linearPrologue",
+    windows: 0,
+    graph,
+    tensors: [
+      weight("b", f32Bytes(new Array(n).fill(0.5))),
+      weight("w", f32Bytes(fill([n, k], (i) => Math.sin(i * 0.61)).data)),
+    ],
+    inputs: inputsOf(graph),
+    options: { [LINEAR_SPLIT_K]: true },
   };
 };

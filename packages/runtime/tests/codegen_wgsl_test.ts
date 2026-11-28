@@ -235,6 +235,12 @@ import {
 import { RMS_NORM_ROPE_WGSL } from "../src/kernels/rms-norm-rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
+  linearSplitKCombineKey,
+  linearSplitKCombineWgsl,
+  linearSplitKGemmKey,
+  linearSplitKGemmWgsl,
+} from "../src/kernels/linear-splitk.ts";
+import {
   defaultLinearGemvVariant,
   linearGemvKey,
   linearGemvParallelPackedWgsl,
@@ -663,6 +669,23 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // (the 2 above)**: the worst accident is adding a bucket moving the default's bytes. The 3 ops
     // share the skeleton, so linear alone is enough as the representative.
     ["linear_m16_v4.wgsl", linearWgsl("f32", true, "f32", 4)],
+    // The split-K partial is the linear GEMM with `splitSlices` (src/kernels/linear-splitk.ts):
+    // placed as a pair with the plain linear above, whose bytes adding it must not move. The combine
+    // pass is the second dispatch of the same program.
+    ["linear_splitk_gemm_s4.wgsl", linearSplitKGemmWgsl("f32", false, 4)],
+    ["linear_splitk_gemm_s4_v4.wgsl", linearSplitKGemmWgsl("f32", true, 4)],
+    // Two storages whose decode the split shares with the plain kernel: bf16 (a bitcast) and i4 at
+    // its default group (the per-quad group scale of the fill).
+    ["linear_splitk_gemm_wbf16_s4_v4.wgsl", linearSplitKGemmWgsl("bf16", true, 4)],
+    ["linear_splitk_gemm_wi4_g32_s4_v4.wgsl", linearSplitKGemmWgsl("i4", true, 4, undefined, 32)],
+    // The other storages' vec4 decode: f16 (unpack2x16float), i8 (a per-channel scale) and i2 (an
+    // offset code); and one scalar fill of a non-f32 storage (i8), whose decode differs from the
+    // vec4 one.
+    ["linear_splitk_gemm_wf16_s4_v4.wgsl", linearSplitKGemmWgsl("f16", true, 4)],
+    ["linear_splitk_gemm_wi8_s4_v4.wgsl", linearSplitKGemmWgsl("i8", true, 4)],
+    ["linear_splitk_gemm_wi2_s4_v4.wgsl", linearSplitKGemmWgsl("i2", true, 4)],
+    ["linear_splitk_gemm_wi8_s4.wgsl", linearSplitKGemmWgsl("i8", false, 4)],
+    ["linear_splitk_combine.wgsl", linearSplitKCombineWgsl()],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
     // adaLN fusion (the 4th of ADR 0040). The condition is **placing it as a pair with the plain
     // layer_norm**: they share the row-statistics and affine text, so the worst accident is only
@@ -1688,6 +1711,18 @@ test("pipeline keys are unique per generator input (no two kernels map to the sa
     ADALN_NORM_TOKEN_KEY,
     ADALN_MODULATION_PACK_KEY,
     GATED_RESIDUAL_KEY,
+    // The split-K partial bakes its slice count into the WGSL, so each count (one slice included)
+    // is its own key, apart from the plain linear GEMM of the same geometry; the combine is one key.
+    ...[false, true].flatMap((v4) =>
+      [1, 2, 4, 8, 16].flatMap((slices) => [
+        ...[...WEIGHT_STORAGES, "i2" as const].map((weight) =>
+          linearSplitKGemmKey(weight, v4, slices),
+        ),
+        linearSplitKGemmKey("i4", v4, slices, undefined, 32),
+        linearSplitKGemmKey("i4", v4, slices, undefined, 128),
+      ]),
+    ),
+    linearSplitKCombineKey(),
   ];
   for (const [op, dtype] of elementwiseDtypes()) {
     for (const rank of [1, 2, 3, 4]) {

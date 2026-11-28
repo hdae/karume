@@ -367,7 +367,7 @@ export const GEMM_ROWS_BUCKETS: readonly {
  * §4).
  *
  * NOTE: this is **the table of the default profile**. A Session's matmul / bmm / linear read the
- * per-adapter profile (`gemmRowsGeometry` in src/kernels/geometry-profile.ts), and the default
+ * per-adapter profile (`gemmShapeGeometry` in src/kernels/geometry-profile.ts), and the default
  * profile holds this table ({@link GEMM_ROWS_BUCKETS}) as is. The selection is "a static table of
  * shape × adapter", and the ban on run-time autotuning is unchanged (DECIDED: ADR 0115).
  */

@@ -9,6 +9,7 @@
  */
 
 import "./style.css";
+import { gemvSweepSession } from "@karume/runtime/tune";
 import { errorText } from "@karume/sweep-app-support/record";
 
 import { type BatchFile, type ListedBatch, listBatches } from "./batch.ts";
@@ -95,6 +96,8 @@ const start = async (): Promise<void> => {
   );
   const buttons = [...entryButtons.values(), ...batchButtons.values()];
   const lock = createRunLock(buttons);
+  // The page load's session: every sweep record of this page names it
+  const session = gemvSweepSession();
   const nav = element("nav", {}, [
     element(
       "ul",
@@ -128,11 +131,11 @@ const start = async (): Promise<void> => {
   };
   const selectEntry = (entry: Entry, given: Readonly<Record<string, string>>): void =>
     show(entryButtons.get(entry), (selected, gpu) =>
-      entryPanel({ entry, given, lock, backend, gpuProblem: gpu, selection: selected }),
+      entryPanel({ entry, given, lock, backend, session, gpuProblem: gpu, selection: selected }),
     );
   const selectBatch = (batch: ListedBatch): void =>
     show(batchButtons.get(batch), (selected, gpu) =>
-      batchPanel({ batch, lock, backend, gpuProblem: gpu, selection: selected }),
+      batchPanel({ batch, lock, backend, session, gpuProblem: gpu, selection: selected }),
     );
   for (const [entry, button] of entryButtons) {
     button.addEventListener("click", () => selectEntry(entry, {}));

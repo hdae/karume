@@ -24,11 +24,23 @@ import type { CaseKind, SweepId } from "./plan.ts";
  * sweep records of an RTX 5070 Ti under Chrome of 2026-11-18 time at 58 s per such case; the explore
  * set takes an estimated 58 % less time in the cases (2,134 of 5,082 s), which leaves 19 s per later
  * case. The RTX 3080 Ti's explore run of the `i8a8-conv3d` cases (2026-11-26) took 65 s for the first
- * case and 14 to 23 s for each later one.
+ * case and 14 to 23 s for each later one. The GEMV priors were 27 and 15 s (27.4 and 15.4 before
+ * rounding). Since 2026-11-28 each group re-times its references once more after the rounds (about
+ * 6 to 7 % more passes than the rounds take on the explore records of 2026-11-27 on a device without
+ * a table, 8.5 to 8.9 % on one with an embedded table, whose choices are re-timed too) and M = 1
+ * carries candidates down to ×1.03 (1.4 to 3.9 % more timed rows there) — about 4 % more of a GEMV
+ * case, 28.5 and 16.0 s; and the explore set predicts every sentinel row ×1.03 faster than the
+ * default's choice, not ×1.10, which adds 0.6 to 7.5 % to the other cases' timed passes on the four
+ * devices' records (2.8 % on average), while a device's embedded table adds 1.3 to 4.8 % to the whole
+ * set's (its choices timed and re-timed besides). Each kind's prior takes the mean increase of its own
+ * timed passes over the four devices with and without their table
+ * (outputs/misc/gemv-rule-2026-11-28/fix/explore-plan.txt): ×1.002 for a sentinel, which the table
+ * alone moves (the margin leaves the sentinels as they were), and ×1.044 for another case — 28.6 and
+ * 16.7 s, 29 and 17 s.
  */
 export const PRIOR_SECONDS: Readonly<Record<CaseKind, number>> = {
-  sentinel: 27,
-  other: 15,
+  sentinel: 29,
+  other: 17,
   "first-of-class": 58,
   later: 19,
 };

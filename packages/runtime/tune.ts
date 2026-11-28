@@ -283,8 +283,47 @@ export type {
   GemvSweepPhase,
   GemvSweepPlannedRowCount,
   GemvSweepProgress,
+  GemvSweepSession,
   GemvSweepStep,
 } from "./src/tune/gemv-sweep.ts";
+/**
+ * A sweep's session ({@link gemvSweepSession}): a random id and its start, made once per page load or
+ * process by the app and handed to every sweep (`GemvSweepOptions.session`), so a record says which
+ * session it was taken in.
+ */
+export { gemvSweepSession } from "./src/tune/gemv-sweep.ts";
+/**
+ * The numbers of the GEMV derivation's rule of one steady record and its pure pieces: the default
+ * margin ({@link GEMV_MARGIN}, ×1.065) and the lowest one a derivation is meant to be re-decided at
+ * ({@link GEMV_LOWEST_MARGIN}, ×1.03); a record's class ({@link gemvSteadiness} — steady with at least
+ * {@link GEMV_STEADY_MIN_GROUPS} groups that have a baseline spread, at most
+ * {@link GEMV_STEADY_MAX_SHARE} of them beyond {@link GEMV_STEADY_GROUP_SPREAD}); the shortest pass
+ * that is evidence ({@link GEMV_MIN_PASS_MS}); a row's gap ({@link gemvRoundsGap}: its second-smallest
+ * round ÷ its smallest) and a gain's break-even margin ({@link gemvBreakEven}: gain ÷ the two gaps);
+ * the margin a derivation takes ({@link gemvMarginOf}: the default, or a finite number of at least
+ * 1 — it throws otherwise); how the derivation reads a record by its class and timing
+ * ({@link gemvRecordReading}, with {@link gemvTimingRefusal}), which a reader of one record shares so
+ * it never says more of a record than the derivation will take.
+ */
+export {
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
+  GEMV_MIN_PASS_MS,
+  GEMV_STEADY_GROUP_SPREAD,
+  GEMV_STEADY_MAX_SHARE,
+  GEMV_STEADY_MIN_GROUPS,
+  gemvBreakEven,
+  gemvMarginOf,
+  gemvRecordReading,
+  gemvRoundsGap,
+  gemvSteadiness,
+  gemvTimingRefusal,
+} from "./src/tune/gemv-rule.ts";
+export type {
+  GemvRecordTiming,
+  GemvSteadiness,
+  GemvSteadinessClass,
+} from "./src/tune/gemv-rule.ts";
 /**
  * The `explore` set's exploration: the sentinels of a case table (measured with every candidate,
  * first), the candidates another case measures at M = 1 (the winners of its nearest sentinels of
@@ -332,10 +371,14 @@ export type {
  * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from GEMV sweep
  * records of its adapter, group by group: per shape and class a decision (adopted or kept, the gains
  * per group that is evidence, why it was kept), the groups whose case is not the current runtime's,
- * the lines that state them, and the records used with how much of each is current and how many of
- * its current groups have no usable reference at `exact` and at `reorder`. The field is absent
- * from the result when every choice stays the default's. A record of another format or adapter, a
- * wall-clock or quantized one, the same record twice and no record at all are refused.
+ * the lines that state them, and the records used with how much of each is current, how many of
+ * its current groups have no usable reference at `exact` and at `reorder`, and its class. A shape a
+ * steady record measured is decided by the rule of one steady record (a gain over margin × the two
+ * gaps, `DeriveLinearGemvOptions.margin`, ×1.065 by default; the table's choice kept unless beaten),
+ * whose decisions carry their evidence so that {@link redecideLinearGemvChoices} decides them again
+ * under another margin from the output alone; any other shape by the rule of two records. The field
+ * is absent from the result when every choice is the default's. A record of another format or
+ * adapter, a wall-clock or quantized one, the same record twice and no record at all are refused.
  *
  * {@link planGemvMeasurements} reads the same records and says, per case and row count of the
  * `full` set, the candidates the derivation reads there that fewer than two records could be
@@ -350,19 +393,44 @@ export type {
  * {@link gemvClassReference} (the kernel a class is read against at a case and row count: the
  * current default profile's choice at `exact` or at `reorder`, whatever a record's summary names),
  * {@link gemvReferenceRefusal} (why a group's row of that kernel is no reference, from the row
- * alone) and {@link gemvRowReading} (how a row reads against the reference's time: evidence with its
- * gain, ruled out by a failure or a failed check, or no evidence). The derivation also reads whether
- * a row is of the current runtime (its kernel fingerprint against the table it derives for) and
- * takes a reference's time only when a second record repeats it; neither is read by these.
+ * alone), {@link gemvRowReading} (how a row reads against the reference's time: evidence with its
+ * gain, ruled out by a failure or a failed check, or no evidence) and {@link gemvSteadyReading} (how
+ * the rule of one steady record reads a row against the reference's row of the same group: gain,
+ * both gaps, re-timing and break-even margin). The derivation also reads whether a row is of the
+ * current runtime (its kernel fingerprint against the table it derives for), and under the rule of
+ * two records takes a reference's time only when a second record repeats it; neither is read by
+ * these.
  */
 export {
   deriveLinearGemvChoices,
   gemvClassReference,
   gemvReferenceRefusal,
   gemvRowReading,
+  gemvSteadyReading,
   gemvTableCandidate,
   planGemvMeasurements,
+  redecideLinearGemvChoices,
 } from "./src/tune/gemv-derive.ts";
+/**
+ * The rule of one steady record on the evidence a decision carries ({@link decideOneRecord}, what
+ * the derivation and a re-decision call), with its readings' tests: whether a reading is evidence at
+ * a margin (its reference's re-timing within the bar) and why a row block does not replace its
+ * reference row's.
+ */
+export {
+  decideOneRecord,
+  gemvReadingIsEvidence,
+  gemvRowBlockRefusal,
+} from "./src/tune/gemv-one-record.ts";
+export type {
+  GemvCandidateEvidence,
+  GemvKeptRow,
+  GemvOneRecordEvidence,
+  GemvOneRecordOutcome,
+  GemvPairReading,
+  GemvRowBlockOption,
+  GemvRowCountEvidence,
+} from "./src/tune/gemv-one-record.ts";
 export { GEMV_MIN_SPEEDUP, gemvGroupRole } from "./src/tune/gemv-candidates.ts";
 export type { GemvGroupRole } from "./src/tune/gemv-candidates.ts";
 export type {
@@ -372,11 +440,14 @@ export type {
   GemvReferenceRefusal,
   GemvRowReading,
   GemvSweepInput,
+  LinearGemvChangedDecision,
   LinearGemvDecision,
   LinearGemvDerivation,
   LinearGemvGain,
   LinearGemvRecordGroups,
+  LinearGemvRedecision,
   LinearGemvRowGain,
+  LinearGemvRule,
   LinearGemvStaleGroup,
   PlanGemvMeasurementsOptions,
 } from "./src/tune/gemv-derive.ts";
@@ -439,3 +510,31 @@ export type {
 /** The u32 identity comparison of two word arrays, NaN by a declared policy. */
 export { wordIdentity } from "./src/tune/word-identity.ts";
 export type { NanPolicy, WordIdentity, WordMismatch } from "./src/tune/word-identity.ts";
+/**
+ * The grid-fill rule of the GEMM (ADR 0157 — `GeometryProfile.gemmGrid`): the ladder of five tiles
+ * the geometry sweep's `grid` set times ({@link GEMM_GRID_LADDER}), the K floor and the padding bound a
+ * derivation writes beside a device's two integers, and the grid of integer pairs it tries.
+ * {@link deriveGemmGrid} derives the field for a table from that device's grid records: a pair
+ * qualifies when on every case of the set its tile is identical to the default, measured against the
+ * table's tile (a steady record alone, any other beside a second one) and not slower than it in any
+ * reading beyond the bar `1 ÷ (margin × the two rows' gaps)` (margin ×1.065 by default), and when the
+ * census-weighted GEMM time under it is at most `1 ÷ minSpeedup` of the table's (×1.05 by default);
+ * the qualifying pair of the lowest weighted time is taken, none qualifying leaves the field absent.
+ * Records of another set, format, adapter or runtime, quantised or wall-clock ones, and a shared
+ * table are refused.
+ */
+export { GEMM_GRID_LADDER, GEMM_GRID_MAX_PADDING, GEMM_GRID_MIN_K } from "./src/tune/gemm-grid.ts";
+export {
+  deriveGemmGrid,
+  GEMM_GRID_LARGEST_MIN_WORKGROUPS,
+  GEMM_GRID_MIN_WORKGROUPS,
+} from "./src/tune/gemm-grid-derive.ts";
+export type {
+  DeriveGemmGridOptions,
+  GemmGridCaseOutcome,
+  GemmGridDerivation,
+  GemmGridInput,
+  GemmGridPairVerdict,
+  GemmGridReading,
+  GemmGridRecord,
+} from "./src/tune/gemm-grid-derive.ts";

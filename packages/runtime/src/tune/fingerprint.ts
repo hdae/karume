@@ -195,6 +195,12 @@ type ProfileSlot = { readonly field: string; readonly candidate: GeometryCandida
  * src/runtime/linear-program.ts, `conv2dProfileGeometry` and `i8a8.conv3d` in conv.ts, the
  * fields in attention.ts). bmm's M is the row count of one matrix (as in buildBmm). The i8a8 linear
  * cases are i8, so the builder's w4a8 group fallback never applies to them.
+ *
+ * For linear / matmul / bmm it is the `gemmRows` rule, the field this family's sweep records decide,
+ * also in a table that carries the grid-fill rule (`gemmGrid`), where the Session runs the rule's
+ * tile instead (`gemmShapeGeometry`): the key stands for the evidence of the family's records, and
+ * the grid field's evidence is its own grid sweep records, which these keys do not cover (as they do
+ * not cover `linearGemv`).
  */
 const profileSlot = (profile: GeometryProfile, sweepCase: SweepCase): ProfileSlot => {
   switch (sweepCase.op) {

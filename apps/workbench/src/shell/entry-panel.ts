@@ -6,6 +6,7 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
+import type { GemvSweepSession } from "@karume/runtime/tune";
 import { type ParameterValues, parseParameters } from "@karume/sweep-app-support/parameters";
 import { errorText } from "@karume/sweep-app-support/record";
 
@@ -29,6 +30,8 @@ export const entryPanel = (options: {
   readonly lock: RunLock;
   /** The backend field, shared by every selection (its value carries over). */
   readonly backend: HTMLInputElement;
+  /** The page load's session, which a sweep's record names. */
+  readonly session: GemvSweepSession;
   /** `undefined` when Run can be offered, else what to say in its place. */
   readonly gpuProblem: Promise<string | undefined>;
   /** Aborted when another entry is selected, which removes this panel's listener on `backend`. */
@@ -78,9 +81,13 @@ export const entryPanel = (options: {
     lock.take({ run, cancel });
     result.replaceChildren();
     status.textContent = "Starting…";
-    const host = browserHost(backend.value.trim(), (record) => {
-      status.textContent = endedText(record);
-    });
+    const host = browserHost(
+      backend.value.trim(),
+      (record) => {
+        status.textContent = endedText(record);
+      },
+      options.session,
+    );
     void (async () => {
       try {
         const { record, text, saved } = await runEntry(host, {

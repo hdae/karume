@@ -7,6 +7,7 @@
  * SPEC: docs/spec/workbench.md#the-shell
  */
 
+import type { GemvSweepSession } from "@karume/runtime/tune";
 import { readEnvironment } from "@karume/sweep-app-support/environment";
 import type { WorkbenchRecord } from "@karume/sweep-app-support/record";
 
@@ -19,12 +20,14 @@ import { type SaveResult, saveRecord } from "./save.ts";
 /**
  * The browser's host. `declared` is the backend field's value when Run was clicked; `onEnded` is
  * told of each record once its run has ended, before the record is posted (the page says how the
- * run ended while the save is under way).
+ * run ended while the save is under way); `session` is the page load's, made when the shell loaded.
  */
 export const browserHost = (
   declared: string,
   onEnded: (record: WorkbenchRecord) => void,
+  session: GemvSweepSession,
 ): RunHost<SaveResult> => ({
+  session,
   readEnvironment: () =>
     readEnvironment(navigator.gpu, {
       host: "browser",

@@ -95,6 +95,54 @@ describe("mergeGemvSweepReports", () => {
     expect(merged.gpuTiming.quantized).toBe(true);
   });
 
+  it("states the class of the merged summaries, not the first record's (fault: one case's group alone)", () => {
+    const base = gemvPerCase(CASE_A);
+    const [summary] = base.summaries;
+    const [entry] = base.cases;
+    if (summary === undefined || entry === undefined) throw new Error("no summary or case");
+    const ids = Array.from({ length: 20 }, (_, index) => `case-${index}`);
+    const records = ids.map((id, index): GemvSweepReport => ({
+      ...base,
+      // One group each: none has a class of its own; one in five spreads beyond ×1.05
+      steadiness: { class: "unclassified", groups: 1, unsteadyGroups: 0, share: 0 },
+      summaries: [{ ...summary, caseId: id, baselineSpread: index % 5 === 0 ? 1.2 : 1.01 }],
+      cases: [{ ...entry, id }],
+      settings: { ...base.settings, cases: [id] },
+      rows: [],
+    }));
+    const merged = mergeGemvSweepReports(records, {
+      plannedCaseIds: ids,
+      cancelledBetweenCases: false,
+    });
+    expect(merged.steadiness).toEqual({
+      class: "steady",
+      groups: 20,
+      unsteadyGroups: 4,
+      share: 0.2,
+    });
+  });
+
+  it("keeps the session of its records, the first one's time since its start, and throws for another session (fault: two page loads)", () => {
+    const session = (id: string, elapsedMs: number) => ({ session: { id, elapsedMs } });
+    const merged = mergeGemvSweepReports(
+      [
+        { ...gemvPerCase(CASE_A), ...session("load-1", 100) },
+        { ...gemvPerCase(CASE_B), ...session("load-1", 900) },
+      ],
+      PLANNED,
+    );
+    expect(merged.session).toEqual({ id: "load-1", elapsedMs: 100 });
+    expect(() =>
+      mergeGemvSweepReports(
+        [
+          { ...gemvPerCase(CASE_A), ...session("load-1", 100) },
+          { ...gemvPerCase(CASE_B), ...session("load-2", 900) },
+        ],
+        PLANNED,
+      ),
+    ).toThrow(/Record 1 differs from record 0/);
+  });
+
   describe("when the records do not belong to one sweep", () => {
     it("throws for another geometry profile (its GEMM references were built with another geometry)", () => {
       const other = gemvPerCase(CASE_B, { geometryProfile: "nvidia-ampere" });

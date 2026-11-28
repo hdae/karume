@@ -41,13 +41,14 @@ const entry: Entry = {
   description:
     "The GEMV choices of linear (sequential variant, row-block height, parallel lanes, staged, subgroup) measured case by case on this GPU (runGemvSweep, idle time between cases, a quick look before the timing, M = 4 and 8 only for the reorder candidates M = 1 leaves adoptable; the explore set measures the whole grid on a few sentinel cases first and the candidates they predict on the others), merged into one karume-gemv-sweep/4 record: identical candidates must write the baseline's words, reordering ones must stay in the band of linear.",
   parameters: GEMV_SWEEP_PARAMETERS,
-  run: async ({ parameters, gpuOptions, signal, progress }) => {
+  run: async ({ parameters, gpuOptions, session, signal, progress }) => {
     const plan = planGemvSweep(gemvSweepSelection(parameters));
     let live = INITIAL_GEMV_LIVE;
     const line = liveLine(() => progress(gemvProgressLine(plan, live, performance.now())));
     try {
       const outcome = await runGemvPlan(plan, {
         ...(gpuOptions.gpu === undefined ? {} : { gpu: gpuOptions.gpu }),
+        ...(session === undefined ? {} : { session }),
         signal,
         onEvent: (event) => {
           live = foldGemvEvent(live, event);

@@ -21,13 +21,19 @@ GEMV sweep records (`--gemv-records`, the workbench's `gemv-sweep` entry) derive
 onto the registered table when only GEMV records are given). Without them, a table that carries the field keeps it.
 `--gemv-plan` writes, instead, the workbench batch that measures what those records lack.
 
+Records of the geometry sweep's `grid` set (`--grid-records`, the workbench's `geometry-sweep` entry with
+`candidateSet=grid`) derive the grid-fill rule of the GEMM (`gemmGrid`) with `deriveGemmGrid`, onto the table the
+other options give (or onto the registered table when only grid records are given). Without them, a table that
+carries the field keeps it ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-grid-fill-rule)).
+
 ## The command
 
 From the repository root:
 
 ```sh
 node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
-  [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] \
+  [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…] [--gemv-margin=<x>]] \
+  [--grid-records=<path>[,<path>…]] \
   [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
 node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] \
   [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
@@ -40,12 +46,16 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
 - `--attention-bench` adds attention-bench records, which decide the online attention's key axis; without them that
   field is carried over from the base.
 - `--gemv-records` adds GEMV sweep records of the table's adapter, which decide `linearGemv` group by group (one
-  record's case at one row count): a candidate replaces the default profile's choice for a shape only at ×1.10 or more
-  over it in every group that is evidence — current (its rows' and its case's fingerprints are the current runtime's),
-  with the current default's kernel timed whatever default the record was made under, and read against that kernel's
-  fastest time over the records, which a second record repeats within ×1.10 —, from at least two records, its check
-  held; a parallel row also needs that evidence at M = 4 and 8 without a regression (it serves M = 1 to 8: the `full`
-  set) ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). Groups whose case is not current
+  record's case at one row count, current when its rows' and its case's fingerprints are the current runtime's) by two
+  rules ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)): a shape a steady record measured
+  at M = 1 by the rule of one steady record — a candidate's gain over the default's choice in the same group clears the
+  margin × the two rows' gaps in every steady record, its row is not slower at M = 4 and 8 in the same record, and the
+  table's choice stays unless beaten so —; any other by the rule of two records — ×1.10 or more over the default's
+  choice in every group that is evidence, read against that kernel's fastest time over the records, which a second
+  record repeats within ×1.10, from at least two records, its check held, and a parallel row the same evidence at
+  M = 4 and 8 without a regression. `--gemv-margin` sets the first rule's margin (default ×1.065; a finite number of
+  at least 1). Below ×1.03 (`GEMV_LOWEST_MARGIN`, the lowest one whose rows the sweep records) the command warns on
+  stderr and in the verdict lines; the verdict lines end with the decisions that change at ×1.03. Groups whose case is not current
   are reported in the verdict lines, not refused, and so are the current groups without a usable reference. The field
   is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
@@ -60,20 +70,29 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   first shared table needs `--vendor` and `--architecture` and takes no `--description`; a registered one is
   regenerated onto records of its own adapters. A shared table carries tile geometries only: `--attention-bench`,
   `--gemv-records` and `--gemv-plan` are usage errors beside it. Its verdict lines give each device's ratios.
-- `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
-  keep their own ×1.10.
+- `--grid-records` adds grid records of the table's adapter: a pair of integers of a fixed grid qualifies when, on
+  every grid case, its ladder tile wrote the default's words, is timed against the table's tile (by a steady record
+  alone, else beside a second one) and is not slower than it beyond `1 ÷ (×1.065 × the two rows' gaps)` in any such
+  reading, and when the census-weighted GEMM time under it is at most `1 ÷ --min-speedup` of the table's; the lowest
+  weighted time is taken, and none qualifying leaves the table without the field. A registered id can take
+  `--grid-records` alone; `--shared` and `--gemv-plan` refuse it.
+- `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default) and the grid-fill
+  rule's threshold on the weighted total; the GEMV choices keep their own rules (`--gemv-margin`).
 - Without `--dry-run` it writes the table file and prints what it wrote and the verdict lines. With `--dry-run` it
   writes nothing and prints the derived profile as JSON, the verdict lines and, for a registered id, every field that
   differs from the registered table (the provenance fields listed apart). With GEMV records the verdict lines end with
   the GEMV decisions shape by shape (the default's choice, the derived one, the gains per record, or why it was kept)
   and a line that says whether the table would carry the field; `linearGemv` is compared as each table runs with it.
 - `--gemv-plan` derives nothing. From the GEMV records given (none: nothing at hand) it prints, per case and row
-  count of the `full` set, how many candidates the derivation would still miss — those fewer than two records could be
-  evidence for ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)) — and
+  count of the `full` set, how many candidates the derivation would still miss by the rule it takes for each decision
+  ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)), and
   writes `inputs/workbench/batches/gemv-plan-<profile id>.json` (outside git; the workbench lists it as an untracked
-  batch): `gemv-sweep` steps of the `full` set narrowed to the cases, row counts and candidates that miss the same,
-  run twice. With no record at hand the batch is the whole `full` set, twice; with nothing missing no batch is
-  written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
+  batch) for those of the rule of two records: `gemv-sweep` steps of the `full` set narrowed to the cases, row
+  counts and candidates that miss the same, run twice, each step at most 19 groups (cases × row counts) so that its
+  record has no class and stays with the rule of two records it was planned for. What only a steady record fills (a
+  decision of the rule of one steady record: a steady record timed the case at M = 1) is listed apart and is in no
+  step — a step's record has no class —: a steady run of the `full` or the `explore` set fills it. With no record at hand the batch
+  is the whole `full` set, twice; with nothing for the batch no batch is written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else (the derivation's message on
   stderr, unchanged).
 

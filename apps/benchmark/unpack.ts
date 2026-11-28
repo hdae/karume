@@ -7,7 +7,9 @@
  * Every record of every file goes to `outputs/workbench/<host>-<adapter name>/<entry id>_<UTC
  * time>.json` (the time is the record's `recordedAt`) with the text the shared record code gives
  * it. Nothing is ever overwritten: when any of those files exists already (or two records would take
- * one name), nothing is written. Exit 0 when every record was written, 1 for a file that cannot be
+ * one name), nothing is written. Beside a GEMV record it writes, it says the record's class (one
+ * steady record is enough for a table, an unsteady one needs a second). Exit 0 when every record
+ * was written, 1 for a file that cannot be
  * read or is no bundle and for a file that exists, 2 for a command line without a file.
  *
  * SPEC: docs/spec/benchmark.md#unpacking-the-file
@@ -19,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { writeNewFile } from "@karume/sweep-app-support/node";
 
 import { type Bundle, bundleRecordFiles, parseBundle, type RecordFile } from "./src/bundle.ts";
+import { gemvClassText } from "./src/notes.ts";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -95,11 +98,14 @@ export const unpackBundles = async (
     if (!bundle.complete) {
       lines.push(`${file}: incomplete — ${stopText(bundle)}; its records hold what was measured`);
     }
-    for (const { path, text } of records) {
+    for (const [index, { path, text }] of records.entries()) {
       if (!(await writeNewFile(repositoryRoot, path, new TextEncoder().encode(text)))) {
         return { code: 1, lines: [...lines, `${path}: exists already (written meanwhile)`] };
       }
-      lines.push(`wrote ${path}`);
+      // A GEMV record says whether one record is enough (its class)
+      const record = bundle.records[index];
+      const gemv = record === undefined ? undefined : gemvClassText(record);
+      lines.push(`wrote ${path}${gemv === undefined ? "" : ` (GEMV ${gemv})`}`);
     }
   }
   return { code: 0, lines };
