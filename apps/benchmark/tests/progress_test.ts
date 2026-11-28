@@ -1,3 +1,5 @@
+import { gemvSteadiness } from "@karume/runtime/tune";
+import { mergeGemvSweepReports } from "@karume/sweep-app-support/gemv-sweep/record";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { BenchmarkEvent, StampedEvent } from "../src/controller.ts";
@@ -307,14 +309,28 @@ describe("the progress view", () => {
     expect(state.patterns.gemv).toEqual({ atMargin: 0, atLowest: 0, of: 0 });
   });
 
-  it("does not count a case its sweep stopped midway as finished, nor its patterns", () => {
+  it("does not count a case its sweep stopped midway as finished, nor its patterns — but its finished groups count in the run's class, as the merged record counts them (fault: the class line over finished cases alone)", () => {
     const state = fold([...gemvCase(0, GEMV_A, 0, 1000, true)]);
     const view = progressView(PLAN, state, 1000);
     expect(view.overall.done).toBe(0);
     expect(state.finished.size).toBe(0);
     expect(state.patterns.gemv).toEqual({ atMargin: 0, atLowest: 0, of: 0 });
-    expect(state.gemvSummaries).toEqual([]);
     expect(view.current).toBeUndefined();
+    // The class the page states is the class the merged record states
+    const finished = gemvReport(GEMV_B);
+    const stopped = gemvReport(GEMV_A, { aborted: true });
+    const merged = mergeGemvSweepReports([finished, stopped], {
+      plannedCaseIds: [GEMV_B, GEMV_A],
+      cancelledBetweenCases: false,
+    });
+    const both = fold([
+      [0, { kind: "case", index: 0 }],
+      [1000, { kind: "record", sweep: "gemv", report: finished }],
+      [2000, { kind: "case", index: 1 }],
+      [3000, { kind: "record", sweep: "gemv", report: stopped }],
+    ]);
+    expect(gemvSteadiness(both.gemvSummaries)).toEqual(merged.steadiness);
+    expect(both.gemvSummaries).toEqual(merged.summaries);
   });
 
   it("warns of a device loss", () => {

@@ -126,8 +126,9 @@ own rules, predicates and exclusions of `@karume/runtime/tune` (nothing restated
   over the table's; a group without a time of the table's choice holds none (a record that did not time it does not
   move it), and one where that choice failed or its check failed is read against the default's choice. A record
   without `table` (taken before it) is read against the default's choice. Counted at the default margin, ×1.065 (`GEMV_MARGIN`), and at the lowest one, ×1.03 (`GEMV_LOWEST_MARGIN`), side
-  by side. Beside the count the page states the run's class, `gemvSteadiness` over the finished GEMV cases'
-  summaries (the class of the record they merge into), read as the derivation will read that record
+  by side. Beside the count the page states the run's class, `gemvSteadiness` over the summaries the run's GEMV
+  record merges — the finished cases' and the groups a cancel or a device loss left finished in a case cut short, which
+  the merge keeps (the count itself reads finished cases only) —, so the line states the class the record states, read as the derivation will read that record
   (`gemvRecordReading` of `@karume/runtime/tune`, the derivation's own test: the finished cases' timing as the merge
   states it — the first's unit, rounded when any was): GPU timestamps the derivation refuses — rounded (`quantized`
   not `false`) or none (the wall clock) — "no evidence for a table, however steady its timings"; steady and in ns —

@@ -19,6 +19,7 @@ import {
   type GemvSweepCaseSummary,
   type GemvRecordTiming,
   type GemvSweepPhase,
+  type GemvSweepReport,
   gemvRecordReading,
   gemvSteadiness,
   GEOMETRY_MIN_SPEEDUP,
@@ -71,13 +72,14 @@ export type ProgressState = {
    */
   readonly patterns: { readonly gemv: GemvPatternCount; readonly geometry: PatternCount };
   /**
-   * The summaries of the finished GEMV cases, which the run's class is read from (the class of the
-   * record they merge into: `gemvSteadiness`).
+   * The summaries of every GEMV case's record the run's record merges — the finished cases' and the
+   * groups a cancel or a device loss left finished in a case cut short (the merge keeps them) —,
+   * which the run's class is read from as the record states it (`gemvSteadiness`).
    */
   readonly gemvSummaries: readonly GemvSweepCaseSummary[];
   /**
-   * The GPU timing of the finished GEMV cases as the record they merge into states it: the unit of
-   * the first, quantized when any one is (the merge's rule). Absent before the first finishes.
+   * The GPU timing of those records as the record they merge into states it: the unit of the first,
+   * quantized when any one is (the merge's rule). Absent before the first returns.
    */
   readonly gemvTiming?: { readonly unit: string; readonly quantized: boolean };
   /** The per-case records of the finished geometry cases. */
@@ -163,9 +165,22 @@ const plus = (a: GemvPatternCount, b: GemvPatternCount): GemvPatternCount => ({
   of: a.of + b.of,
 });
 
+/** The run's class material with a GEMV case's record added, as the merge takes it (cut short or not). */
+const withGemvRecord = (
+  state: ProgressState,
+  report: Pick<GemvSweepReport, "summaries" | "gpuTiming">,
+): Pick<ProgressState, "gemvSummaries" | "gemvTiming"> => ({
+  gemvSummaries: [...state.gemvSummaries, ...report.summaries],
+  gemvTiming: {
+    unit: state.gemvTiming?.unit ?? report.gpuTiming.unit,
+    quantized: (state.gemvTiming?.quantized ?? false) || report.gpuTiming.quantized,
+  },
+});
+
 /**
  * The state after the case being measured returned its record at `at`: finished, with its patterns,
- * unless a cancel or a device loss cut the record short (its rows are no finished case's).
+ * unless a cancel or a device loss cut the record short (its rows are no finished case's). A GEMV
+ * record cut short still adds its finished groups' summaries to the run's class, as the merge does.
  */
 const finish = (
   state: ProgressState,
@@ -173,7 +188,11 @@ const finish = (
   at: number,
   record: Extract<BenchmarkEvent, { kind: "record" }>,
 ): ProgressState => {
-  if (cutShort(record.report)) return { ...state, current: undefined };
+  if (cutShort(record.report)) {
+    return record.sweep === "gemv"
+      ? { ...state, current: undefined, ...withGemvRecord(state, record.report) }
+      : { ...state, current: undefined };
+  }
   const finished = new Map(state.finished).set(current.index, (at - current.startedAt) / 1000);
   if (record.sweep === "gemv") {
     const { summaries, rows, gpuTiming } = record.report;
@@ -185,11 +204,7 @@ const finish = (
         ...state.patterns,
         gemv: plus(state.patterns.gemv, gemvPatterns(summaries, rows, gpuTiming.unit)),
       },
-      gemvSummaries: [...state.gemvSummaries, ...summaries],
-      gemvTiming: {
-        unit: state.gemvTiming?.unit ?? gpuTiming.unit,
-        quantized: (state.gemvTiming?.quantized ?? false) || gpuTiming.quantized,
-      },
+      ...withGemvRecord(state, record.report),
     };
   }
   const geometryRecords = [...state.geometryRecords, record.report];
