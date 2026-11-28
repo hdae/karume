@@ -89,7 +89,9 @@ measurements in `docs/research/`.
   needs the field).
 - `@karume/runtime`: the split-K linear, which only the private Session key `LINEAR_SPLIT_K` selects, is now the split
   of the GEMM skeleton — the reference GEMM's kernel over one slice of the K tiles, then the existing combine —
-  instead of one thread per output. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
+  instead of one thread per output, and takes every weight storage the GEMM reads under f32 compute (f16, bf16,
+  int8, int4, int2 as well as f32); its slices are whole K tiles, so a tile count the slice count does not divide is
+  cut too. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
   the reference's grid is under-filled (Gemma 4 prefill's narrow projections), and is up to 1.33 times slower where
   the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change.
 

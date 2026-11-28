@@ -1,7 +1,8 @@
 /**
- * linear with the K reduction split into slices (`x[m,k] · wᵀ[k,n] + bias[n]`, f32 weights, f32
- * compute) — a **reorder** strategy (ADR 0152 decision 2): the products are the reference kernel's,
- * only the order in which they are added differs.
+ * linear with the K reduction split into slices (`x[m,k] · wᵀ[k,n] + bias[n]`, f32 compute, every
+ * weight storage the GEMM skeleton reads: f32 / f16 / bf16 / i8 / i4 / i2) — a **reorder** strategy
+ * (ADR 0152 decision 2): the products are the reference kernel's, only the order in which they are
+ * added differs. The storage's decode happens at the tile fill, which the split does not touch.
  *
  * Two dispatches, the form of the split-K variants of the published `@huggingface/kernels` MatMul
  * (a partial pass with the slice on the dispatch's z axis, then a combine pass):
@@ -32,7 +33,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 import { type GemmCompute, gemmKeyPart, gemmTakesForm, gemmWgsl } from "./gemm.ts";
-import type { GemmGeometry } from "./gemm-geometry.ts";
+import { GEMM_TILE_K, type GemmGeometry } from "./gemm-geometry.ts";
 import {
   i4GroupKeyPart,
   i4GroupShift,
@@ -43,7 +44,10 @@ import {
 /** How many slices the selection cuts the K reduction into. */
 export type LinearSplitKSlices = 2 | 4 | 8 | 16;
 
-/** The fewest terms one slice adds (below it the combine's extra roundings buy too little). */
+/**
+ * The fewest terms of whole K tiles one slice adds (below it the combine's extra roundings and its
+ * pass buy too little): 16 K tiles.
+ */
 export const LINEAR_SPLITK_MIN_SLICE = 256;
 
 /** The threads of one workgroup of the combine pass (grid-stride). */
@@ -53,14 +57,21 @@ export const LINEAR_SPLITK_COMBINE_GROUP = 256;
 const SPLIT_COMPUTE: GemmCompute = "f32";
 
 /**
- * The slice count for a reduction length: the largest of 16 / 8 / 4 / 2 that divides `k` and leaves
- * each slice at least {@link LINEAR_SPLITK_MIN_SLICE} terms; `undefined` when there is none
- * (`k < 512`, or `k` odd).
+ * The slice count for a reduction length: the largest of 16 / 8 / 4 / 2 whose shortest slice holds
+ * at least {@link LINEAR_SPLITK_MIN_SLICE} terms' worth of whole K tiles; `undefined` when there is
+ * none (fewer than 32 K tiles, `k ≤ 496`).
+ *
+ * The partial deals the K tiles out in whole tiles (`kTileLoop` in gemm.ts), so the count need not
+ * divide the tile count (K = 4304, 269 tiles, takes 16 slices of 16 and 17 tiles) and K need not be a
+ * multiple of the K tile: the reduction's last tile may be partial, so the last slice may add up to
+ * 15 terms fewer than its tiles hold.
  */
-export const linearSplitKSlices = (k: number): LinearSplitKSlices | undefined =>
-  ([16, 8, 4, 2] as const).find(
-    (slices) => k % slices === 0 && k / slices >= LINEAR_SPLITK_MIN_SLICE,
+export const linearSplitKSlices = (k: number): LinearSplitKSlices | undefined => {
+  const tiles = Math.ceil(k / GEMM_TILE_K);
+  return ([16, 8, 4, 2] as const).find(
+    (slices) => Math.floor(tiles / slices) * GEMM_TILE_K >= LINEAR_SPLITK_MIN_SLICE,
   );
+};
 
 /** The bytes of the partial sums `[slices, m, n]` (f32) — the temporary between the two dispatches. */
 export const linearSplitKPartialsBytes = (m: number, n: number, slices: number): number =>

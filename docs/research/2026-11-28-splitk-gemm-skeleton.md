@@ -71,7 +71,7 @@ None of the families of the first six rows accepts `numerics` ([spec/numerics.md
 so they cannot select a `reorder` strategy; the recon measured an exact smaller tile at 0.53 to 0.81 of the reference
 on them (a geometry question, outside this note).
 
-Gemma 4 prefill shapes, f32 storage (the recon measured the same ratios with bf16 and int4 storage on its prototype):
+Gemma 4 prefill shapes, f32 storage (bf16 and int4 in the next table):
 
 | Shape | M | N | K | Workgroups | Reference µs | s2 | s4 | s8 | s16 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -97,6 +97,27 @@ Gemma 4 prefill shapes, f32 storage (the recon measured the same ratios with bf1
 At M = 64 the reference runs the 16 × 16 tile of 64 threads (`nvidia-ampere`'s rule for up to 64 rows), so its grid has
 more workgroups but each is small; the split still pays on the narrow k / v projections (0.34 to 0.44).
 
+The same shapes with the weights the Gemma 4 presets store, bf16 and int4 at group 32, at M = 768 (the split reads them
+with the reference GEMM's decode at its tile fill):
+
+| Shape | N | K | Workgroups | bf16: ref µs | bf16: s2 / s4 / s8 / s16 | int4 g32: ref µs | int4 g32: s2 / s4 / s8 / s16 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E2B k / v | 256 | 1536 | 12 | 338.9 | 0.539 / 0.298 / 0.263 / 0.284 | 328.9 | 0.549 / 0.299 / 0.272 / 0.293 |
+| E2B q | 2048 | 1536 | 96 | 598.4 | 0.827 / 0.746 / 0.824 / 0.931 | 610.2 | 0.824 / 0.737 / 0.810 / 0.929 |
+| E2B o | 1536 | 2048 | 72 | 484.4 | 0.889 / 0.928 / 1.007 / 1.102 | 470.0 | 0.902 / 0.939 / 1.021 / 1.112 |
+| E2B gate / up | 6144 | 1536 | 288 | 1244.4 | 1.056 / 1.051 / 1.146 / 1.310 | 1237.2 | 1.060 / 1.066 / 1.180 / 1.330 |
+| E2B down | 1536 | 6144 | 72 | 1425.7 | 0.861 / 0.863 / 0.880 / 0.879 | 1404.4 | 0.872 / 0.881 / 0.901 / 0.889 |
+| E4B k / v | 512 | 2560 | 24 | 590.6 | 0.519 / 0.450 / 0.384 / 0.390 | 580.3 | 0.524 / 0.451 / 0.388 / 0.397 |
+| E4B o | 2560 | 2048 | 120 | 811.3 | 0.819 / 0.847 / 0.917 / 1.073 | 815.2 | 0.830 / 0.861 / 0.915 / 1.057 |
+| E4B gate / up | 10240 | 2560 | 480 | 3130.9 | 1.038 / 1.073 / 1.141 / 1.272 | 3097.1 | 1.040 / 1.078 / 1.142 / 1.289 |
+| E4B down | 2560 | 10240 | 120 | 4251.1 | 0.774 / 0.754 / 0.758 / 0.782 | 4111.4 | 0.782 / 0.761 / 0.769 / 0.797 |
+
+At M = 64 (not tabulated; `outputs/misc/splitk-recon-2026-11-28/impl/gemma-bf16-i4.tsv`) the narrow k / v projections take
+0.41 to 0.58 (bf16) and 0.35 to 0.49 (int4) at the best slice count, against 0.34 to 0.44 with f32; the other shapes
+stay within 0.04 of the f32 ratios. An int4 linear of 64 rows or fewer does not run the GEMM in a
+Session: the GEMV family takes it before the split is considered, so those int4 rows compare two kernels a Session
+would not choose between.
+
 ## 5. Error
 
 The kernel's own test inputs (`irregular` of the GPU test: `sin(0.037 i) · 0.75` activations, `cos(0.011 i + 0.3) · 0.5`
@@ -109,8 +130,14 @@ weights) through a Session on this device, the worst over each shape's outputs, 
 | 16 × 1536 × 64, 4 | 2.74e-5 (12.1%) | 4.11e-5 (15.9%) | 3.34e-5 (14.4%) |
 | 9 × 8960 × 37, 16 | 5.88e-5 (28.6%) | 7.77e-5 (33.5%) | 9.25e-5 (39.3%) |
 
-The A/B band of the test is declared at 2 × the op band (ADR 0147 decision 2: at least 4 × the worst measured, 1.57,
-and at most 2 × the f64 band).
+Every storage, through a Session at 128 × 1536 × 64 (4 slices; the weights the `irregular` fixture decodes to, about
+±0.5): against f64 10.6% (int4 g32) to 17.5% (bf16) of the band, against the reference kernel 12.2% (int4 g16) to 19.2%
+(int2). By raw dispatches at 37 × 4096 × 68 and 37 × 4300 × 69 (int4: 37 × 4224 × 69), 2 to 16 slices, two geometries
+and eight storages: at worst 32.4% of the band against f64 and 39.0% against the reference GEMM (bf16, K = 4096, 4
+slices).
+
+The A/B band of the test is declared at 2 × the op band (ADR 0147 decision 2: at least 4 × the worst measured, 0.393 ×
+4 = 1.57, and at most 2 × the f64 band).
 
 ## 6. Not measured
 

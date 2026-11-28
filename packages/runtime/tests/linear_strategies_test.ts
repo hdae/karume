@@ -179,19 +179,81 @@ describe("with the private option that allows the split-K GEMM", () => {
     assertEquals(LINEAR_STRATEGIES["gemm-splitk"].level, "reorder");
   });
 
-  it("leaves a short reduction, another storage and another compute on their kernels", () => {
+  it("takes every storage the GEMM skeleton reads under f32 compute, with the reference GEMM's form and group length", () => {
+    const shape = { m: 128, n: 64, k: 1536 };
+    for (const storage of ["f16", "bf16", "i8", "i2"] as const) {
+      assertEquals(
+        selectLinearStrategy(facts(shape, storage, splitK)),
+        { id: "gemm-splitk", slices: 4, v4: true, groupSize: undefined },
+        storage,
+      );
+    }
+    assertEquals(selectLinearStrategy(facts(shape, "i4", { ...splitK, groupSize: 32 })), {
+      id: "gemm-splitk",
+      slices: 4,
+      v4: true,
+      groupSize: 32,
+    });
+    // The scalar form where n is not a multiple of 4.
+    assertEquals(selectLinearStrategy(facts({ m: 128, n: 37, k: 1536 }, "bf16", splitK)), {
+      id: "gemm-splitk",
+      slices: 4,
+      v4: false,
+      groupSize: undefined,
+    });
+  });
+
+  it("leaves a short reduction and f16 compute on their kernels", () => {
     assertEquals(idOf({ m: 16, n: 64, k: 448 }, "f32", splitK), "gemm-f32");
-    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "f16", splitK), "gemm-f32");
+    const f16 = { knobs: { linearSplitK: true, linearCompute: "f16" } } as const;
+    assertEquals(idOf({ m: 16, n: 64, k: 1536 }, "f32", f16), "gemm-f16");
+    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "f16", f16), "gemm-f16");
+  });
+
+  it("leaves the linears the i8a8 path and the packed pairing take on their kernels", () => {
+    const a8 = { knobs: { linearSplitK: true, linearCompute: "a8" } } as const;
+    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "i8", a8), "i8a8");
+    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "i4", { ...a8, groupSize: 32 }), "i8a8");
+    // Under a8 a float-stored weight computes in f32, so the option applies to it.
+    assertEquals(idOf({ m: 128, n: 64, k: 1536 }, "bf16", a8), "gemm-splitk");
+    const parallel = {
+      linearSplitK: true,
+      linearGemvReduce: "parallel",
+      integerGemv: true,
+    } as const;
     assertEquals(
-      idOf({ m: 16, n: 64, k: 1536 }, "f32", {
-        knobs: { linearSplitK: true, linearCompute: "f16" },
-      }),
-      "gemm-f16",
+      idOf(INTEGER_I2, "i2", { knobs: parallel, packed: { role: "read" } }),
+      "integer-gemv",
+    );
+    assertThrows(
+      () =>
+        selectLinearStrategy(
+          facts(INTEGER_I2, "i2", { knobs: { linearSplitK: true }, packed: { role: "read" } }),
+        ),
+      ExecutionError,
+      "lands on neither the parallel GEMV nor the integer GEMV",
     );
   });
 
-  it("comes after the GEMV family: one row keeps the sequential GEMV", () => {
+  it("comes after the GEMV family: one row keeps the sequential GEMV, and few rows of an integer storage the row-block GEMV", () => {
     assertEquals(idOf({ m: 1, n: 64, k: 1536 }, "f32", splitK), "gemv-m1");
+    assertEquals(idOf({ m: 16, n: 64, k: 1536 }, "i8", splitK), "gemv-rows");
+    assertEquals(idOf({ m: 64, n: 64, k: 1536 }, "i4", { ...splitK, groupSize: 32 }), "gemv-rows");
+  });
+
+  it("cuts a tile count no slice count divides and a K off the K tile, and never below 16 K tiles a slice", () => {
+    const slicesOf = (k: number): number | undefined => {
+      const choice = selectLinearStrategy(facts({ m: 16, n: 64, k }, "f32", splitK));
+      return choice.id === "gemm-splitk" ? choice.slices : undefined;
+    };
+    // 269 tiles: 16 slices of 16 and 17 tiles.
+    assertEquals(slicesOf(4304), 16);
+    // 63 tiles, the last of 8 terms: 2 slices (4 would leave 15 tiles a slice).
+    assertEquals(slicesOf(1000), 2);
+    // 32 tiles, the last of one term: 2 slices of 16 tiles.
+    assertEquals(slicesOf(497), 2);
+    // 31 tiles: K is smaller than 2 slices × 16 tiles, so the reference GEMM keeps it.
+    assertEquals(slicesOf(496), undefined);
   });
 
   it("is not taken without the option", () => {

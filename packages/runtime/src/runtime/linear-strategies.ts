@@ -479,11 +479,12 @@ export const LINEAR_SELECTION: readonly SelectionEntry[] = [
     },
   },
   // The split-K GEMM (src/kernels/linear-splitk.ts): the same products added slice by slice. Only
-  // where the internal option allows it, for an f32-stored weight under f32 compute whose reduction
-  // is long enough to cut. It comes after the GEMV family, so the few-row linears keep their kernels.
+  // where the internal option allows it, under f32 compute (any storage the GEMM skeleton reads),
+  // for a reduction long enough to cut. It comes after the packed and i8a8 entries and the GEMV
+  // family, so the linears they take keep their kernels; f16 compute keeps its own GEMM.
   {
-    choose: ({ knobs, weightStorage, compute, k, v4, groupSize }) => {
-      if (!knobs.linearSplitK || weightStorage !== "f32" || compute !== "f32") return undefined;
+    choose: ({ knobs, compute, k, v4, groupSize }) => {
+      if (!knobs.linearSplitK || compute !== "f32") return undefined;
       const slices = linearSplitKSlices(k);
       return slices === undefined ? undefined : { id: "gemm-splitk", slices, v4, groupSize };
     },

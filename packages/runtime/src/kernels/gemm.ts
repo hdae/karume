@@ -2136,10 +2136,12 @@ const linearVariantWgsl = (
   splitSlices?: number,
 ): string => {
   if (splitSlices !== undefined) {
-    // The f16 compute variant is an approximation of its own; a split of it is not built.
-    if (compute !== "f32" || weight !== "f32") {
+    // Every weight storage the skeleton reads under f32 compute: the decode happens at the tile
+    // fill, which the split does not touch. The f16 compute variant is an approximation of its own
+    // (rounded tiles); a split of it is not built.
+    if (compute !== "f32") {
       throw new CodegenError(
-        `linear split-K: only f32 weight storage under f32 compute is built (weight=${weight} / compute=${compute})`,
+        `linear split-K: the split partial runs under f32 compute only (compute=${compute})`,
       );
     }
     if (!Number.isSafeInteger(splitSlices) || splitSlices < 1) {

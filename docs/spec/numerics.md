@@ -85,15 +85,19 @@ The split-K GEMM (`packages/runtime/src/kernels/linear-splitk.ts`) is a `reorder
 class R (only the order of the additions differs):
 
 - It is the split of the reference GEMM: the same kernel, at the tile geometry the reference GEMM takes for the row
-  count, runs over one slice of the K tiles per workgroup of the dispatch's z axis. The tiles are dealt out in whole
-  tiles, as evenly as they go. Each slice is summed from 0 in the reference GEMM's ascending order; a second pass adds
-  the slices' partial sums in slice order, then the bias, last.
+  count and with the same weight decode, runs over one slice of the K tiles per workgroup of the dispatch's z axis.
+  The tiles are dealt out in whole tiles, as evenly as they go: each slice takes the tile count divided by the slice
+  count, and the first slices one more where it does not divide. Each slice is summed from 0 in the reference GEMM's
+  ascending order; a second pass adds the slices' partial sums in slice order, then the bias, last.
+- It reads every weight storage the reference GEMM reads under f32 compute: f32, f16, bf16, int8, int4 at any group
+  length, int2. The f16 compute variant has no split.
 - `exact` never selects it. With one slice its two passes give the reference GEMM's words on every tile geometry the
   linear GEMM takes; that is the kernel's structural check, not a form any Session runs.
 - No level, preset or geometry profile selects it. It runs only through the private Session key `LINEAR_SPLIT_K`,
-  which its kernel tests pass; it is not part of the public surface. Under that key a linear takes it when its weight
-  is stored as f32, `linearCompute` is `"f32"`, the GEMV family does not take the linear, and its K is cut by the
-  slice rule: the largest of 16, 8, 4 and 2 slices that divides K and leaves each slice at least 256 terms.
+  which its kernel tests pass; it is not part of the public surface. Under that key a linear takes it when it
+  computes in f32 (`linearCompute: "f32"`, or `"a8"` for a float-stored weight, which a8 leaves in f32), neither the
+  i8a8 path, a packed pairing nor the GEMV family takes it, and the slice rule cuts its K: the largest of 16, 8, 4 and
+  2 slices whose shortest slice holds at least 16 K tiles (256 terms; the reduction's last tile may be partial).
 - Its partial sums are a temporary of `slices × m × n` f32 values between its two passes.
 
 ## Named approximations

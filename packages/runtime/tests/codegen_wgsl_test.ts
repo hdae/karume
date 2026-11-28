@@ -674,6 +674,10 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // pass is the second dispatch of the same program.
     ["linear_splitk_gemm_s4.wgsl", linearSplitKGemmWgsl("f32", false, 4)],
     ["linear_splitk_gemm_s4_v4.wgsl", linearSplitKGemmWgsl("f32", true, 4)],
+    // Two storages whose decode the split shares with the plain kernel: bf16 (a bitcast) and i4 at
+    // its default group (the per-quad group scale of the fill).
+    ["linear_splitk_gemm_wbf16_s4_v4.wgsl", linearSplitKGemmWgsl("bf16", true, 4)],
+    ["linear_splitk_gemm_wi4_g32_s4_v4.wgsl", linearSplitKGemmWgsl("i4", true, 4, undefined, 32)],
     ["linear_splitk_combine.wgsl", linearSplitKCombineWgsl()],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
     // adaLN fusion (the 4th of ADR 0040). The condition is **placing it as a pair with the plain
@@ -1703,7 +1707,13 @@ test("pipeline keys are unique per generator input (no two kernels map to the sa
     // The split-K partial bakes its slice count into the WGSL, so each count (one slice included)
     // is its own key, apart from the plain linear GEMM of the same geometry; the combine is one key.
     ...[false, true].flatMap((v4) =>
-      [1, 2, 4, 8, 16].map((slices) => linearSplitKGemmKey("f32", v4, slices)),
+      [1, 2, 4, 8, 16].flatMap((slices) => [
+        ...[...WEIGHT_STORAGES, "i2" as const].map((weight) =>
+          linearSplitKGemmKey(weight, v4, slices),
+        ),
+        linearSplitKGemmKey("i4", v4, slices, undefined, 32),
+        linearSplitKGemmKey("i4", v4, slices, undefined, 128),
+      ]),
     ),
     linearSplitKCombineKey(),
   ];

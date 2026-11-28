@@ -2,9 +2,9 @@
  * The split-K partial's WGSL and key (`src/kernels/linear-splitk.ts`, the `splitSlices` option of
  * src/kernels/gemm.ts), without a device: it is the linear GEMM of the same input with the K tile
  * loop cut to one slice's run and the epilogue storing partials without the bias — the fills and the
- * inner-product loop are the GEMM's, byte for byte, on every tile geometry the linear GEMM takes;
- * its key tells it and its slice count from the plain GEMM; a request it does not build fails at
- * the generator. The snapshots (`tests/fixtures/wgsl/linear_splitk_*.wgsl`) pin the bytes.
+ * inner-product loop are the GEMM's, byte for byte, for every weight storage on every tile geometry
+ * the linear GEMM takes; its key tells it and its slice count from the plain GEMM of the same
+ * storage; a request it does not build (f16 compute) fails at the generator. The snapshots (`tests/fixtures/wgsl/linear_splitk_*.wgsl`) pin the bytes.
  */
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
@@ -18,6 +18,7 @@ import {
   linearSplitKParams,
 } from "../src/kernels/linear-splitk.ts";
 import { linearGemmGeometries } from "./helpers/geometry.ts";
+import { type LinearWeightStorage, storageLabel } from "./helpers/linear-storage-weights.ts";
 
 const PLAIN_LOOP = "  for (var t = 0u; t < tiles; t = t + 1u) {\n";
 const SPLIT_LOOP = "  for (var t = t_first; t < t_end; t = t + 1u) {\n";
@@ -38,16 +39,36 @@ const VARIANTS = linearGemmGeometries().flatMap((geometry) =>
   [false, true].map((v4) => ({ geometry, v4 })),
 );
 
+/** Every weight storage the GEMM skeleton reads under f32 compute (i4 at three group lengths). */
+const STORAGES: readonly LinearWeightStorage[] = [
+  { storage: "f32" },
+  { storage: "f16" },
+  { storage: "bf16" },
+  { storage: "i8" },
+  { storage: "i4", groupSize: 16 },
+  { storage: "i4", groupSize: 32 },
+  { storage: "i4", groupSize: 128 },
+  { storage: "i2" },
+];
+
 describe("the split-K partial's WGSL", () => {
-  it("runs the linear GEMM's fills and inner-product loop byte for byte on every tile geometry, scalar and vec4", () => {
+  it("runs the linear GEMM's fills and inner-product loop byte for byte for every storage on every tile geometry, scalar and vec4", () => {
     assert(VARIANTS.length >= 20, `${VARIANTS.length} variants`);
-    for (const { geometry, v4 } of VARIANTS) {
-      const where = linearKey("f32", v4, "f32", undefined, undefined, geometry);
-      const plain = linearWgsl("f32", v4, "f32", undefined, undefined, geometry);
-      for (const slices of [1, 2, 16]) {
-        const split = linearSplitKGemmWgsl("f32", v4, slices, undefined, undefined, geometry);
-        assertEquals(loopBody(split, SPLIT_LOOP), loopBody(plain, PLAIN_LOOP), where);
-        assertEquals(split.includes(PLAIN_LOOP), false, where);
+    for (const { storage, groupSize } of STORAGES) {
+      for (const { geometry, v4 } of VARIANTS) {
+        const where = linearKey(storage, v4, "f32", undefined, groupSize, geometry);
+        const plain = linearWgsl(storage, v4, "f32", undefined, groupSize, geometry);
+        for (const slices of [1, 2, 16]) {
+          const split = linearSplitKGemmWgsl(storage, v4, slices, undefined, groupSize, geometry);
+          assertEquals(loopBody(split, SPLIT_LOOP), loopBody(plain, PLAIN_LOOP), where);
+          assertEquals(split.includes(PLAIN_LOOP), false, where);
+          // The storage's decode and scale bindings are the plain kernel's.
+          assertEquals(
+            split.includes("var<storage, read> wscale"),
+            plain.includes("var<storage, read> wscale"),
+            where,
+          );
+        }
       }
     }
   });
@@ -104,33 +125,42 @@ describe("the split-K partial's WGSL", () => {
 
 describe("the split-K partial's key", () => {
   it("is apart from the plain linear GEMM's, carries the geometry, form and storage parts, and one key per slice count", () => {
-    for (const { geometry, v4 } of VARIANTS) {
-      const plain = linearKey("f32", v4, "f32", undefined, undefined, geometry);
-      const tail = plain.slice("linear:v2:f32:".length);
-      const keys = [1, 2, 4, 8, 16].map((slices) =>
-        linearSplitKGemmKey("f32", v4, slices, undefined, undefined, geometry),
-      );
-      for (const [index, key] of keys.entries()) {
-        assertEquals(key, `linear_splitk_gemm:v1:f32:${tail}:s${[1, 2, 4, 8, 16][index]}`);
-        assertNotEquals(key, plain);
+    // Same key ⇔ same WGSL (a geometry's form is dropped from the scalar kernel and its key alike).
+    const wgslOfKey = new Map<string, string>();
+    const keyOfWgsl = new Map<string, string>();
+    for (const weight of STORAGES) {
+      const { storage, groupSize } = weight;
+      for (const { geometry, v4 } of VARIANTS) {
+        const plain = linearKey(storage, v4, "f32", undefined, groupSize, geometry);
+        // The plain key's head carries its WGSL generation (`v3` for i8); the parts after it are
+        // the geometry, the form and the storage.
+        const tail = plain.replace(/^linear:v\d+:f32:/, "");
+        for (const slices of [1, 2, 4, 8, 16]) {
+          const key = linearSplitKGemmKey(storage, v4, slices, undefined, groupSize, geometry);
+          const wgsl = linearSplitKGemmWgsl(storage, v4, slices, undefined, groupSize, geometry);
+          const where = `${storageLabel(weight)} ${key}`;
+          assertEquals(key, `linear_splitk_gemm:v1:f32:${tail}:s${slices}`, where);
+          assertNotEquals(key, plain);
+          assertEquals(wgslOfKey.get(key) ?? wgsl, wgsl, where);
+          assertEquals(keyOfWgsl.get(wgsl) ?? key, key, where);
+          wgslOfKey.set(key, wgsl);
+          keyOfWgsl.set(wgsl, key);
+        }
       }
-      assertEquals(new Set(keys).size, keys.length);
     }
+    assertEquals(wgslOfKey.size, keyOfWgsl.size);
   });
 });
 
 describe("the split-K partial refuses what it does not build", () => {
-  it("fails loudly for f16 compute, for a storage other than f32, and for a slice count that is not a positive integer", () => {
-    assertThrows(
-      () => gemmWgsl({ op: "linear", v4: true, weight: "f32", compute: "f16", splitSlices: 4 }),
-      CodegenError,
-      "linear split-K: only f32 weight storage under f32 compute is built",
-    );
-    assertThrows(
-      () => linearSplitKGemmWgsl("bf16", true, 4),
-      CodegenError,
-      "linear split-K: only f32 weight storage under f32 compute is built",
-    );
+  it("fails loudly for f16 compute and for a slice count that is not a positive integer", () => {
+    for (const weight of ["f32", "f16", "bf16"] as const) {
+      assertThrows(
+        () => gemmWgsl({ op: "linear", v4: true, weight, compute: "f16", splitSlices: 4 }),
+        CodegenError,
+        "linear split-K: the split partial runs under f32 compute only (compute=f16)",
+      );
+    }
     for (const slices of [0, -2, 1.5, Number.NaN]) {
       assertThrows(
         () => linearSplitKGemmWgsl("f32", true, slices),
