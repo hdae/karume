@@ -27,14 +27,20 @@ import {
   GEMV_B,
   gemvReport,
   geometryReport,
+  GRID_A,
+  GRID_B,
+  gridReport,
 } from "./helpers/fakes.ts";
 
-const PLAN = planBenchmark(
-  { gemv: true, geometry: true },
-  { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B] },
-);
+const CASES = [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B, GRID_A, GRID_B];
 
-/** The two records the shared record code makes of two finished per-case runs. */
+const PLAN = planBenchmark({ gemv: true, geometry: true, grid: true }, { cases: CASES });
+
+/**
+ * The three records the shared record code makes of the finished per-case runs, each made a minute
+ * after the one before (the run's order), so that the geometry sweep's two records are told apart
+ * by their time as in a real run.
+ */
 const records = async (): Promise<WorkbenchRecord[]> => {
   const signal = new AbortController().signal;
   const made: WorkbenchRecord[] = [];
@@ -55,15 +61,24 @@ const records = async (): Promise<WorkbenchRecord[]> => {
                   stop: { kind: "completed" },
                 })
               : geometrySweepResult(sweep.plan, {
-                  reports: sweep.plan.caseIds.map((caseId) => geometryReport(caseId)),
+                  reports: sweep.plan.caseIds.map((caseId) =>
+                    sweep.sweep === "grid" ? gridReport(caseId) : geometryReport(caseId),
+                  ),
                   stop: { kind: "completed" },
                 }),
           ),
       ),
     );
   }
-  return made;
+  return made.map((record, index) => ({
+    ...record,
+    recordedAt: new Date(Date.parse("2026-11-26T12:10:00.000Z") + index * 60_000).toISOString(),
+  }));
 };
+
+/** Whether a record is the geometry sweep's of the grid set. */
+const isGrid = (record: WorkbenchRecord): boolean =>
+  record.entry.id === "geometry-sweep" && record.entry.parameters["candidateSet"] === "grid";
 
 const bundleOf = (made: readonly WorkbenchRecord[], complete = true): Bundle => ({
   format: BUNDLE_FORMAT,
@@ -71,8 +86,8 @@ const bundleOf = (made: readonly WorkbenchRecord[], complete = true): Bundle => 
   endedAt: "2026-11-26T13:40:00.000Z",
   complete,
   stop: complete ? { kind: "completed" } : { kind: "cancelled" },
-  sweeps: ["gemv-sweep", "geometry-sweep"],
-  trial: { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B] },
+  sweeps: ["gemv-sweep", "geometry-sweep", "geometry-sweep"],
+  trial: { cases: CASES },
   page: { hiddenCount: 1, hiddenSeconds: 2.5, wakeLock: "held" },
   records: made,
 });
@@ -103,6 +118,27 @@ describe("the bundle", () => {
         (record) =>
           `outputs/workbench/browser-nvidia-geforce-rtx-5070-ti/${record.entry.id}_${record.recordedAt.slice(0, 19).replaceAll(":", "-")}.json`,
       ),
+    );
+  });
+
+  it("gives two records of one bundle that would take one name the workbench's suffix for a taken name, in run order (fault: the second written over the first)", async () => {
+    const [gemv, explore, grid] = await records();
+    if (gemv === undefined || explore === undefined || grid === undefined) {
+      throw new Error("three records");
+    }
+    // The grid set's record made in the same second as the explore set's
+    const same = [gemv, explore, { ...grid, recordedAt: explore.recordedAt }];
+    const stem = `outputs/workbench/browser-nvidia-geforce-rtx-5070-ti/geometry-sweep_${explore.recordedAt.slice(0, 19).replaceAll(":", "-")}`;
+    expect(bundleRecordFiles(bundleOf(same)).map(({ path }) => path)).toEqual([
+      `outputs/workbench/browser-nvidia-geforce-rtx-5070-ti/gemv-sweep_${gemv.recordedAt.slice(0, 19).replaceAll(":", "-")}.json`,
+      `${stem}.json`,
+      `${stem}-1.json`,
+    ]);
+    const file = join(root, "same.json");
+    await writeFile(file, bundleText(bundleOf(same)));
+    expect((await unpackBundles(root, [file])).code).toBe(0);
+    expect(await readFile(join(root, `${stem}-1.json`), "utf8")).toBe(
+      recordText({ ...grid, recordedAt: explore.recordedAt }),
     );
   });
 
@@ -148,12 +184,15 @@ describe("unpack", () => {
     const result = await unpackBundles(root, [file]);
     expect(result.code).toBe(0);
     const files = bundleRecordFiles(bundleOf(made));
-    // A GEMV record says its class beside its file (the trial's two cases: too few groups)
+    // A GEMV record says its class beside its file (the trial's two cases: too few groups), a grid
+    // record what reads it
     expect(result.lines).toEqual(
-      files.map(({ path }) =>
+      files.map(({ path }, index) =>
         path.includes("/gemv-sweep_")
           ? `wrote ${path} (GEMV too few groups for a class: read as unsteady)`
-          : `wrote ${path}`,
+          : made[index] !== undefined && isGrid(made[index])
+            ? `wrote ${path} (grid set: for the generator's --grid-records)`
+            : `wrote ${path}`,
       ),
     );
     for (const [index, { path }] of files.entries()) {
@@ -161,7 +200,12 @@ describe("unpack", () => {
       const record = made[index];
       if (record === undefined) throw new Error("a record per file");
       expect(new TextDecoder().decode(bytes)).toBe(recordText(record));
-      const kind = record.entry.id === "gemv-sweep" ? "gemv-records" : "records";
+      const kind =
+        record.entry.id === "gemv-sweep"
+          ? "gemv-records"
+          : isGrid(record)
+            ? "grid-records"
+            : "records";
       const loaded = loadRecord(bytes, repositoryRelativePath(root, join(root, path)), kind);
       expect(loaded.report).toEqual(record.data);
       expect(loaded.origin).toEqual({

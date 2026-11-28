@@ -37,12 +37,19 @@ import type { CaseKind, SweepId } from "./plan.ts";
  * (outputs/misc/gemv-rule-2026-11-28/fix/explore-plan.txt): ×1.002 for a sentinel, which the table
  * alone moves (the margin leaves the sentinels as they were), and ×1.044 for another case — 28.6 and
  * 16.7 s, 29 and 17 s.
+ *
+ * A grid case times the ladder's five tiles in interleaved rounds: this page's own run of the grid set
+ * at the default 5 rounds, on an RTX 3080 Ti under Node on Dawn (2026-11-28,
+ * outputs/misc/benchmark-grid-2026-11-28/), took 337 s for the 33 cases, 10.2 s per case (6.2 to
+ * 13.5) — 10 s. (The workbench's two grid records of the same day, at 7 rounds, took 478 and 481 s,
+ * 287 and 284 s of it in the rounds: less two rounds, 12.0 and 12.1 s per case.)
  */
 export const PRIOR_SECONDS: Readonly<Record<CaseKind, number>> = {
   sentinel: 29,
   other: 17,
   "first-of-class": 58,
   later: 19,
+  grid: 10,
 };
 
 /** The sweep each kind belongs to. */
@@ -51,6 +58,7 @@ const SWEEP_OF: Readonly<Record<CaseKind, SweepId>> = {
   other: "gemv",
   "first-of-class": "geometry",
   later: "geometry",
+  grid: "grid",
 };
 
 /** Where a run stands, as the estimate reads it. */

@@ -1,7 +1,8 @@
 # Karume benchmark
 
-A small browser page for outside collaborators: it runs the GEMV sweep's and the geometry sweep's `explore` sets on
-the collaborator's own GPU (`@karume/runtime/tune`), shows how far it got and how long it has left, and leaves one
+A small browser page for outside collaborators: it runs the GEMV sweep's and the geometry sweep's `explore` sets and
+the geometry sweep's `grid` set (the GEMM tile ladder) on the collaborator's own GPU (`@karume/runtime/tune`), shows
+how far it got and how long it has left, and leaves one
 JSON file to send to the maintainer. It needs no workbench, no local model mirror and no dev-server endpoint: the
 built site runs from any static host. The app is private (not published). What it does is specified in
 [docs/spec/benchmark.md](../../docs/spec/benchmark.md).
@@ -13,10 +14,10 @@ pnpm --filter @karume/benchmark dev                  # http://127.0.0.1:8792
 pnpm --filter @karume/benchmark build                # a static site in apps/benchmark/dist
 ```
 
-A short trial narrows the run by URL: `?cases=<id>,<id>` (case ids of either sweep's table; a sweep none of them
+A short trial narrows the run by URL: `?cases=<id>,<id>` (case ids of any of the three tables; a sweep none of them
 belongs to does not run) and `?idleSeconds=<s>` (default 0: no idle time between cases), for example
 `http://127.0.0.1:8792/?cases=i8-n256-k1536,i8a8-conv3d-cin256-cout256-k333-in6x128x128&idleSeconds=0`. A run of the
-defaults (both sweeps, every case) takes about 1 h 11 min.
+defaults (the three sweeps, every case) takes about 1 h 17 min, the GEMM tile ladder about 6 min of it.
 
 ## The file a collaborator sends
 
@@ -27,8 +28,12 @@ knows of the run. Unpack it into `outputs/workbench/` and hand the records to th
 ```sh
 node apps/benchmark/unpack.ts ~/Downloads/karume-benchmark_browser-amd-…_2026-11-27T10-00-00.json
 node tools/geometry-profiles/generate.ts <profile id> --records=outputs/workbench/browser-amd-…/geometry-sweep_….json \
-  --gemv-records=outputs/workbench/browser-amd-…/gemv-sweep_….json --dry-run
+  --gemv-records=outputs/workbench/browser-amd-…/gemv-sweep_….json \
+  --grid-records=outputs/workbench/browser-amd-…/geometry-sweep_….json --dry-run
 ```
+
+The file holds two `geometry-sweep` records: the `explore` set's (for `--records`) and the `grid` set's (for
+`--grid-records`); `unpack.ts` marks the `grid` set's beside the file it writes.
 
 `unpack.ts` writes nothing when a record's file exists already (its name is the record's own time, so unpacking the
 same file twice is refused, not duplicated).
@@ -37,7 +42,7 @@ same file twice is refused, not duplicated).
 
 | Path | What it holds |
 | --- | --- |
-| `src/plan.ts` | What a run measures: the two sweeps planned by the shared settings, the URL's trial, each case's kind |
+| `src/plan.ts` | What a run measures: the three sweeps planned by the shared settings, the URL's trial, each case's kind |
 | `src/controller.ts` | The run: the sweeps one after another, a record each, the bundle, the download on completion |
 | `src/progress.ts` | The two progress bars, the time left and the patterns, folded from the run's events |
 | `src/estimate.ts` | The estimate of the time left and its priors |

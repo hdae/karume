@@ -88,6 +88,24 @@ describe("remainingEstimate", () => {
     );
   });
 
+  it("reads a grid case by its stated prior, then by the finished grid cases alone — another sweep's cases scale it not (fault: the geometry sweep's ratio carried over)", () => {
+    const kinds: readonly CaseKind[] = ["first-of-class", "grid", "grid", "grid"];
+    expect(PRIOR_SECONDS.grid).toBe(10);
+    expect(remainingEstimate(kinds, { finished: new Map() }, 0).seconds).toBe(
+      PRIOR_SECONDS["first-of-class"] + 3 * PRIOR_SECONDS.grid,
+    );
+    // The geometry case took twice its prior: the grid cases keep theirs
+    const slowGeometry = new Map([[0, 2 * PRIOR_SECONDS["first-of-class"]]]);
+    expect(remainingEstimate(kinds, { finished: slowGeometry }, 0).seconds).toBe(
+      3 * PRIOR_SECONDS.grid,
+    );
+    const oneGrid = new Map([
+      [0, 50],
+      [1, 20],
+    ]);
+    expect(remainingEstimate(kinds, { finished: oneGrid }, 0).seconds).toBe(2 * 20);
+  });
+
   it("is 0 when every case finished", () => {
     const finished = new Map(KINDS.map((_kind, index) => [index, 1]));
     expect(remainingEstimate(KINDS, { finished }, 10).seconds).toBe(0);

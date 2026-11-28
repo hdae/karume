@@ -150,8 +150,15 @@ measurements in `docs/research/`.
   run asks for a second one. `unpack.ts` says beside the file it writes how the derivation will read each GEMV
   record (the same test). The GEMV priors of
   the time left are 29 and 17 s (were 27 and 15: the re-timing, the ×1.03 carry, the explore set's prediction at ×1.03
-  and a device table's choices add 5.5 and 8.4 % on average over four devices); a run of the defaults takes about
-  1 h 11 min.
+  and a device table's choices add 5.5 and 8.4 % on average over four devices); a run of the two `explore` sets
+  takes about 1 h 12 min.
+- The benchmark app (private): the default run gains the geometry sweep's `grid` set — the GEMM tile ladder, its 33
+  cases at 5 rounds — after the two `explore` sets, with a checkbox of its own; its record is the workbench's
+  `geometry-sweep` record of that set, which the generator's `--grid-records` reads. The page says after the run, and
+  `unpack.ts` beside the file, when its GPU timestamps were rounded or missing (that derivation refuses them). A grid
+  case's prior is 10 s (the page's own run of the set on an RTX 3080 Ti, 337 s); a run of the defaults takes about
+  1 h 17 min. Two records of
+  one file that would take one name get the workbench's `-1` suffix from `unpack.ts`.
 - `@karume/runtime/tune`: the GEMV sweep's `explore` set predicts, of a sentinel's rows, every one at least ×1.03
   (`GEMV_LOWEST_MARGIN`) faster than the default's choice there (was ×1.10), so that one steady explore record holds
   the rows a re-decision of the derivation at ×1.03 reads; on the four devices' records the other cases' timed passes

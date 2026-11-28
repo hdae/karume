@@ -23,10 +23,13 @@ import {
   gemvSummary,
   geometryReport,
   geometryRow,
+  GRID_A,
+  GRID_B,
+  gridReport,
 } from "./helpers/fakes.ts";
 
 const PLAN = planBenchmark(
-  { gemv: true, geometry: true },
+  { gemv: true, geometry: true, grid: false },
   { cases: [GEMV_A, GEMV_B, CONV3D_A, CONV3D_B], idleSeconds: 10 },
 );
 
@@ -348,5 +351,95 @@ describe("the progress view", () => {
     expect(progressView(PLAN, state, 0).warning).toBe(
       "The GPU device was lost (unknown): gone. The run stops after this case.",
     );
+  });
+});
+
+describe("the progress view of the grid set", () => {
+  /** A run of one tile geometry case, then the grid set's two cases. */
+  const GRID_PLAN = planBenchmark(
+    { gemv: true, geometry: true, grid: true },
+    { cases: [CONV3D_A, GRID_A, GRID_B] },
+  );
+
+  /** Grid case `index` of the run (`caseId`) started at `at` and finished at `end`. */
+  const gridCase = (
+    index: number,
+    caseId: string,
+    at: number,
+    end: number,
+  ): (readonly [number, BenchmarkEvent])[] => [
+    [at, { kind: "case", index }],
+    [
+      at,
+      {
+        kind: "progress",
+        sweep: "grid",
+        progress: { kind: "plan", caseId, index: 0, geometries: 5, skipped: 0 },
+      },
+    ],
+    [
+      end,
+      {
+        kind: "progress",
+        sweep: "grid",
+        progress: { kind: "case", summary: { caseId, elapsedMs: end - at, screened: 0 } },
+      },
+    ],
+    [end, { kind: "record", sweep: "grid", report: gridReport(caseId) }],
+  ];
+
+  it("names a grid case's sweep and kind, and its timing as rounds of every tile", () => {
+    const state = fold([
+      [0, { kind: "case", index: 1 }],
+      [
+        0,
+        {
+          kind: "progress",
+          sweep: "grid",
+          progress: { kind: "plan", caseId: GRID_A, index: 0, geometries: 5, skipped: 0 },
+        },
+      ],
+      [
+        0,
+        {
+          kind: "progress",
+          sweep: "grid",
+          progress: { kind: "step", caseId: GRID_A, phase: "timing", done: 3, total: 5 },
+        },
+      ],
+    ]);
+    const view = progressView(GRID_PLAN, state, 0);
+    expect(view.current?.title).toBe(
+      `Case 2 of 3 · GEMM tile ladder · ${GRID_A} (every tile of the ladder)`,
+    );
+    expect(view.current?.text).toBe(
+      "5 geometries · Timing rounds of every tile, interleaved: 3 of 5",
+    );
+  });
+
+  it("counts a finished grid case in the whole run but not among the tile geometry's classes, and gives the grid set no count of its own (fault: the grid record read as a geometry class)", () => {
+    const state = fold(gridCase(1, GRID_A, 0, 12_000));
+    expect(state.finished).toEqual(new Map([[1, 12]]));
+    expect(state.gridCases).toBe(1);
+    expect(state.patterns.geometry).toEqual({ found: 0, of: 0 });
+    expect(state.geometryRecords).toEqual([]);
+    const view = progressView(GRID_PLAN, state, 12_000);
+    expect(view.overall.text).toBe(
+      "1 of 3 cases done (tile geometry 0 of 1 · GEMM tile ladder 1 of 2)",
+    );
+    expect(view.patterns.at(-1)).toBe(
+      "GEMM tile ladder: 1 of 2 cases measured so far — which tile suits which grid size is decided from all of them together, after the run",
+    );
+    // What is left is the second grid case, at the first one's measured 12 s
+    expect(view.remaining).toBe(`${durationText(12).replace(/^u/, "U")} left`);
+  });
+
+  it("does not count a grid case a cancel cut short", () => {
+    const state = fold([
+      [0, { kind: "case", index: 2 }],
+      [500, { kind: "record", sweep: "grid", report: { ...gridReport(GRID_B), aborted: true } }],
+    ]);
+    expect(state.finished.size).toBe(0);
+    expect(state.gridCases).toBe(0);
   });
 });

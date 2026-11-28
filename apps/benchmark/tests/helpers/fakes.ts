@@ -1,6 +1,7 @@
 /**
- * Fakes for the benchmark's tests: complete per-case records of the two sweeps' `explore` sets (what
- * one `runGemvSweep` / `runGeometrySweep` call with `cases: [id]` returns), fake runtime sweeps that
+ * Fakes for the benchmark's tests: complete per-case records of the two sweeps' `explore` sets and of
+ * the geometry sweep's `grid` set (what one `runGemvSweep` / `runGeometrySweep` call with
+ * `cases: [id]` returns), fake runtime sweeps that
  * report the progress events a real one does around those records, the record environment of a
  * browser and an idle wait that does not wait. The cases are the runtime's own; the fingerprints the
  * derivations read are placeholders except where the merge needs them.
@@ -257,6 +258,69 @@ export const geometryReport = (
   };
 };
 
+/** Two cases of the geometry sweep's `grid` set (linears of depth-anything V2). */
+export const GRID_A = "grid-linear-m1370-n384-k1536-wf32";
+export const GRID_B = "grid-linear-m1370-n384-k384-wf32";
+
+/** A grid row of `caseId`: the default tile's (128 × 128) or the ladder's 64 × 64 (×1.2, identical). */
+export const gridRow = (
+  caseId: string,
+  isDefault: boolean,
+  extra: Partial<GeometrySweepRow> = {},
+): GeometrySweepRow => ({
+  caseId,
+  op: "linear",
+  shape: caseId,
+  censusCount: 12,
+  geometry: isDefault ? "reg128x128r8x8w16" : "reg64x64r4x4w16",
+  geometryParams: isDefault
+    ? { regM: 8, regN: 8, wgX: 16, wgY: 16 }
+    : { regM: 4, regN: 4, wgX: 16, wgY: 16 },
+  isDefault,
+  reps: 200,
+  rounds: [80_000_000, 80_100_000, 80_050_000, 80_020_000, 80_010_000],
+  perDispatch: isDefault ? 400_000 : 333_000,
+  ...(isDefault ? {} : { speedupVsDefault: 1.2, identicalToDefault: true }),
+  ...extra,
+});
+
+/** What one `runGeometrySweep({ candidateSet: "grid", cases: [caseId] })` returns. */
+export const gridReport = (
+  caseId: string,
+  options: { readonly gpuTiming?: GeometrySweepReport["gpuTiming"] } = {},
+): GeometrySweepReport => {
+  const rows = [gridRow(caseId, true), gridRow(caseId, false)];
+  return {
+    format: "karume-geometry-sweep/4",
+    date: "2026-11-26T11:35:00.000Z",
+    startedAt: "2026-11-26T11:30:00.000Z",
+    aborted: false,
+    caseSets: sweepCaseSetIds("grid"),
+    defaultKernels: sweepDefaultKernelsIds("grid"),
+    candidateKernels: sweepCandidateKernelsId(rows, true),
+    userAgent: ENVIRONMENT.userAgent,
+    adapter: ADAPTER,
+    gpuTiming: options.gpuTiming ?? { feature: true, unit: "ns", quantized: false },
+    dp4a: true,
+    settings: {
+      candidateSet: "grid",
+      quick: false,
+      ops: ["linear"],
+      cases: [caseId],
+      rounds: 5,
+      quickLookMargin: 0,
+      targetPassMs: 80,
+      maxReps: 16384,
+      warmupNs: 1,
+      warmupMinRuns: 1,
+      wallTimingNote: "note",
+    },
+    deviceLost: null,
+    cases: [{ caseId, elapsedMs: 12_000, screened: 0 }],
+    rows,
+  };
+};
+
 /** The one case a per-case call sweeps. */
 const caseOf = (cases: readonly string[] | undefined): string => {
   const [caseId] = cases ?? [];
@@ -285,12 +349,20 @@ export const fakeGemvSweep =
     return made;
   };
 
-/** A runtime geometry sweep, as {@link fakeGemvSweep}. */
+/**
+ * A runtime geometry sweep, as {@link fakeGemvSweep}; without `report`, a call of the grid set
+ * returns {@link gridReport} and any other {@link geometryReport}.
+ */
 export const fakeGeometrySweep =
-  (report: (caseId: string) => GeometrySweepReport = (caseId) => geometryReport(caseId)) =>
+  (report?: (caseId: string) => GeometrySweepReport) =>
   async (options: GeometrySweepOptions): Promise<GeometrySweepReport> => {
     const caseId = caseOf(options.cases);
-    const made = report(caseId);
+    const made =
+      report !== undefined
+        ? report(caseId)
+        : options.candidateSet === "grid"
+          ? gridReport(caseId)
+          : geometryReport(caseId);
     const progress = options.onProgress ?? (() => {});
     progress({ kind: "started", adapter: ADAPTER, unit: "ns", dp4a: true, caseCount: 1 });
     progress({ kind: "plan", caseId, index: 0, geometries: made.rows.length, skipped: 0 });

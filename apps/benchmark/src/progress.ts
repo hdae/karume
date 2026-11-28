@@ -82,8 +82,10 @@ export type ProgressState = {
    * quantized when any one is (the merge's rule). Absent before the first returns.
    */
   readonly gemvTiming?: { readonly unit: string; readonly quantized: boolean };
-  /** The per-case records of the finished geometry cases. */
+  /** The per-case records of the finished geometry cases (of the `explore` set). */
   readonly geometryRecords: readonly GeometrySweepReport[];
+  /** How many grid cases finished (the grid set has no count of its own: below). */
+  readonly gridCases: number;
   readonly deviceLost?: { readonly reason: string; readonly message: string };
 };
 
@@ -92,6 +94,7 @@ export const INITIAL_PROGRESS: ProgressState = {
   patterns: { gemv: { atMargin: 0, atLowest: 0, of: 0 }, geometry: { found: 0, of: 0 } },
   gemvSummaries: [],
   geometryRecords: [],
+  gridCases: 0,
 };
 
 /** A sweep's progress event as the fold reads it, whichever sweep sent it. */
@@ -194,6 +197,9 @@ const finish = (
       : { ...state, current: undefined };
   }
   const finished = new Map(state.finished).set(current.index, (at - current.startedAt) / 1000);
+  if (record.sweep === "grid") {
+    return { ...state, current: undefined, finished, gridCases: state.gridCases + 1 };
+  }
   if (record.sweep === "gemv") {
     const { summaries, rows, gpuTiming } = record.report;
     return {
@@ -288,6 +294,7 @@ export type ProgressView = {
 const SWEEP_LABEL: Readonly<Record<SweepId, string>> = {
   gemv: "GEMV",
   geometry: "tile geometry",
+  grid: "GEMM tile ladder",
 };
 
 const KIND_LABEL: Readonly<Record<CaseKind, string>> = {
@@ -295,6 +302,7 @@ const KIND_LABEL: Readonly<Record<CaseKind, string>> = {
   other: "the candidates its sentinels predict",
   "first-of-class": "first of its class: every candidate",
   later: "the candidates its class kept",
+  grid: "every tile of the ladder",
 };
 
 /** What a phase does, in words, with the unit its count is of. */
@@ -343,23 +351,32 @@ export const steadinessLine = (
 /**
  * The pattern lines of the sweeps a run plans (the same words live and at the end): per sweep its
  * count, and for the GEMV sweep its count at the default margin and the lowest one side by side and
- * the run's class.
+ * the run's class. The grid set has no count: its derivation (`deriveGemmGrid`) takes two integers
+ * for the whole set, every case against the table's own tile and weighted by how often its shape
+ * runs, and decides no case on its own — its line says how many cases are measured.
  */
 export const patternLines = (
   plan: BenchmarkPlan,
-  state: Pick<ProgressState, "patterns" | "gemvSummaries" | "gemvTiming">,
+  state: Pick<ProgressState, "patterns" | "gemvSummaries" | "gemvTiming" | "gridCases">,
 ): string[] => {
   const { patterns } = state;
-  return plan.sweeps.flatMap(({ sweep }) =>
-    sweep === "gemv"
-      ? [
+  return plan.sweeps.flatMap(({ sweep }) => {
+    switch (sweep) {
+      case "gemv":
+        return [
           `GEMV: ${patterns.gemv.atMargin} of ${patterns.gemv.of} shapes measured so far have a kernel that beats today's choice by ${ratio3(GEMV_MARGIN)} times its timing noise (${patterns.gemv.atLowest} by ${ratio3(GEMV_LOWEST_MARGIN)})`,
           steadinessLine(gemvSteadiness(state.gemvSummaries), state.gemvTiming),
-        ]
-      : [
+        ];
+      case "geometry":
+        return [
           `Tile geometry: ${patterns.geometry.found} of ${patterns.geometry.of} classes measured so far have a geometry at least ${ratio(GEOMETRY_MIN_SPEEDUP)} faster than the default in every case`,
-        ],
-  );
+        ];
+      case "grid":
+        return [
+          `GEMM tile ladder: ${state.gridCases} of ${plan.cases.filter((runCase) => runCase.sweep === "grid").length} cases measured so far — which tile suits which grid size is decided from all of them together, after the run`,
+        ];
+    }
+  });
 };
 
 /** The case bar's title: its place in the run, its sweep, its id and what it measures. */
@@ -388,9 +405,14 @@ const caseBar = (plan: BenchmarkPlan, current: Current): CaseBar => {
     geometries === undefined
       ? ""
       : `${geometries.planned} geometries${geometries.skipped === 0 ? "" : `, ${geometries.skipped} skipped`} · `;
+  // A grid case's timing phase counts its rounds of every tile, interleaved
+  const phase =
+    plan.cases[current.index]?.kind === "grid" && step.phase === "timing"
+      ? "Timing rounds of every tile, interleaved"
+      : PHASE_TEXT[step.phase];
   return {
     title,
-    text: `${rowCount}${planned}${PHASE_TEXT[step.phase]}: ${step.done} of ${step.total}`,
+    text: `${rowCount}${planned}${phase}: ${step.done} of ${step.total}`,
     done: step.done,
     total: step.total,
     ...detail,

@@ -359,8 +359,9 @@ maintainer's ruling of 2026-11-06).
        (2026-11-28, G4). Left, in this order:
        - G5: the end-to-end Session A/B (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at
          P = 1K and 4K) against the same table without the field — K-116's kill criterion;
-       - G6: other devices (their own grid records; ladders with the skeleton forms where their tables carry forms) and
-         the grid set on the benchmark page's explore run;
+       - G6: other devices — their own grid records, which the benchmark page's default run takes since 2026-11-28 (a
+         record with rounded GPU timestamps is no evidence: Chrome needs its WebGPU developer-features flag) —, and
+         ladders with the skeleton forms where their tables carry forms;
        - outside the rule's scope, each its own item if taken up: the i8a8 linear (keyed by M only too, not measured
          at small N), the states-shaped and row-block attention (they read the default bucket table directly), conv1d /
          conv2d / conv3d and the fused attention's fixed fields.

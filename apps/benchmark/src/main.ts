@@ -1,5 +1,5 @@
 /**
- * The page: the GPU it found, the note before a run, the two checkboxes, Start and Cancel; while a
+ * The page: the GPU it found, the note before a run, the three checkboxes, Start and Cancel; while a
  * run goes, the two bars, the time left and the patterns found; at the end, the download. The DOM
  * is only here: what the page says and does is decided by the pure modules beside it (`notes.ts`,
  * `plan.ts`, `progress.ts`, `controller.ts`), which are tested without a page. The run's events are
@@ -91,9 +91,10 @@ const main = async (): Promise<void> => {
   const device = element("dl", { className: "device" });
   const deviceNotes = element("div");
   const notes = element("ul", { className: "notes" });
-  const choice: Record<keyof SweepChoice, boolean> = { gemv: true, geometry: true };
+  const choice: Record<keyof SweepChoice, boolean> = { gemv: true, geometry: true, grid: true };
   const gemvBox = element("input", { type: "checkbox", checked: true });
   const geometryBox = element("input", { type: "checkbox", checked: true });
+  const gridBox = element("input", { type: "checkbox", checked: true });
   const start = element("button", { type: "button", textContent: "Start", disabled: true });
   const cancel = element("button", { type: "button", textContent: "Cancel", disabled: true });
   const problem = element("p", { className: "problem", hidden: true });
@@ -150,6 +151,7 @@ const main = async (): Promise<void> => {
         element("legend", { textContent: "Measurements" }),
         element("label", {}, [gemvBox, " GEMV sweep"]),
         element("label", {}, [geometryBox, " Tile geometry sweep"]),
+        element("label", {}, [gridBox, " GEMM tile ladder"]),
       ]),
       element("div", { className: "actions" }, [start, cancel]),
       problem,
@@ -209,6 +211,7 @@ const main = async (): Promise<void> => {
     start.disabled = running !== undefined || view.blocker !== undefined || plan.cases.length === 0;
     gemvBox.disabled = running !== undefined;
     geometryBox.disabled = running !== undefined;
+    gridBox.disabled = running !== undefined;
     cancel.disabled = running === undefined;
   };
   gemvBox.addEventListener("change", () => {
@@ -217,6 +220,10 @@ const main = async (): Promise<void> => {
   });
   geometryBox.addEventListener("change", () => {
     choice.geometry = geometryBox.checked;
+    showPlan();
+  });
+  gridBox.addEventListener("change", () => {
+    choice.grid = gridBox.checked;
     showPlan();
   });
   showPlan();

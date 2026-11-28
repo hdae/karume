@@ -8,7 +8,8 @@
  * time>.json` (the time is the record's `recordedAt`) with the text the shared record code gives
  * it. Nothing is ever overwritten: when any of those files exists already (or two records would take
  * one name), nothing is written. Beside a GEMV record it writes, it says the record's class (one
- * steady record is enough for a table, an unsteady one needs a second). Exit 0 when every record
+ * steady record is enough for a table, an unsteady one needs a second); beside a grid record, that
+ * the generator's `--grid-records` reads it, or refuses its timing. Exit 0 when every record
  * was written, 1 for a file that cannot be
  * read or is no bundle and for a file that exists, 2 for a command line without a file.
  *
@@ -21,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { writeNewFile } from "@karume/sweep-app-support/node";
 
 import { type Bundle, bundleRecordFiles, parseBundle, type RecordFile } from "./src/bundle.ts";
-import { gemvClassText } from "./src/notes.ts";
+import { gemvClassText, gridRecordText } from "./src/notes.ts";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -102,10 +103,13 @@ export const unpackBundles = async (
       if (!(await writeNewFile(repositoryRoot, path, new TextEncoder().encode(text)))) {
         return { code: 1, lines: [...lines, `${path}: exists already (written meanwhile)`] };
       }
-      // A GEMV record says whether one record is enough (its class)
+      // A GEMV record says whether one record is enough (its class); a grid record, what reads it
       const record = bundle.records[index];
       const gemv = record === undefined ? undefined : gemvClassText(record);
-      lines.push(`wrote ${path}${gemv === undefined ? "" : ` (GEMV ${gemv})`}`);
+      const grid = record === undefined ? undefined : gridRecordText(record);
+      lines.push(
+        `wrote ${path}${gemv === undefined ? "" : ` (GEMV ${gemv})`}${grid === undefined ? "" : ` (grid set: ${grid})`}`,
+      );
     }
   }
   return { code: 0, lines };

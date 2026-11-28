@@ -10,11 +10,14 @@
 
 import { type GemvRecordTiming, gemvRecordReading, gemvTimingRefusal } from "@karume/runtime/tune";
 import { GEMV_SWEEP_ENTRY_ID } from "@karume/sweep-app-support/gemv-sweep/settings";
-import { GEOMETRY_SWEEP_ENTRY_ID } from "@karume/sweep-app-support/geometry-sweep/settings";
+import {
+  GEOMETRY_SWEEP_ENTRY_ID,
+  GRID_SET,
+} from "@karume/sweep-app-support/geometry-sweep/settings";
 import type { WorkbenchRecord } from "@karume/sweep-app-support/record";
 
 import { durationText } from "./estimate.ts";
-import type { BenchmarkPlan } from "./plan.ts";
+import type { BenchmarkPlan, SweepId } from "./plan.ts";
 
 /** The adapter as the page found it. */
 export type FoundAdapter = {
@@ -56,14 +59,18 @@ export const deviceView = (adapter: FoundAdapter): DeviceView => ({
   notes:
     adapter.description === ""
       ? [
-          "This browser reports no description of the GPU. In Chrome, turning on chrome://flags/#enable-webgpu-developer-features makes it report one, so the result can be matched to exactly this GPU model; the flag also stops Chrome from rounding the GPU timestamps to 100 µs, which the GEMV part needs to count as evidence.",
+          "This browser reports no description of the GPU. In Chrome, turning on chrome://flags/#enable-webgpu-developer-features makes it report one, so the result can be matched to exactly this GPU model; the flag also stops Chrome from rounding the GPU timestamps to 100 µs, which the GEMV part and the GEMM tile ladder need to count as evidence.",
         ]
       : [],
 });
 
 /** The cases of a sweep the plan runs, or 0. */
-const casesOf = (plan: BenchmarkPlan, sweep: "gemv" | "geometry"): number =>
+const casesOf = (plan: BenchmarkPlan, sweep: SweepId): number =>
   plan.cases.filter((runCase) => runCase.sweep === sweep).length;
+
+/** Parts of a sentence as a person lists them: `a`, `a and b`, `a, b and c`. */
+const listed = (parts: readonly string[]): string =>
+  parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 
 /** The note before a run of `plan` that is estimated to take `seconds`. */
 export const beforeRunNotes = (plan: BenchmarkPlan, seconds: number): string[] => {
@@ -78,11 +85,16 @@ export const beforeRunNotes = (plan: BenchmarkPlan, seconds: number): string[] =
           `the tile geometry sweep (the matrix products of image and video models, ${casesOf(plan, "geometry")} cases)`,
         ]
       : []),
+    ...(casesOf(plan, "grid") > 0
+      ? [
+          `the GEMM tile ladder (which tile size suits a matrix product of each size, ${casesOf(plan, "grid")} cases)`,
+        ]
+      : []),
   ];
   return [
     parts.length === 0
-      ? "Choose at least one of the two measurements below."
-      : `What runs: ${parts.join(" and ")}. Each measures several ways to run the same GPU kernel and keeps the fastest that computes the same result, in a short exploratory form. Nothing is installed and no model is downloaded.`,
+      ? "Choose at least one of the three measurements below."
+      : `What runs: ${listed(parts)}. Each measures several ways to run the same GPU kernel and keeps the fastest that computes the same result, in a short exploratory form. Nothing is installed and no model is downloaded.`,
     `How long: ${durationText(seconds)} (a first estimate from other machines' runs; the page refines it as it goes). It runs one case at a time with a short pause between cases to let the GPU cool down.`,
     "Meanwhile: keep this tab in front and the computer awake, and use the GPU for nothing else (games, videos, other GPU-heavy pages or apps) — that would change the timings. The page keeps the screen on where the browser allows it.",
     "If the GPU's timings hold steady through the run, this one run is enough for a table; if they move, the page says so at the end, and a second run at another time (another day is best) is what makes a table. Either way a second run's file is welcome.",
@@ -100,9 +112,22 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const gemvData = (record: WorkbenchRecord): Record<string, unknown> | undefined =>
   record.entry.id === GEMV_SWEEP_ENTRY_ID && isObject(record.data) ? record.data : undefined;
 
-/** The GPU timing a GEMV record's data states (`gpuTiming`; an empty one when it states none). */
-const gemvTiming = (data: Record<string, unknown>): GemvRecordTiming =>
+/**
+ * The GPU timing a sweep record's data states (`gpuTiming`; an empty one when it states none). The
+ * grid derivation refuses a grid record's timing by the same test as the GEMV derivation
+ * (`gemvTimingRefusal`: GPU timestamps in ns or raw ticks, not rounded).
+ */
+const timingOf = (data: Record<string, unknown>): GemvRecordTiming =>
   isObject(data.gpuTiming) ? data.gpuTiming : {};
+
+/** A grid record's data (a geometry sweep record of the `grid` set), or undefined for another record. */
+const gridData = (record: WorkbenchRecord): Record<string, unknown> | undefined =>
+  record.entry.id === GEOMETRY_SWEEP_ENTRY_ID &&
+  isObject(record.data) &&
+  isObject(record.data.settings) &&
+  record.data.settings.candidateSet === GRID_SET
+    ? record.data
+    : undefined;
 
 /**
  * The class a GEMV record states of itself (`steadiness.class` of its data), or undefined for one
@@ -124,7 +149,7 @@ const gemvClass = (data: Record<string, unknown>): string | undefined =>
 export const gemvClassText = (record: WorkbenchRecord): string | undefined => {
   if (record.entry.id !== GEMV_SWEEP_ENTRY_ID) return undefined;
   const data = gemvData(record);
-  const timing = data === undefined ? {} : gemvTiming(data);
+  const timing = data === undefined ? {} : timingOf(data);
   const found = data === undefined ? undefined : gemvClass(data);
   switch (gemvTimingRefusal(timing)) {
     case "quantized":
@@ -149,11 +174,30 @@ export const gemvClassText = (record: WorkbenchRecord): string | undefined => {
 };
 
 /**
- * The notes after a run, from its records: when a GEMV record's timing is one the GEMV derivation
- * refuses (`gemvTimingRefusal`) — the browser rounded the timestamps, or gave none — that its GEMV
- * part will not count as evidence, why, and for the rounding the Chrome flag that stops it
- * (`deviceView` names the same flag before the run); otherwise, when the GEMV record is not steady
- * by its own statement, that one more run at another time is needed — unsteady, its timings moved;
+ * What the unpacking command says beside a grid record it wrote (undefined for another record):
+ * that the generator's `--grid-records` reads it, or — when its timing is one the grid derivation
+ * refuses (rounded, or no GPU timestamps) — that it refuses it.
+ */
+export const gridRecordText = (record: WorkbenchRecord): string | undefined => {
+  const data = gridData(record);
+  if (data === undefined) return undefined;
+  switch (gemvTimingRefusal(timingOf(data))) {
+    case "quantized":
+      return "its GPU timestamps were rounded: the generator's --grid-records refuses it";
+    case "wall-clock":
+      return "timed without GPU timestamps: the generator's --grid-records refuses it";
+    case undefined:
+      return "for the generator's --grid-records";
+  }
+};
+
+/**
+ * The notes after a run, from its records: when a GEMV or a grid record's timing is one its
+ * derivation refuses (`gemvTimingRefusal`, the one test both apply) — the browser rounded the
+ * timestamps, or gave none — that those parts will not count as evidence, why, and for the rounding
+ * the Chrome flag that stops it (`deviceView` names the same flag before the run), with the tile
+ * geometry part (of the `explore` set) still used; otherwise, when the GEMV record is not steady by
+ * its own statement, that one more run at another time is needed — unsteady, its timings moved;
  * unclassified, it holds too few groups to tell (a short trial).
  */
 export const afterRunNotes = (records: readonly WorkbenchRecord[]): string[] => {
@@ -161,17 +205,35 @@ export const afterRunNotes = (records: readonly WorkbenchRecord[]): string[] => 
     const data = gemvData(record);
     return data === undefined ? [] : [data];
   });
-  const refusals = gemv.map((data) => gemvTimingRefusal(gemvTiming(data)));
-  const geometry = records.some((record) => record.entry.id === GEOMETRY_SWEEP_ENTRY_ID);
-  const stillUsed = geometry ? " The tile geometry part is still used." : "";
+  const refusals = gemv.map((data) => gemvTimingRefusal(timingOf(data)));
+  const gridRefusals = records.flatMap((record) => {
+    const data = gridData(record);
+    return data === undefined ? [] : [gemvTimingRefusal(timingOf(data))];
+  });
+  const explore = records.some(
+    (record) => record.entry.id === GEOMETRY_SWEEP_ENTRY_ID && gridData(record) === undefined,
+  );
+  const stillUsed = explore ? " The tile geometry part is still used." : "";
+  const gridRounded = gridRefusals.includes("quantized");
+  const gridUntimed = gridRefusals.includes("wall-clock");
   if (refusals.includes("quantized")) {
     return [
-      `The GEMV part of this result will not be accepted as evidence: this browser rounded the GPU timestamps to 100 µs, and the GEMV kernels are so short that one such step moves their timings by more than the differences the derivation looks for. In Chrome, turning on ${DEVELOPER_FEATURES_FLAG} stops the rounding; a run with it on gives a GEMV part that counts.${stillUsed}`,
+      `The GEMV part of this result will not be accepted as evidence: this browser rounded the GPU timestamps to 100 µs, and the GEMV kernels are so short that one such step moves their timings by more than the differences the derivation looks for. In Chrome, turning on ${DEVELOPER_FEATURES_FLAG} stops the rounding; a run with it on gives a GEMV part that counts.${gridRounded ? " Nor will the GEMM tile ladder part, whose derivation reads no rounded timestamps either." : ""}${stillUsed}`,
     ];
   }
   if (refusals.includes("wall-clock")) {
     return [
-      `The GEMV part of this result will not be accepted as evidence: it was timed without GPU timestamps, and the wall clock adds a delay that moves from pass to pass.${stillUsed}`,
+      `The GEMV part of this result will not be accepted as evidence: it was timed without GPU timestamps, and the wall clock adds a delay that moves from pass to pass.${gridUntimed ? " Nor will the GEMM tile ladder part." : ""}${stillUsed}`,
+    ];
+  }
+  if (gridRounded) {
+    return [
+      `The GEMM tile ladder part of this result will not be accepted as evidence: this browser rounded the GPU timestamps to 100 µs, which its derivation does not read. In Chrome, turning on ${DEVELOPER_FEATURES_FLAG} stops the rounding.${stillUsed}`,
+    ];
+  }
+  if (gridUntimed) {
+    return [
+      `The GEMM tile ladder part of this result will not be accepted as evidence: it was timed without GPU timestamps.${stillUsed}`,
     ];
   }
   const classes = gemv.flatMap((data) => {
