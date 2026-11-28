@@ -48,7 +48,8 @@ import { conv2dIgemmMTile } from "../kernels/conv2d.ts";
 import {
   conv2dProfileGeometry,
   DEFAULT_GEOMETRY_PROFILE,
-  gemmRowsGeometry,
+  type GemmShape,
+  gemmShapeGeometry,
   type GeometryProfile,
 } from "../kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../kernels/geometry-profiles/index.ts";
@@ -395,18 +396,19 @@ const skeletonVariants = (bases: readonly GemmGeometry[], decode: boolean): Gemm
 };
 
 /**
- * The f32 candidates of a `k88` linear / matmul / bmm case of `rows` rows (perf-ledger K-88): the
- * `gemmRows` geometry the default profile and every registered table (`profiles` — the adapter's
- * table among them) give that row count, each without the field and with each skeleton form. The
- * sweep puts the default geometry at the front.
+ * The f32 candidates of a `k88` linear / matmul / bmm case of the shape `shape` (perf-ledger
+ * K-88): the geometry the default profile and every registered table (`profiles` — the adapter's
+ * table among them) give that shape (`gemmShapeGeometry` — the `gemmRows` rule of its row count,
+ * or a table's grid-fill rule), each without the field and with each skeleton form. The sweep puts
+ * the default geometry at the front.
  */
 export const k88GemmCandidates = (
-  rows: number,
+  shape: GemmShape,
   profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
 ): GemmCandidate[] =>
   unique(
     skeletonVariants(
-      [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) => gemmRowsGeometry(profile, rows)),
+      [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) => gemmShapeGeometry(profile, shape)),
       false,
     ).map(gemmCandidate),
   );

@@ -326,9 +326,9 @@ maintainer's ruling of 2026-11-06).
      - **The GEMM tile from the grid fill** (filed 2026-11-28, the maintainer's item; ADR
        [0157](decisions/0157-gemm-tile-from-grid-fill.md) proposed, perf-ledger K-116,
        [research 2026-11-28](research/2026-11-28-gemm-grid-fill.md)): the tile of linear, matmul and bmm chosen from the
-       dispatch grid's workgroup count by an optional table field instead of the M buckets. In this order:
-       - G1: the runtime — the field, its checks and JSON reader, the selection at the three call sites and their tune
-         mirrors, the GPU identity test over every storage;
+       dispatch grid's workgroup count by an optional table field instead of the M buckets. The field, its checks and
+       the selection at the three call sites are built
+       ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)); no table carries it. Left, in this order:
        - G2: the sweep's `grid` set (census-derived cases spanning the grid fill, the ladder only, interleaved
          rounds) in the tune module and the workbench's `geometry-sweep` entry;
        - G3: the derivation of the two integers from grid records and the generator writing the field, with a dry run on

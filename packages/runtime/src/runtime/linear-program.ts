@@ -19,8 +19,8 @@
 import type { GemmCompute } from "../kernels/gemm.ts";
 import { gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
 import {
-  gemmRowsGeometry,
   type GeometryProfile,
+  gemmShapeGeometry,
   i8a8LinearGeometry,
 } from "../kernels/geometry-profile.ts";
 import {
@@ -324,10 +324,10 @@ const linearGemmProgram = (
   groupSize: number | undefined,
   profile: GeometryProfile,
 ): LinearProgram => {
-  // MUST: the tile geometry is the bucket of the flattened row count m (the adapter's profile —
-  // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to key, WGSL and
-  // dispatch.
-  const geometry = gemmRowsGeometry(profile, m);
+  // MUST: the tile geometry is the adapter's profile's for the flattened shape — the bucket of the
+  // row count m, or the grid-fill rule where the table carries one (src/kernels/geometry-profile.ts).
+  // Pass the geometry taken once **unchanged** to key, WGSL and dispatch.
+  const geometry = gemmShapeGeometry(profile, { m, n, k, batch: 1 });
   return {
     where,
     temps: [],
@@ -683,8 +683,9 @@ const linearI8a8Program = (
  * The split-K linear (src/kernels/linear-splitk.ts): the split of the linear GEMM writes the partial
  * sums of every K slice into one temporary, then the combine adds them and the bias into the output.
  *
- * MUST: the partial takes the tile geometry the reference GEMM takes for `m` (the adapter's profile
- * — the same lookup as {@link linearGemmProgram}), passed once unchanged to key, WGSL and grid; the
+ * MUST: the partial takes the tile geometry the reference GEMM takes for the linear's shape (the
+ * adapter's profile — the same lookup as {@link linearGemmProgram}, so with one slice it is that
+ * GEMM's kernel over every K tile), passed once unchanged to key, WGSL and grid; the
  * slice is the grid's z axis, one workgroup per (tile, slice), so a grid past the device limit on any
  * axis fails loudly (the emitter's `tiledWorkgroups`).
  */
@@ -698,7 +699,7 @@ const linearSplitKProgram = (
   profile: GeometryProfile,
 ): LinearProgram => {
   const params = linearSplitKParams(m, n, k, slices);
-  const geometry = gemmRowsGeometry(profile, m);
+  const geometry = gemmShapeGeometry(profile, { m, n, k, batch: 1 });
   return {
     where,
     temps: [linearSplitKPartialsBytes(m, n, slices)],

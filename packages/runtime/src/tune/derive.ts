@@ -3129,10 +3129,14 @@ export const buildGeometryProfile = (
   // The GEMV choices come from GEMV sweep records (`deriveLinearGemvChoices`), never from these: a
   // base's field is carried as it is, so a regeneration of the tile geometry does not drop it
   const linearGemv = carry?.base.linearGemv;
+  // The grid-fill rule likewise comes from grid sweep records (`deriveGemmGrid`) and is carried as it
+  // is: a regeneration of the M buckets leaves it in force
+  const gemmGrid = carry?.base.gemmGrid;
   const table: GeometryProfile = {
     ...fields,
     ...(attentionOnline === undefined ? {} : { attentionOnline }),
     ...(linearGemv === undefined ? {} : { linearGemv }),
+    ...(gemmGrid === undefined ? {} : { gemmGrid }),
   };
   const attentionBench: AttentionBenchProvenance | undefined =
     attention === undefined

@@ -81,6 +81,11 @@ measurements in `docs/research/`.
   case with `explore` unless `idleSeconds` is given (10 s with the other sets, and in `geometry-sweep`): on an RTX
   3080 Ti two explore runs without idle time took a third less time, and the derivation from them differed from that of
   two runs with 10 s on 28 of 216 decisions, where two pairs each mixing one run of either kind differed on 30.
+- `@karume/runtime`: a geometry profile may carry the grid-fill rule of the GEMM (`gemmGrid`, type `GemmGridRule`): a
+  ladder of tiles walked by the dispatch grid's workgroup count, which in such a table replaces the row-count buckets
+  of linear (and its split-K partial), matmul and bmm. A table injected with `acquireGpu({ geometryProfile })` may
+  carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. Neither the default profile nor any
+  built-in table carries one, so no Session's keys or kernels change.
 
 ### Changed
 

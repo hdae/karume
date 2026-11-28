@@ -39,6 +39,7 @@
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
+import type { GemmShape } from "../kernels/geometry-profile.ts";
 import { DEFAULT_CANDIDATE_SET, type SweepSet } from "./geometries.ts";
 
 /**
@@ -199,6 +200,17 @@ export type SweepCase =
   | AttentionCase
   | Conv2dCase
   | Conv3dI8a8Case;
+
+/**
+ * The GEMM shape of a linear / matmul / bmm case as the geometry selection reads it
+ * (`gemmShapeGeometry`): bmm's M of one matrix and its batch on the z axis, a batch of 1 otherwise.
+ */
+export const gemmCaseShape = (sweepCase: LinearCase | MatmulCase | BmmCase): GemmShape => ({
+  m: sweepCase.m,
+  n: sweepCase.n,
+  k: sweepCase.k,
+  batch: sweepCase.op === "bmm" ? sweepCase.batch : 1,
+});
 
 /**
  * The bucket boundaries of the geometry profile's `gemmRows` (the `maxRows` column, ADR 0116

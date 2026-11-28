@@ -151,6 +151,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemmGridRule",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemmRowsRule",
         "kind": "typeAlias"
       },

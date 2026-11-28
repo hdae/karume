@@ -93,6 +93,41 @@ time.
   them: 152 of the 1,656 rows of `quick+` come from `apple-m5` and `apple-metal-3-shared` (1,504 without them), and
   3 of the 213 rows `k88` forms over its own 19 cases (210 without them).
 
+## The grid-fill rule of the GEMM
+
+A table may carry a rule that chooses the tile of the GEMM of linear, matmul and bmm from the dispatch grid's workgroup
+count instead of the row count alone (`gemmGrid` — ADR [0157](../decisions/0157-gemm-tile-from-grid-fill.md)).
+
+- **The field**: `ladder` (two tiles or more, largest first), `keepLargest.minWorkgroups` and `keepLargest.minK` (when
+  the largest tile is kept), `minWorkgroups` (the least workgroup count of a smaller tile's grid) and `maxPadding`
+  (the largest tile area over output area a tile is taken at).
+- **The walk** (`gemmShapeGeometry`): the grid of a tile on a shape has `ceil(N / tileN) · ceil(M / tileM) · batch`
+  workgroups, and its padding is `(ceil(N / tileN) · tileN · ceil(M / tileM) · tileM) / (M · N)`. The largest tile is
+  taken when K is at least `keepLargest.minK`, its grid has at least `keepLargest.minWorkgroups` workgroups and its
+  padding is at most `maxPadding`; otherwise the first smaller tile whose grid has at least `minWorkgroups` workgroups
+  and whose padding is at most `maxPadding`; otherwise the last tile. The padding is compared as a product of
+  integers, so a padding of exactly the bound is taken.
+- **Where it applies**: the GEMM of linear (every weight storage, f32 and f16 compute, over the flattened rows, a batch
+  of 1), the split-K partial (the tile of the reference GEMM of the same shape, so that its one-slice identity stays
+  the identity with the GEMM the Session would run), matmul (a batch of 1) and bmm (M of one matrix, its batch on the
+  z axis). In a table that carries the field these ops do not read `gemmRows`. Nothing else reads the field: the i8a8
+  paths, the fused attention, conv and the states-shaped and row-block attention select as before.
+- **Without the field** the lookup is the `gemmRows` rule of M, the same object as before the field existed, so a
+  table without it keeps every pipeline key, WGSL text and dispatch. The default profile carries no rule, and no
+  registered table carries one: no Session's kernels change.
+- **Checks** (at injection, selection and JSON reading): the ladder has two tiles or more in strictly decreasing tile
+  area, each passes the geometry check, and may carry the skeleton form but not the counter decode; the counts are
+  positive integers; the padding bound is a finite number of at least 1. A lookup refuses a shape whose M, N, K or
+  batch is 0. The limit check names a ladder tile past the device's workgroup limits. The JSON reader rejects unknown
+  fields inside the rule.
+- **Identity**: a tile the rule picks writes the bucket tile's words by construction of the WGSL (the geometry decides
+  which thread computes which output, not the order of a K reduction); below the WGSL it is a fact of the device's
+  compiler, checked by a GPU test on the development machine (every storage, every step of the ladder, matmul, bmm and
+  the split-K partial at one slice).
+- **Matching** (`geometryProfileMismatch`) and the per-family kernel fingerprint take the `gemm` family over
+  `gemmRows`, the field its sweep records decide, also in a table that carries the rule: they do not cover the rule,
+  as they do not cover the GEMV choices. A derivation on a base table carries the base's rule as it is.
+
 ## A record
 
 - A workbench record (`karume-workbench/1`), unwrapped to its `data`, or a bare runtime record
@@ -728,6 +763,12 @@ written.
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
+- The grid-fill rule (core lane): the walk at its edges (the K floor, the least workgroup count, a padding of exactly
+  the bound, the batch on the z axis, the last tile); on the recon's 125 shapes of 2026-11-28 the tile the recon's own
+  fitting script picked; the lookup without the field equal to the `gemmRows` rule of M on every registered table and
+  the default; the refusals of a broken rule, among them a ladder out of order; the JSON round trip; the linear's
+  dispatch program naming the rule's tile, and the split-K partial the reference GEMM's tile. On the development
+  machine's GPU, a Session with the rule writes the default profile's words on every storage and step (GPU tests).
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before
   they moved into the profile, without its one per-shape exception, and the rows added since —; the registered
   tables that carry the field are `apple-metal-3`, `nvidia-ampere`, `nvidia-blackwell` and `apple-m5`, and one

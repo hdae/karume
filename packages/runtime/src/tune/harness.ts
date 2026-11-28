@@ -176,6 +176,7 @@ import {
   caseShape,
   type CaseWeight,
   type Conv2dCase,
+  gemmCaseShape,
   type Conv3dI8a8Case,
   type LinearCase,
   type MatmulCase,
@@ -518,8 +519,8 @@ const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
     output: "c",
     // The sweep's default = the default profile's geometry (row-count bucket
     // `gemmGeometryForRows(m)` — the ratio baseline).
-    // The geometry a Session actually uses is the adapter's profile (gemmRowsGeometry at
-    // linear.ts:84)
+    // The geometry a Session actually uses is the adapter's profile (gemmShapeGeometry in
+    // buildMatmul)
     defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
@@ -948,7 +949,7 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
     case "matmul":
     case "bmm":
       // The evaluation set k88 measures the geometries the tables give this row count
-      if (set === "k88") return k88GemmCandidates(sweepCase.m);
+      if (set === "k88") return k88GemmCandidates(gemmCaseShape(sweepCase));
       // The sweep's linears compute in f32 (linearPlan), the compute the forms are built for
       return gemmTakesForm(sweepCase.op, caseUsesVec4(sweepCase))
         ? gemmFieldCandidatesIn(set)

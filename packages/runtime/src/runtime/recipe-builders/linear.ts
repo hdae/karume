@@ -36,7 +36,7 @@ import { type LinearProgram, linearProgramFor, type ProgramOperand } from "../li
 import { selectLinearStrategy } from "../linear-strategies.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
-import { gemmRowsGeometry } from "../../kernels/geometry-profile.ts";
+import { gemmShapeGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../../kernels/matmul.ts";
 import { numel } from "../../ops.ts";
@@ -56,11 +56,11 @@ export const buildMatmul = async (
   // v4 (vec4 reads and writes) is one bit derived from the shape. It is evaluated at derivation
   // and passed to both the key and the WGSL (same key ⇔ same bytes is preserved).
   const v4 = gemmUsesVec4(k, n);
-  // MUST: the tile geometry is the bucket of the row count M (the adapter's profile —
-  // src/kernels/geometry-profile.ts). Pass the geometry taken once **unchanged** to all three of
-  // key, WGSL and dispatch — if even one gets a different geometry, output tiles go missing
-  // silently.
-  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+  // MUST: the tile geometry is the adapter's profile's for the shape — the bucket of the row count M,
+  // or the grid-fill rule where the table carries one (src/kernels/geometry-profile.ts). Pass the
+  // geometry taken once **unchanged** to all three of key, WGSL and dispatch — if even one gets a
+  // different geometry, output tiles go missing silently.
+  const geometry = gemmShapeGeometry(face.state.geometryProfile, { m, n, k, batch: 1 });
   const key = matmulKey(v4, m, geometry);
   const { pipeline, layout, roles } = await face.state.cache.get(key, matmulWgsl(v4, m, geometry));
   const params = face.writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
@@ -101,10 +101,10 @@ export const buildBmm = async (
   const [batch, m, k] = a;
   const n = b[2];
   const v4 = gemmUsesVec4(k, n);
-  // The geometry bucket is **the m of one matrix** (the batch is on the z axis, independent of the
-  // tile geometry). Key, WGSL and dispatch get the same single return value (the same discipline
-  // as matmul).
-  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+  // The row count is **the m of one matrix** (the batch is on the z axis; the grid-fill rule counts
+  // it in the grid's workgroups). Key, WGSL and dispatch get the same single return value (the same
+  // discipline as matmul).
+  const geometry = gemmShapeGeometry(face.state.geometryProfile, { m, n, k, batch });
   const key = bmmKey(v4, m, undefined, geometry);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,

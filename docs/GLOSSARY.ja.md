@@ -284,6 +284,8 @@
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | adapter ごとに選ぶ静的な表。GEMM の幾何（op × 行数バケット）と linear の GEMV の選択（`linearGemv`: 逐次 GEMV の変種と形状ごとの例外・行ブロックのスレッド数の目標・並列 GEMV の行）を持つ。どの表にも合わない adapter は既定プロファイル | — | ADR 0115・spec/geometry-profiles.md |
+| grid-fill rule (`gemmGrid`) △ | グリッド充填の規則 | linear・matmul・bmm の GEMM のタイルを、行数だけでなくディスパッチのグリッドの workgroup 数から選ぶ、プロファイルの任意の欄。大きい順のタイルのラダーを上から見て、グリッドが十分に埋まる最初のタイルを取る。この欄を持つ表では行数バケットの代わりになり、持たない表（既定プロファイルと今の組み込みの表すべて）は従来どおり | — | ADR 0157・spec/geometry-profiles.md |
+| ladder (grid-fill rule) △ | ラダー | グリッド充填の規則が上から順に見るタイルの並び（大きい順）。今は 128×128・64×64・64×32・32×32・16×16 の 5 つ | — | ADR 0157 |
 | measured / predicted / default (geometry profile levels) △ | 実測 / 予測 / 既定（プロファイルの段階） | adapter が走らせる表の 3 段階。実測 = adapter の description で合う、その機の記録から導いた表。予測 = vendor と architecture だけで合う表（同じ architecture のほかの機で測った幾何を走らせる）。既定 = どの表にも合わず既定プロファイル。Chrome はフラグなしでは description を返さないので、ブラウザの利用者は予測か既定になる | — | spec/geometry-profiles.md・ADR 0156 |
 | shared table (shared derivation) △ | 共有の表（共有の導出） | 同じ vendor と architecture の 2 台以上の掃引記録から導く予測の表。機ごとに 1 つの adapter として読み、どの機でもその機の既定に対して採用の規則を満たす幾何だけを採る。機をまたいで時間を比べたりまとめたりしない。タイルの幾何だけを持つ（`apple-metal-3-shared`） | — | spec/geometry-profiles.md・ADR 0156 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |

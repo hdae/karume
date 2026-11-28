@@ -159,9 +159,12 @@ export type {
  * selection).
  * The default table and the selection function are not exported as values (they are internal
  * codegen vocabulary; tools import them from `src/`). A generated table's `provenance` holds one
- * `GeometryProfileFamilyProvenance` per op family (`GeometryProfileFamily`) its sweeps measured.
+ * `GeometryProfileFamilyProvenance` per op family (`GeometryProfileFamily`) its sweeps measured. A
+ * table may carry the grid-fill rule of the GEMM (`GemmGridRule`), which replaces its row-count
+ * buckets for linear / matmul / bmm; no built-in table carries one.
  */
 export type {
+  GemmGridRule,
   GemmRowsRule,
   GeometryProfile,
   GeometryProfileFamily,
