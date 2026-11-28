@@ -323,6 +323,26 @@ maintainer's ruling of 2026-11-06).
          refusing a record per op family (the record's measured-candidate fingerprint is one value per record); the
          quick look on the geometry sweep's evaluation set `k88`, whose summary compares every candidate with the
          table's (run it at margin 0).
+     - **The GEMM tile from the grid fill** (filed 2026-11-28, the maintainer's item; ADR
+       [0157](decisions/0157-gemm-tile-from-grid-fill.md) proposed, perf-ledger K-116,
+       [research 2026-11-28](research/2026-11-28-gemm-grid-fill.md)): the tile of linear, matmul and bmm chosen from the
+       dispatch grid's workgroup count by an optional table field instead of the M buckets. In this order:
+       - G1: the runtime — the field, its checks and JSON reader, the selection at the three call sites and their tune
+         mirrors, the GPU identity test over every storage;
+       - G2: the sweep's `grid` set (census-derived cases spanning the grid fill, the ladder only, interleaved
+         rounds) in the tune module and the workbench's `geometry-sweep` entry;
+       - G3: the derivation of the two integers from grid records and the generator writing the field, with a dry run on
+         this machine for the maintainer;
+       - G4: two grid records on the RTX 3080 Ti, `nvidia-ampere` regenerated and this machine's corpus census rows
+         rewritten — waits for the maintainer's confirmation, gated by the full `vp test` with every output row
+         unchanged;
+       - G5: the end-to-end Session A/B (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at
+         P = 1K and 4K) against the same table without the field — K-116's kill criterion;
+       - G6: other devices (their own grid records; ladders with the skeleton forms where their tables carry forms) and
+         the grid set on the benchmark page's explore run;
+       - outside the rule's scope, each its own item if taken up: the i8a8 linear (keyed by M only too, not measured
+         at small N), the states-shaped and row-block attention (they read the default bucket table directly), conv1d /
+         conv2d / conv3d and the fused attention's fixed fields.
   7. **Weights from outside the exporter** ([spec/single-file.md](spec/single-file.md),
      [spec/convert.md](spec/convert.md), [spec/safetensors.md](spec/safetensors.md); manifest `karume/6` — ADR
      [0153](decisions/0153-manifest-v6-name-map.md)). `fromSingleFile` on the pipelines, the counterpart of diffusers'

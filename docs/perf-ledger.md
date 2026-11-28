@@ -653,3 +653,15 @@ reachable only through the private key `LINEAR_SPLIT_K`.
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |
 | 🚧 | K-115 | Select the split-K GEMM by level: with `linear` at `reorder`, a linear whose reference grid is under the adapter profile's thread target takes the split at the largest slice count that keeps the grid at or under the target, each slice at least 256 terms (design A of the recon of 2026-11-27) | Filed 2026-11-28. **Kernel ratios measured** (RTX 3080 Ti, f32 storage): Gemma 4 prefill at 768 rows, k / v 0.24–0.29 of the reference, q 0.73, down 0.76–0.84 at the best slice count; full grids (gate / up) 1.0–1.33, so a split there loses. End to end not measured (inference of the recon: about 8% of a 768-row chunk, 40–50 ms of TTFT at P = 1K on presets that declare `reorder`). Before adopting: the thread target per adapter class from sweep records, with no default-profile target; then a Session A/B of `@karume/runtime/tune` on Gemma 4 E2B / E4B prefill at `i4-fast` and `bf16-fast` (P = 1K and 4K, ABBA, minGain 1.05). **kill**: if that Session A/B does not adopt on any measured device, delete the split-K linear (kernel option, program, private key, tests, kernel check, glossary row) and record the reason here |
+
+## 2026-11-28 The GEMM tile from the grid fill
+
+The tile of the GEMM of linear, matmul and bmm is chosen from the row count alone, so shapes with few outputs
+under-fill the dispatch grid: on the RTX 3080 Ti the tile a Session runs is the fastest on 13 of the default presets'
+125 GEMM shape classes ([research 2026-11-28](research/2026-11-28-gemm-grid-fill.md)). ADR
+[0157](decisions/0157-gemm-tile-from-grid-fill.md) (proposed) chooses it from the grid's workgroup count by a rule a
+table carries.
+
+| Status | ID | Candidate | Preconditions / kill criterion |
+| ------ | --- | --------- | ------------------------------ |
+| 🚧 | K-116 | Choose the GEMM tile of linear / matmul / bmm by the grid-fill rule (a ladder of five tiles walked by the dispatch grid's workgroup count, two integers per device, a K floor and a padding bound — the optional table field `gemmGrid`) | Filed 2026-11-28. **Kernel ratios measured** (RTX 3080 Ti, the recon of 2026-11-28): the rule with (256, 48) takes ×0.880 of today's census-weighted GEMM time over the 125 classes, the fastest tile of every class ×0.877, with identical words in 6,750 of 6,750 candidate rows; per family ×0.549 (depth-anything) to ×0.92 (Gemma 4 E2B prefill). End to end not measured. Before adopting into `nvidia-ampere`: two grid records of this machine, the table regenerated and the corpus census rows rewritten on the maintainer's confirmation, the full `vp test` with every output sha256 row unchanged. **kill**: dropped if the end-to-end Session A/B of `@karume/runtime/tune` (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at P = 1K and 4K, ABBA, cooled, minGain 1.05 per family, against the same table without the field) shows no gain on any family: delete the field, its derivation, the grid set and their tests, and record the reason here |
