@@ -3,7 +3,11 @@
 - Status: accepted (2026-11-28 — the maintainer accepted it and confirmed decision 8 for `nvidia-ampere`: the table
   takes the field from two grid records of the RTX 3080 Ti, and this machine's corpus census rows are rewritten,
   gated by the full `vp test` with every output row unchanged; proposed the same day, when the maintainer asked for
-  the item and took the recon's recommended options)
+  the item and took the recon's recommended options). The adoption into `nvidia-ampere` was built the same day and
+  taken back: in the full `vp test` every output row held and 8 census rows moved by the tile alone, but a Session
+  with a zero-element GEMM (a symbolic dimension of 0) failed — the lookup refuses a shape with a zero dimension, a
+  case a table without the field never reaches — and seven tests read this machine's tile by the M buckets; the
+  table carries no field until those are settled ([backlog](../backlog.md), G4)
 - Date: 2026-11-28
 - Related: [0022](0022-gemm-register-blocking.md) (the tile geometry changes the work split only) /
   [0115](0115-geometry-profiles.md) (geometry profiles, a static table per adapter, no run-time autotuning) /

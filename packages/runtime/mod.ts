@@ -161,7 +161,7 @@ export type {
  * codegen vocabulary; tools import them from `src/`). A generated table's `provenance` holds one
  * `GeometryProfileFamilyProvenance` per op family (`GeometryProfileFamily`) its sweeps measured. A
  * table may carry the grid-fill rule of the GEMM (`GemmGridRule`), which replaces its row-count
- * buckets for linear / matmul / bmm; of the built-in tables, `nvidia-ampere` carries one.
+ * buckets for linear / matmul / bmm; no built-in table carries one.
  */
 export type {
   GemmGridRule,

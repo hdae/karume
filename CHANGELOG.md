@@ -89,8 +89,8 @@ measurements in `docs/research/`.
 - `@karume/runtime`: a geometry profile may carry the grid-fill rule of the GEMM (`gemmGrid`, type `GemmGridRule`): a
   ladder of tiles walked by the dispatch grid's workgroup count, which in such a table replaces the row-count buckets
   of linear (and its split-K partial), matmul and bmm. A table injected with `acquireGpu({ geometryProfile })` may
-  carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. The default profile carries none, and
-  of the built-in tables only `nvidia-ampere` does (below).
+  carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. Neither the default profile nor any
+  built-in table carries one, so no Session's keys or kernels change.
 - `@karume/runtime/tune`: the geometry sweep's `grid` candidate set (`runGeometrySweep({ candidateSet: "grid" })`):
   the grid-fill rule's ladder of five tiles on 33 linears and bmms of the default presets (`geometrySweepCases("grid")`,
   weights in f32, f16, bf16 and int4 as the presets store them), timed in interleaved palindrome rounds at one reps
@@ -104,7 +104,7 @@ measurements in `docs/research/`.
   is identical to the default on every case, not slower than the table's tile beyond `1 ÷ (×1.065 × the two rows'
   gaps)` in any reading (a steady record alone, any other beside a second), and gains at least ×1.05 on the
   census-weighted total; none qualifying, the table carries no field. The generator takes the records with
-  `--grid-records`.
+  `--grid-records`. No embedded table was regenerated with it.
 
 ### Changed
 
@@ -135,11 +135,6 @@ measurements in `docs/research/`.
   g32 parallel rows from a row block of 4 to 2. A sequential variant and a row block write the words of the choice
   they replace, so no Session's numbers change on those adapters. `nvidia-ampere` (its records are unsteady, so the
   rule of two records gives its field back) and `nvidia-blackwell` (waiting for a second measurement) are unchanged.
-- `@karume/runtime`: the embedded table `nvidia-ampere` carries the grid-fill rule of the GEMM, (256, 48) over the
-  code's ladder, derived from two grid records of the RTX 3080 Ti; its tile families and GEMV choices are unchanged.
-  On an adapter it matches, linear, matmul and bmm take the tile the dispatch grid's workgroup count picks instead
-  of the row-count bucket's (a census-weighted ×0.926 of the GEMM time over the grid set's 33 cases on the RTX
-  3080 Ti, kernel time only), with the same output words; a Session compiles more distinct tiles at first use.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
   (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group,
   and against the device table's choice where the record names it, as the derivation keeps a table's choice),

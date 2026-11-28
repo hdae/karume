@@ -26,16 +26,11 @@ import {
   UNSTEADY_ROUNDS,
 } from "./helpers/grid-records.ts";
 
-/**
- * `nvidia-ampere` as the table the recon measured against — its M buckets, without the grid-fill
- * rule it carries since (derived from this machine's grid records) —, its provenance's adapter the
- * records'.
- */
+/** `nvidia-ampere` as the table, its provenance's adapter the records'. */
 const FAMILIES = NVIDIA_AMPERE.provenance?.families ?? {};
-const { gemmGrid: _derivedSince, ...BUCKETS_ONLY } = NVIDIA_AMPERE;
 
 const TABLE: GeometryProfile = {
-  ...BUCKETS_ONLY,
+  ...NVIDIA_AMPERE,
   provenance: { adapter: GRID_ADAPTER, families: FAMILIES },
 };
 
