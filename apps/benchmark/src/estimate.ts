@@ -32,8 +32,11 @@ import type { CaseKind, SweepId } from "./plan.ts";
  * case, 28.5 and 16.0 s; and the explore set predicts every sentinel row ×1.03 faster than the
  * default's choice, not ×1.10, which adds 0.6 to 7.5 % to the other cases' timed passes on the four
  * devices' records (2.8 % on average), while a device's embedded table adds 1.3 to 4.8 % to the whole
- * set's (its choices timed and re-timed besides): over the four devices with and without their table
- * (outputs/misc/gemv-rule-2026-11-28/fix/explore-plan.txt), 28.9 and 16.7 s — 29 and 17 s.
+ * set's (its choices timed and re-timed besides). Each kind's prior takes the mean increase of its own
+ * timed passes over the four devices with and without their table
+ * (outputs/misc/gemv-rule-2026-11-28/fix/explore-plan.txt): ×1.002 for a sentinel, which the table
+ * alone moves (the margin leaves the sentinels as they were), and ×1.044 for another case — 28.6 and
+ * 16.7 s, 29 and 17 s.
  */
 export const PRIOR_SECONDS: Readonly<Record<CaseKind, number>> = {
   sentinel: 29,
