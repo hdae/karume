@@ -678,6 +678,13 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // its default group (the per-quad group scale of the fill).
     ["linear_splitk_gemm_wbf16_s4_v4.wgsl", linearSplitKGemmWgsl("bf16", true, 4)],
     ["linear_splitk_gemm_wi4_g32_s4_v4.wgsl", linearSplitKGemmWgsl("i4", true, 4, undefined, 32)],
+    // The other storages' vec4 decode: f16 (unpack2x16float), i8 (a per-channel scale) and i2 (an
+    // offset code); and one scalar fill of a non-f32 storage (i8), whose decode differs from the
+    // vec4 one.
+    ["linear_splitk_gemm_wf16_s4_v4.wgsl", linearSplitKGemmWgsl("f16", true, 4)],
+    ["linear_splitk_gemm_wi8_s4_v4.wgsl", linearSplitKGemmWgsl("i8", true, 4)],
+    ["linear_splitk_gemm_wi2_s4_v4.wgsl", linearSplitKGemmWgsl("i2", true, 4)],
+    ["linear_splitk_gemm_wi8_s4.wgsl", linearSplitKGemmWgsl("i8", false, 4)],
     ["linear_splitk_combine.wgsl", linearSplitKCombineWgsl()],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
     // adaLN fusion (the 4th of ADR 0040). The condition is **placing it as a pair with the plain
