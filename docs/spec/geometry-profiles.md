@@ -642,8 +642,11 @@ measure (a row with packed activations) is not listed: no measurement makes it e
 The generator writes the plan of `missing` as a workbench batch ([workbench.md](workbench.md#batches)),
 `inputs/workbench/batches/gemv-plan-<profile id>.json`: per list of missing candidates one `gemv-sweep` step of the
 `full` set, its `cases` the cases that miss that list at the same row counts, `rows` those row counts, `candidates`
-the list; the steps run twice: a step narrowed to a few cases makes a record of a few groups, and one of fewer than
-20 has no class, so it is evidence only beside a second, even on a steady device. For the same reason no step fills
+the list. A step holds at most 19 groups (its cases × its row counts), one fewer than the 20 a record needs for a
+class; a larger one is split by its cases, in table order. That keeps the batch on the rule it was planned for: a step's
+record that read steady would move its cases' decisions to the rule of one steady record, which reads that record's
+few rows alone, so the batch would not complete what the plan promised. The steps run twice: a record without a class
+is evidence only beside a second, even on a steady device. For the same reason no step fills
 `missingSteady`: the generator lists it apart, per case and row count, as what a steady record that times the named
 kernels fills (a run of the `full` or the `explore` set on the device). So after the batch has run, what the
 derivation still lacks is what `missingSteady` named. With no record at hand the batch is the whole measurement: the

@@ -76,9 +76,10 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)), and
   writes `inputs/workbench/batches/gemv-plan-<profile id>.json` (outside git; the workbench lists it as an untracked
   batch) for those of the rule of two records: `gemv-sweep` steps of the `full` set narrowed to the cases, row
-  counts and candidates that miss the same, run twice. What only a steady record fills (a decision of the rule of one
-  steady record: a steady record timed the case at M = 1) is listed apart and is in no step — a step's record of a few
-  groups has no class —: a steady run of the `full` or the `explore` set fills it. With no record at hand the batch
+  counts and candidates that miss the same, run twice, each step at most 19 groups (cases × row counts) so that its
+  record has no class and stays with the rule of two records it was planned for. What only a steady record fills (a
+  decision of the rule of one steady record: a steady record timed the case at M = 1) is listed apart and is in no
+  step — a step's record has no class —: a steady run of the `full` or the `explore` set fills it. With no record at hand the batch
   is the whole `full` set, twice; with nothing for the batch no batch is written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else (the derivation's message on
   stderr, unchanged).

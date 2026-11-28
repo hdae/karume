@@ -7,15 +7,15 @@
  * (packages/runtime/tests/helpers/gemv-sweep-records.ts). No GPU.
  *
  * Faults injected: staged-l8's kernel fingerprint replaced at M = 4 in one of two records (the plan
- * lists that candidate alone for that case and row count); `--records` beside `--gemv-plan` (a usage
- * error).
+ * lists that candidate alone for that case and row count); steps left unsplit (27 and 23 groups, a
+ * class's worth); `--records` beside `--gemv-plan` (a usage error).
  */
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { BUILTIN_GEOMETRY_PROFILES } from "@karume/runtime";
-import { gemvSweepCases } from "@karume/runtime/tune";
+import { GEMV_STEADY_MIN_GROUPS, gemvSweepCases } from "@karume/runtime/tune";
 import { makeTempDir, remove } from "@karume/test-support/fs";
 import { afterEach, beforeEach, describe, it } from "vite-plus/test";
 import {
@@ -33,6 +33,7 @@ import {
   BATCH_FORMAT,
   gemvPlan,
   PLAN_PASSES,
+  PLAN_STEP_MAX_GROUPS,
   planBatchId,
   planSteps,
   UNTRACKED_BATCHES_DIRECTORY,
@@ -120,6 +121,37 @@ describe("the plan of what the GEMV records lack", () => {
     const pass = steps.length / PLAN_PASSES;
     assertEquals(steps.slice(pass), steps.slice(0, pass));
     assertEquals(planSteps(plan.missing), steps.slice(0, pass));
+  });
+
+  it("splits a step of a class's worth of groups by its cases, so that no step's record can read steady, and the steps still measure exactly what is missing (fault: steps of 27 and 23 groups left whole)", () => {
+    const plan = gemvPlan({ profileId: "test-gpu", records: [loaded(GEMV_A)] });
+    const pass = planSteps(plan.missing);
+    assertEquals(PLAN_STEP_MAX_GROUPS, GEMV_STEADY_MIN_GROUPS - 1);
+    const groups = pass.map(
+      ({ parameters }) => (parameters.cases?.length ?? 0) * (parameters.rows?.length ?? 0),
+    );
+    assert(
+      groups.every((count) => count < GEMV_STEADY_MIN_GROUPS),
+      `steps of ${groups.filter((count) => count >= GEMV_STEADY_MIN_GROUPS).join(", ")} groups`,
+    );
+    // Every (case, row count, candidate) the plan misses, once
+    const measured = pass.flatMap(({ parameters }) =>
+      (parameters.cases ?? []).flatMap((caseId) =>
+        (parameters.rows ?? []).flatMap((m) =>
+          (parameters.candidates ?? []).map((name) => `${caseId} M=${m} ${name}`),
+        ),
+      ),
+    );
+    const missing = plan.missing.flatMap(({ caseId, m, candidates }) =>
+      candidates.map((name) => `${caseId} M=${m} ${name}`),
+    );
+    assertEquals(measured.length, missing.length);
+    assertEquals(new Set(measured), new Set(missing));
+    assertStringIncludes(
+      plan.lines.join("\n"),
+      `each of at most ${PLAN_STEP_MAX_GROUPS} groups (cases × row counts)`,
+    );
+    assertStringIncludes(plan.batch?.description ?? "", "stays with the rule of two records");
   });
 
   it("keeps out of the batch what only a steady record fills, and lists it apart (fault: PLE at M = 4 and 8 counted as filled by the two records of no class)", () => {
