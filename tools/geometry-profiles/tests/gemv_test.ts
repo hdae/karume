@@ -19,6 +19,7 @@ import { BUILTIN_GEOMETRY_PROFILES, type GeometryProfile } from "@karume/runtime
 import { deriveGeometryProfile } from "@karume/runtime/tune";
 import { makeTempDir, remove } from "@karume/test-support/fs";
 import { afterEach, beforeEach, describe, it } from "vite-plus/test";
+import { GEMV_CASES } from "../../../packages/runtime/src/tune/gemv-cases.ts";
 import {
   BASE_TIME,
   GEMV_ADAPTER,
@@ -159,11 +160,13 @@ describe("--gemv-records on a registered table", () => {
       header,
       `Carried over from the registered table at commit ${BASE_COMMIT}: gemm.`,
     );
-    assertStringIncludes(header, "least ×1.100 faster than that choice in every GEMV sweep record");
+    // Both rules are stated: these records have no class, so the rule of two records decided
     assertStringIncludes(
       header,
-      "only when a second record repeats it within\n * ×1.100: a shape whose choice has no such time keeps the default",
+      "at least ×1.100 faster than that choice in every record, with its check held in every one",
     );
+    assertStringIncludes(header, "only when a second record repeats it within ×1.100.");
+    assertStringIncludes(header, "by at least ×1.065 × its gap × the reference's gap");
     // No tile geometry was derived, so its rule is not stated
     assertEquals(header.includes("Adoption: a geometry replaces"), false);
     assertStringIncludes(
@@ -182,6 +185,48 @@ describe("--gemv-records on a registered table", () => {
     assertStringIncludes(printed, "evidence at M=1 from fewer than 2 records");
     assertStringIncludes(printed, "linearGemv: absent from the table");
     assertEquals(readdirSync(join(root, PROFILES_DIRECTORY)), []);
+  });
+
+  it("derives the GEMV choices from one steady record, and states the rule of one steady record in the header (fault of the earlier rule: one record derived nothing)", async () => {
+    const STEADY = "outputs/workbench/node-test-gpu/gemv-sweep_steady.json";
+    // 20 groups with a spread: PLE's three and 17 cases of M = 1; passes of 100 ms
+    const padding = GEMV_CASES.filter(({ id }) => id !== PLE)
+      .slice(0, 17)
+      .map(({ id }) => ({ caseId: id }));
+    write(
+      STEADY,
+      bytesOf(
+        workbenchRecord(
+          "gemv-sweep",
+          gemvRecord(
+            "2026-11-28T11:00:00.000Z",
+            [{ caseId: PLE, rows: [1, 4, 8], times: TIMES }, ...padding],
+            {
+              passes: { reps: 100_000 },
+            },
+          ),
+        ),
+      ),
+    );
+    const code = await main(
+      ["test-gpu", `--gemv-records=${STEADY}`],
+      environment(registeredTable()),
+    );
+    assertEquals(code, 0, stderr.join("\n"));
+    const text = readFileSync(join(root, TABLE), "utf8");
+    assertStringIncludes(
+      text,
+      "steady (0 of 20 groups beyond ×1.050, 0.0 %): read by the rule of one steady record",
+    );
+    assertStringIncludes(text, `one steady record: c32u4 -> c64u8 (×1.200 [1]; break-even`);
+    assertStringIncludes(
+      text,
+      "GEMV choices, one steady record: a record is steady when 20 or more of its groups have a",
+    );
+    assertStringIncludes(
+      text,
+      "default's choice in the same group by at least ×1.065 × its gap × the reference's gap",
+    );
   });
 
   it("refuses a first table from GEMV records alone (it needs the tile geometry's records)", async () => {

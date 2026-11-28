@@ -733,6 +733,10 @@
         "kind": "variable"
       },
       {
+        "name": "GemvCandidateEvidence",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvExploreEvidence",
         "kind": "typeAlias"
       },
@@ -745,6 +749,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvKeptRow",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvMeasurementPlanning",
         "kind": "typeAlias"
       },
@@ -753,7 +761,27 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemvOneRecordEvidence",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvOneRecordOutcome",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvPairReading",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GemvReferenceRefusal",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvRowBlockOption",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemvRowCountEvidence",
         "kind": "typeAlias"
       },
       {
@@ -917,6 +945,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvChangedDecision",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LinearGemvDecision",
         "kind": "typeAlias"
       },
@@ -933,7 +965,15 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LinearGemvRedecision",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LinearGemvRowGain",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvRule",
         "kind": "typeAlias"
       },
       {
@@ -1029,6 +1069,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "decideOneRecord",
+        "kind": "function"
+      },
+      {
         "name": "deriveGeometryProfile",
         "kind": "function"
       },
@@ -1065,11 +1109,19 @@
         "kind": "function"
       },
       {
+        "name": "gemvReadingIsEvidence",
+        "kind": "function"
+      },
+      {
         "name": "gemvReferenceRefusal",
         "kind": "function"
       },
       {
         "name": "gemvRoundsGap",
+        "kind": "function"
+      },
+      {
+        "name": "gemvRowBlockRefusal",
         "kind": "function"
       },
       {
@@ -1150,6 +1202,10 @@
       },
       {
         "name": "planGemvMeasurements",
+        "kind": "function"
+      },
+      {
+        "name": "redecideLinearGemvChoices",
         "kind": "function"
       },
       {

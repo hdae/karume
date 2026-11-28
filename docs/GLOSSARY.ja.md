@@ -302,7 +302,14 @@
 | benchmark app △ | ベンチマークのページ | 外部の協力者が自分の GPU で 2 つの掃引の探索用の集合を走らせ、進み具合・残り時間・見つかった改善の候補を見て、結果を 1 つのファイルで送り返すための private のブラウザアプリ（`apps/benchmark`） | — | spec/benchmark.md |
 | benchmark file (`karume-benchmark/1`) △ | ベンチマークの結果ファイル | ベンチマークの 1 回の実行が残す JSON。workbench が書くのと同じ記録に、実行の時刻・最後まで走ったか（止まった理由）・URL の試行の指定・ページが隠れていたかを添えたもの。`unpack.ts` が workbench の置き場所に記録を書き戻す | — | spec/benchmark.md |
 | optimisable pattern (benchmark) △ | 改善の候補（ベンチマークの） | ベンチマークのページが数える「見つかったもの」。導出と同じ閾値・判定・除外で読む: GEMV は M = 1 のグループで表が持てる候補が既定の選択より ×1.10 以上速く、チェックが通ったもの。幾何は区分のどのケースでも既定より ×1.05 以上速く、出力が既定と同じで、そのケースが比の材料から外れていないもの。1 回の実行での候補で、表に入るのは 2 回目の実行が一致してから | — | spec/benchmark.md |
-| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること（2 つ以上の記録の、根拠になるすべてのグループで既定の選択より ×1.10 速い候補だけを採る。利得は基準の再現された最速の時間に対して読む） | — | spec/geometry-profiles.md |
+| GEMV derivation (`deriveLinearGemvChoices`) △ | GEMV の選択の導出 | 1 つの adapter の GEMV 掃引の記録から、表の `linearGemv` をグループごとに決めること。安定な記録が測った形状は「安定な記録 1 本の規則」、それ以外は「記録 2 本の規則」で決める（下の行） | — | spec/geometry-profiles.md |
+| steady record (GEMV sweep) △ | 安定な記録 | ベースラインのばらつき（`baselineSpread`）を持つグループが 20 以上あり、そのうち ×1.05 を超えるものが 20 % 以下の掃引記録。超えるものが多ければ不安定、20 未満なら分類なし（不安定として読む） | 安定記録・定常記録 | glossary.md |
+| gap (GEMV sweep row) △ | ギャップ（ラウンドの） | 行のラウンドの 2 番目に小さい値 ÷ 最小値。最小が偶然の 1 回でないかの目安。採用のバーは 余裕 × 候補のギャップ × 基準のギャップ | 隙間・差分 | glossary.md |
+| margin (GEMV derivation) △ | 余裕（採用の） | 安定な記録 1 本の規則で、利得が 2 つのギャップに掛けて越えなければならない倍率。既定 ×1.065、導出の引数。出力を決め直す下限は ×1.03 | マージン・閾値 | glossary.md |
+| break-even margin (GEMV derivation) △ | 採用できる最大の余裕 | 読みの 利得 ÷（ギャップ × 基準のギャップ）。その余裕までならその利得は採用のバーを越える。出力が候補ごとに持つので、別の余裕を測り直さずに当てられる | 損益分岐点 | glossary.md |
+| rule of one steady record / rule of two records △ | 安定な記録 1 本の規則 / 記録 2 本の規則 | GEMV の導出の 2 つの採用規則。前者は安定な記録の同じグループの基準に対して 余裕 × ギャップ × ギャップ を越え、表の選択はそのバーで負けるまで残す（2026-11-28）。後者は 2 本以上の記録のすべてで、基準の再現された最速時間に対して ×1.10（2026-11-17） | 1 記録規則・2 記録規則 | glossary.md |
+| re-timed reference (GEMV sweep) △ | 基準の測り直し | ラウンドの後に、グループの基準（ベースライン・既定の reorder の選択・機種の表の選択）をもう 1 回だけ測ること（`retimedPerDispatch`）。ラウンドの最小からバーを越えてずれたグループは、その読みの根拠にならない | 再計測・リタイム | glossary.md |
+| sweep session (GEMV sweep record) △ | 掃引のセッション | ページの読み込み・プロセスの起動ごとに 1 つ作る乱数の id とその起点。記録に id と起点からの時間を書くので、同じセッションの 2 本と別のセッションの 2 本を見分けられる | — | glossary.md |
 | steadiness bound (GEMV sweep) △ | ばらつきの上限 | ベースラインの最大のラウンド ÷ 最小のラウンド（`baselineSpread`）がこれ（1.25）を超えた M = 1 のグループは、掃引が M = 4 / 8 で測らない候補を決める根拠にしない。導出はこの値を読まない | — | glossary.md |
 | reference (GEMV derivation) △ | 基準（のカーネル） | 候補の利得を読む相手。今の既定プロファイルがその形状・行数で走らせるカーネル（出力の語が同じ種類の候補は `exact` の選択、加算順が違う種類の候補は `reorder` の選択）。記録がどの既定の下で作られたかは問わず、その記録が計時していれば使う | 参照（sha256 の参照値と混ぜない） | spec/geometry-profiles.md |
 | repeated reference time (GEMV derivation) △ | 再現された最速の時間 | 基準のカーネルの、与えた記録全体での最速の時間。別の記録が ×1.10 以内の時間を持つときだけ使う。無ければその形状・行数は根拠にならない | — | spec/geometry-profiles.md |

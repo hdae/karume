@@ -9,6 +9,7 @@
  */
 
 import type { GeometryProfile } from "@karume/runtime";
+import type { LinearGemvRule } from "@karume/runtime/tune";
 import type { LoadedRecord } from "./records.ts";
 
 /** A header line would end the comment early. */
@@ -24,14 +25,13 @@ export type HeaderInput = {
   /** The adoption threshold the derivation was given. */
   readonly minSpeedup: number;
   /**
-   * The GEMV sweep records the GEMV choices of linear were derived from, with the rule's threshold
-   * and the factor within which a second record repeats a reference's fastest time; absent when
-   * this generation did not derive them (their verdict lines are among `verdicts`).
+   * The GEMV sweep records the GEMV choices of linear were derived from, with the numbers of the
+   * derivation's two rules; absent when this generation did not derive them (their verdict lines
+   * are among `verdicts`).
    */
   readonly gemv?: {
     readonly records: readonly LoadedRecord[];
-    readonly minSpeedup: number;
-    readonly referenceRepeat: number;
+    readonly rule: LinearGemvRule;
   };
   /**
    * The registered table the derivation took as its base: the last commit that touched its file
@@ -291,14 +291,23 @@ export const profileHeader = (input: HeaderInput): string => {
       ? []
       : [
           "",
-          "GEMV choices: a candidate replaces the default profile's choice for a shape only when it is at",
-          `least ${ratio(gemv.minSpeedup)} faster than that choice in every GEMV sweep record, with its words equal to`,
-          "the baseline's (identical class: the sequential variant's per-shape exceptions) or inside the",
-          "band (reorder class: the parallel rows, measured at every row count of the parallel range and",
-          "not slower at any) in every record; among those, the one whose smallest gain is largest. The",
-          "choice's time is its fastest over the records, and only when a second record repeats it within",
-          `${ratio(gemv.referenceRepeat)}: a shape whose choice has no such time keeps the default, and so do the shared`,
-          "sequential keys whose cases disagree and the rows with packed activations.",
+          `GEMV choices, one steady record: a record is steady when ${gemv.rule.steadyMinGroups} or more of its groups have a`,
+          `baseline spread and at most ${Math.round(gemv.rule.steadyMaxShare * 100)} % of those spread beyond ${ratio(gemv.rule.steadyGroupSpread)}. A shape a steady record`,
+          "measured is decided by the steady records: at one row a candidate qualifies when its check held",
+          "(identical class: the baseline's words; reorder class: inside the band) and its time beats the",
+          `default's choice in the same group by at least ${ratio(gemv.rule.margin)} × its gap × the reference's gap (a gap: the`,
+          "second-smallest round ÷ the smallest) in every steady record that times it — a group with a pass",
+          `under ${gemv.rule.minPassMs} ms, or whose reference re-timed after the rounds departs beyond that bar, is no`,
+          "evidence —; a parallel row's kernel at 4 and 8 rows has a time in those records and is slower than",
+          "the default's choice in none, and a row block is taken only where it beats the row's own kernel",
+          "by the bar at one row count and is slower at none. Among those, the largest gain; a choice the",
+          "table already held stays unless a challenger beats it by the bar in the same group.",
+          "Any other shape, two records: a candidate replaces the default profile's choice only when it is",
+          `at least ${ratio(gemv.rule.minSpeedup)} faster than that choice in every record, with its check held in every one`,
+          "(the parallel rows also measured at every row count of the parallel range and not slower at",
+          "any); among those, the one whose smallest gain is largest. The choice's time is its fastest over",
+          `the records, and only when a second record repeats it within ${ratio(gemv.rule.referenceRepeat)}. Shared sequential keys whose`,
+          "cases disagree keep their choice, and so do the rows with packed activations.",
         ]),
     "",
     // A verdict can quote a record's error text, which may span lines: a line break inside it would

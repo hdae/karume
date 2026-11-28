@@ -486,11 +486,7 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
     ...(gemv === undefined
       ? {}
       : {
-          gemv: {
-            records: gemvRecords,
-            minSpeedup: gemv.derivation.rule.minSpeedup,
-            referenceRepeat: gemv.derivation.rule.referenceRepeat,
-          },
+          gemv: { records: gemvRecords, rule: gemv.derivation.rule },
         }),
     minSpeedup: request.minSpeedup,
     ...(base === undefined

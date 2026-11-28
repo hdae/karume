@@ -229,7 +229,25 @@ maintainer's ruling of 2026-11-06).
        - no test runs a table's parallel rows on their own shapes on the development machine (an injected table would
          allow it): their evidence is the device's sweep records;
        - the choice between sequential variants a few percent apart moves with the records given, and the narrowed
-         sweeps measured four hand-picked variants (the planner still lists the others).
+         sweeps measured four hand-picked variants (the planner still lists the others);
+       - **the rule of one steady record (built 2026-11-28 —
+         [spec](spec/geometry-profiles.md#deriving-the-gemv-choices),
+         [research](research/2026-11-28-gemv-adoption-rule.md)) and the embedded tables**: the four tables that carry
+         GEMV choices were derived under the rule of two records and are not regenerated yet. What the existing records
+         derive under the new rule, per device and against each embedded table, at ×1.065 and at ×1.03, is in
+         `outputs/misc/gemv-rule-2026-11-28/impl/table-diff-<device>.md` (outside git) for the maintainer to rule on —
+         the margin among it (×1.065 by default; ×1.03 is the alternative). Until `apple-m5` is regenerated, its
+         regeneration case (`tools/geometry-profiles/tests/regeneration_test.ts`) is red on a machine that has its two
+         GEMV records: they now derive other choices than the table holds. A table derived at another margin needs that
+         margin on the generator's command line, which it does not take yet;
+       - a device between steady and unsteady has no record: the class's 20 % is a point inside an empty band (the
+         steady devices' records read at most 15.2 %, the RTX 3080 Ti's at least 31.8 %), no integrated GPU, no thermally
+         limited laptop and no unsteady device in a browser was measured, and the six RTX 3080 Ti records of 12 or 13
+         groups that read as steady show what a wrong call costs (2 of 74 adoptions harmful);
+       - a pair gate (a row's quick time against its final time, within ×1.05) made one record of the RTX 3080 Ti as
+         safe as two in the replays, measured on that one unsteady device only: not in the rule;
+       - the row block's thread target at `exact` per device stays its own item (the rule for the thread target from
+         the `row-blocks` set, below).
      - The benchmark page for collaborators (`apps/benchmark`, [the spec](spec/benchmark.md)) is built and has run
        under Node + Dawn only. Open: a run in a browser on the development machine and on a collaborator's device
        (two-level progress, the estimate, the download at the end, a cancelled run); where it is hosted (a static

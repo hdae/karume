@@ -82,6 +82,22 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime/tune`: `deriveLinearGemvChoices` adopts from one steady record. A record is steady when at least 20
+  of its groups have a baseline spread and at most 20 % of those spread beyond ×1.05 (`gemvSteadiness`). A shape a
+  steady record measured is decided by the rule of one steady record: at M = 1 a candidate's gain over the default's
+  choice in the same group must clear margin × its gap × the reference's gap (a row's gap: its second-smallest round
+  ÷ its smallest; the margin `DeriveLinearGemvOptions.margin`, ×1.065 by default) in every steady record that times
+  it, a pass under 20 ms or a reference re-timed beyond that bar being no evidence; its row is not slower than the
+  default's choice at 4 and 8 rows in the same record; a row block clears the bar over the row's own kernel at one row
+  count; and the table's choice stays unless beaten by the bar in the same group. Any other shape is decided by the
+  earlier rule of two records. The field is now the table's choices with the derived ones in place (a shape no record
+  measured keeps the table's choice). A decision carries its evidence (every candidate timed at M = 1 with its gain,
+  gaps, check and break-even margin, and its row's kernels under each row block), and
+  `redecideLinearGemvChoices(derivation, margin)` decides it again under another margin from the output alone and
+  lists what changes; `decideOneRecord` is the rule itself. The result's `rule` names every number of both rules, and
+  a record's provenance its class. `planGemvMeasurements` takes one steady record as enough. The generator's header
+  states both rules. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
+  and, under the new rule, `tableChoice` and `evidence`.
 - `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
   the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
   record — and its re-decision at ×1.03 — reads there.

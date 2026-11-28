@@ -1,10 +1,11 @@
 /**
  * The generator's plan of GEMV measurements (`--gemv-plan`): what the GEMV sweep records at hand
  * lack for `deriveLinearGemvChoices` to be complete under the current runtime — per case and row
- * count, the candidates fewer than two records could be evidence for (`planGemvMeasurements` of
- * `@karume/runtime/tune`) — written as a workbench batch (`karume-workbench-batch/1`) whose steps
- * measure exactly that, twice. With no record at hand the batch is the whole measurement (the `full`
- * set, twice). Pure over the records; the command writes the file.
+ * count, the candidates no steady record and fewer than two records could be evidence for
+ * (`planGemvMeasurements` of `@karume/runtime/tune`) — written as a workbench batch
+ * (`karume-workbench-batch/1`) whose steps measure exactly that, twice. With no record at hand the
+ * batch is the whole measurement (the `full` set, twice). Pure over the records; the command writes
+ * the file.
  *
  * A step is one `gemv-sweep` run of the `full` set narrowed to cases, row counts and candidates
  * that miss the same: the (case, row count) pairs that miss one list of candidates are grouped, and
@@ -28,7 +29,11 @@ export const BATCH_FORMAT = "karume-workbench-batch/1";
 /** Where the workbench reads untracked batches, repository-relative (its `UNTRACKED_BATCHES_DIRECTORY`). */
 export const UNTRACKED_BATCHES_DIRECTORY = "inputs/workbench/batches";
 
-/** How many times the batch measures what is missing: one record is not evidence. */
+/**
+ * How many times the batch measures what is missing: twice. A step narrowed to a few cases makes a
+ * record of a few groups, and one of fewer than 20 has no class, so it is evidence only beside a
+ * second (the rule of two records) — even on a steady device.
+ */
 export const PLAN_PASSES = 2;
 
 /** One step of the batch: the workbench's `{ id, parameters }`. */
@@ -126,7 +131,7 @@ export const gemvPlan = (input: {
       batch: {
         format: BATCH_FORMAT,
         title: `GEMV sweep for ${profileId}: the whole measurement, twice`,
-        description: `Written by ${command} with no GEMV sweep record at hand: the full set (M = 1, 4 and 8, every candidate), ${PLAN_PASSES} times — the derivation reads groups of two records or more.`,
+        description: `Written by ${command} with no GEMV sweep record at hand: the full set (M = 1, 4 and 8, every candidate), ${PLAN_PASSES} times — one record is enough only when it is steady, two are needed otherwise.`,
         steps,
       },
       missing: [],
@@ -141,7 +146,7 @@ export const gemvPlan = (input: {
   const pass = planSteps(missing);
   const measurements = missing.reduce((sum, { candidates }) => sum + candidates.length, 0);
   const lines = [
-    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (fewer than two records could be evidence for the candidate: a current group with its row, read against a usable reference whose fastest time a second record repeats).`,
+    `From ${records.length} GEMV sweep record${records.length === 1 ? "" : "s"}: ${missing.length} of ${planning.groups} (case, row count) groups of the full set miss ${measurements} candidate measurements (no steady record and fewer than two records could be evidence for the candidate: a current group with its row, read against a usable reference — in a steady record its own time, otherwise a fastest time a second record repeats).`,
     `Groups of the records that are not current: ${stale.length}.`,
     ...(pass.length === 0
       ? ["Nothing is missing: the derivation is complete under the current runtime."]
@@ -160,7 +165,7 @@ export const gemvPlan = (input: {
     batch: {
       format: BATCH_FORMAT,
       title: `GEMV sweep for ${profileId}: what the derivation lacks, twice`,
-      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates fewer than two of those records could be evidence for; each step measures them with the references, and the steps run ${PLAN_PASSES} times.`,
+      description: `Written by ${command} from ${records.map(({ path }) => path).join(", ")}: per case and row count of the full set, the candidates no steady record and fewer than two of those records could be evidence for; each step measures them with the references, and the steps run ${PLAN_PASSES} times (a step's record of a few groups has no class).`,
       steps,
     },
     missing,

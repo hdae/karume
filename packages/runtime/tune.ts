@@ -360,10 +360,14 @@ export type {
  * Derives the GEMV choices of linear (`GeometryProfile.linearGemv`) for a table from GEMV sweep
  * records of its adapter, group by group: per shape and class a decision (adopted or kept, the gains
  * per group that is evidence, why it was kept), the groups whose case is not the current runtime's,
- * the lines that state them, and the records used with how much of each is current and how many of
- * its current groups have no usable reference at `exact` and at `reorder`. The field is absent
- * from the result when every choice stays the default's. A record of another format or adapter, a
- * wall-clock or quantized one, the same record twice and no record at all are refused.
+ * the lines that state them, and the records used with how much of each is current, how many of
+ * its current groups have no usable reference at `exact` and at `reorder`, and its class. A shape a
+ * steady record measured is decided by the rule of one steady record (a gain over margin × the two
+ * gaps, `DeriveLinearGemvOptions.margin`, ×1.065 by default; the table's choice kept unless beaten),
+ * whose decisions carry their evidence so that {@link redecideLinearGemvChoices} decides them again
+ * under another margin from the output alone; any other shape by the rule of two records. The field
+ * is absent from the result when every choice is the default's. A record of another format or
+ * adapter, a wall-clock or quantized one, the same record twice and no record at all are refused.
  *
  * {@link planGemvMeasurements} reads the same records and says, per case and row count of the
  * `full` set, the candidates the derivation reads there that fewer than two records could be
@@ -390,7 +394,28 @@ export {
   gemvRowReading,
   gemvTableCandidate,
   planGemvMeasurements,
+  redecideLinearGemvChoices,
 } from "./src/tune/gemv-derive.ts";
+/**
+ * The rule of one steady record on the evidence a decision carries ({@link decideOneRecord}, what
+ * the derivation and a re-decision call), with its readings' tests: whether a reading is evidence at
+ * a margin (its reference's re-timing within the bar) and why a row block does not replace its
+ * reference row's.
+ */
+export {
+  decideOneRecord,
+  gemvReadingIsEvidence,
+  gemvRowBlockRefusal,
+} from "./src/tune/gemv-one-record.ts";
+export type {
+  GemvCandidateEvidence,
+  GemvKeptRow,
+  GemvOneRecordEvidence,
+  GemvOneRecordOutcome,
+  GemvPairReading,
+  GemvRowBlockOption,
+  GemvRowCountEvidence,
+} from "./src/tune/gemv-one-record.ts";
 export { GEMV_MIN_SPEEDUP, gemvGroupRole } from "./src/tune/gemv-candidates.ts";
 export type { GemvGroupRole } from "./src/tune/gemv-candidates.ts";
 export type {
@@ -400,11 +425,14 @@ export type {
   GemvReferenceRefusal,
   GemvRowReading,
   GemvSweepInput,
+  LinearGemvChangedDecision,
   LinearGemvDecision,
   LinearGemvDerivation,
   LinearGemvGain,
   LinearGemvRecordGroups,
+  LinearGemvRedecision,
   LinearGemvRowGain,
+  LinearGemvRule,
   LinearGemvStaleGroup,
   PlanGemvMeasurementsOptions,
 } from "./src/tune/gemv-derive.ts";
