@@ -70,7 +70,8 @@
  * by `decideOneRecord` alone, so {@link redecideLinearGemvChoices} decides an output again under
  * another margin by the same code. Where the table the records derive for holds another choice than
  * the default's, that choice is the one to beat; the field is the table's choices with every
- * decision's derived choice in place, so a shape no record measured keeps the table's choice.
+ * decision's derived choice in place, so a shape no record measured keeps the table's choice — and so
+ * does a decision of the rule of two records that fewer than two records are evidence for.
  *
  * ## The rule of two records (the maintainer, 2026-11-17)
  *
@@ -1013,20 +1014,23 @@ export type LinearGemvDecision = {
    */
   readonly path: "one-record" | "two-record";
   /**
-   * `one-record`: the choice the table the records derive for holds for the shape (the default's
-   * where the table holds it; `no row (…)` for a parallel decision without a row there).
+   * `one-record`, and a `two-record` decision that fewer than two records are evidence for (no
+   * candidate at M = 1, no other row block of the default's row): the choice the table the records
+   * derive for holds for the shape (the default's where the table holds it; `no row (…)` for a
+   * parallel decision without a row there).
    */
   readonly tableChoice?: string;
-  /** `one-record`, `parallelShapes`: the row block of the table's row (absent: none). */
+  /** Beside {@link tableChoice}, `parallelShapes`: the row block of the table's row (absent: none). */
   readonly tableRowBlock?: LinearGemvParallelRows;
   /**
    * The derived choice: under `one-record` the table's when kept, under `two-record` the default's
-   * when kept.
+   * when kept — the table's where fewer than two records are evidence ({@link tableChoice}).
    */
   readonly derivedChoice: string;
   /**
    * `kept`: the choice to beat stays — under `one-record` the table's choice with its row block,
-   * under `two-record` the default's (its row block may still move: then `adopted`).
+   * under `two-record` the default's (its row block may still move: then `adopted`), or the table's
+   * where fewer than two records are evidence (no evidence moves nothing).
    */
   readonly outcome: "adopted" | "kept";
   /** Why the choice to beat stays (`outcome` kept), or under `one-record` why the derived choice won. */
@@ -1584,10 +1588,23 @@ const evaluate = (
   };
 };
 
-/** The outcome of one case and class: the adopted candidate, or why the default stays. */
+/**
+ * The outcome of one case and class: the adopted candidate, or why the default stays — and whether
+ * the records judged the case at all (`judged`: groups of {@link MIN_RECORDS} records or more are
+ * evidence for some candidate at M = 1).
+ */
 type CaseOutcome =
   | { readonly kind: "adopted"; readonly evaluation: Evaluation }
-  | { readonly kind: "kept"; readonly reason: string; readonly nearest?: Evaluation };
+  | {
+      readonly kind: "kept";
+      readonly reason: string;
+      readonly nearest?: Evaluation;
+      readonly judged: boolean;
+    };
+
+/** Whether groups of {@link MIN_RECORDS} records or more are evidence for an evaluation at M = 1. */
+const hasEvidence = ({ gains }: Evaluation): boolean =>
+  new Set(gains.map(({ record }) => record)).size >= MIN_RECORDS;
 
 const judgeCase = (
   records: readonly Labelled[],
@@ -1601,13 +1618,23 @@ const judgeCase = (
   const best = largestSmallest(qualifying);
   if (best !== undefined) return { kind: "adopted", evaluation: best };
   const nearest = largestSmallest(evaluations);
-  if (nearest === undefined) return { kind: "kept", reason: "no candidate was measured" };
+  if (nearest === undefined) {
+    return { kind: "kept", reason: "no candidate was measured", judged: false };
+  }
   return {
     kind: "kept",
     reason: `no candidate is ${formatRatio(GEMV_MIN_SPEEDUP)} faster in the groups of ${MIN_RECORDS} or more records that are evidence, with its check held (nearest ${nearest.name}: ${nearest.failure ?? "?"})`,
     nearest,
+    judged: evaluations.some(hasEvidence),
   };
 };
+
+/**
+ * The reason of a decision of the rule of two records that no two records are evidence for: the
+ * table's choice stays (no evidence is no ground to write the default's back), with why.
+ */
+const unjudgedReason = (reason: string): string =>
+  `fewer than ${MIN_RECORDS} records are evidence for any candidate at M=1, so the table's choice stays (${reason})`;
 
 /*
  * The rule of one steady record: what it reads of the steady records (margin-free evidence), which
@@ -2292,13 +2319,29 @@ const sequentialDecision = (
             .map(({ gemvCase, outcome }) => `${gemvCase.id} ${said(outcome)}`)
             .join("; ")})`;
   const shown = nearest.length === 1 ? nearest[0] : undefined;
+  const shownFields = {
+    ...(shown === undefined ? {} : { candidate: shown.name }),
+    gains: shown === undefined ? [] : shown.gains,
+  };
+  // MUST: records that are evidence for no candidate of the key do not move the table's choice
+  // (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
+  if (outcomes.every(({ outcome }) => outcome.kind === "kept" && !outcome.judged)) {
+    const tableChoice = gemvProfileChoice(first, 1, "exact", context.table).name;
+    return {
+      ...twoRecord,
+      tableChoice,
+      derivedChoice: tableChoice,
+      outcome: "kept",
+      reason: unjudgedReason(reason),
+      ...shownFields,
+    };
+  }
   return {
     ...twoRecord,
     derivedChoice: defaultChoice,
     outcome: "kept",
     reason,
-    ...(shown === undefined ? {} : { candidate: shown.name }),
-    gains: shown === undefined ? [] : shown.gains,
+    ...shownFields,
   };
 };
 
@@ -2420,14 +2463,39 @@ const parallelDecision = (context: DerivationContext, gemvCase: GemvCase): Linea
             .join("; ")}`,
         ]
       : [];
+    const nearestFields = {
+      ...(outcome.nearest === undefined ? {} : { candidate: outcome.nearest.name }),
+      gains: outcome.nearest?.gains ?? [],
+    };
+    // MUST: records that are evidence for no candidate at M = 1, and for no other row block of the
+    // default's row, do not move the table's row (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
+    const rowBlockJudged = tried.some(({ at }) => at.some(({ records }) => records >= MIN_RECORDS));
+    if (!outcome.judged && !rowBlockJudged) {
+      const tableRow = parallelRowOf(context.table, gemvCase);
+      const tableChoice =
+        tableRow === undefined
+          ? `no row (${gemvBaseline(gemvCase, 1).name})`
+          : parallelName(tableRow);
+      const rowBlock = tableRow?.rowBlock;
+      return {
+        ...twoRecord,
+        notes: [...notes, ...rowBlockNote],
+        tableChoice,
+        ...(rowBlock === undefined ? {} : { tableRowBlock: rowBlock }),
+        derivedChoice: tableChoice,
+        outcome: "kept",
+        reason: unjudgedReason(outcome.reason),
+        ...nearestFields,
+        ...(rowBlock === undefined ? {} : { derivedRowBlock: rowBlock }),
+      };
+    }
     return {
       ...twoRecord,
       notes: [...notes, ...rowBlockNote],
       derivedChoice: defaultChoice,
       outcome: "kept",
       reason: outcome.reason,
-      ...(outcome.nearest === undefined ? {} : { candidate: outcome.nearest.name }),
-      gains: outcome.nearest?.gains ?? [],
+      ...nearestFields,
       ...sameRowBlock,
     };
   }
@@ -2523,11 +2591,11 @@ const decisionLine = (decision: LinearGemvDecision, labelOf: LabelOf): string =>
   const blocked = (choice: string, rowBlock: LinearGemvParallelRows | undefined): string =>
     rowBlock === undefined ? choice : `${choice} with row blocks of ${rowBlock}`;
   const defaultText = blocked(decision.defaultChoice, decision.defaultRowBlock);
-  // Under the rule of one steady record the choice to beat is the table's
+  // Under the rule of one steady record, and where no two records are evidence, the table's choice
   const from =
-    decision.path === "one-record" && decision.tableChoice !== undefined
-      ? blocked(decision.tableChoice, decision.tableRowBlock)
-      : defaultText;
+    decision.tableChoice === undefined
+      ? defaultText
+      : blocked(decision.tableChoice, decision.tableRowBlock);
   const fromText = from === defaultText ? from : `${from} (the default's: ${defaultText})`;
   const rowGains =
     decision.rowGains === undefined || decision.rowGains.length === 0

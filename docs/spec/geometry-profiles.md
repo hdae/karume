@@ -570,13 +570,19 @@ measures nothing and changes no default value.
   turns those into it) and the general sequential
   variant (it also sets the row blocks' columns and read-ahead).
 - **The field** is the table's choices (the default's where the table carries none) with every decision's derived
-  choice in place: so a shape no record measured keeps the table's choice, and under the rule of two records a kept
-  decision writes the default's choice, as before. The general variant and the thread target are the default's. The
-  field is absent when it equals the default's choices.
+  choice in place: so a shape no record measured keeps the table's choice. Under the rule of two records a kept
+  decision writes the default's choice, as before, when groups of two records or more are evidence for one of its
+  candidates at M = 1 (or, for a parallel row, for another row block of the default's row at a row count where the
+  two differ); a decision that has no such evidence — the only records of its shape a lone unsteady record or one
+  without a class — judged nothing, so it keeps the table's choice and its row block (`tableChoice`), and its reason
+  says that fewer than two records are evidence, so the table's choice stays. (A lone unsteady RTX 3080 Ti record
+  against `nvidia-ampere` wrote the default's choice over 99 of its 171 rows before this.) Records that judge every
+  shape they hold give what they gave before: `nvidia-ampere`'s 24 records give its field byte for byte. The general
+  variant and the thread target are the default's. The field is absent when it equals the default's choices.
 - **Output**: the field (absent when it is the default's choices), the default profile's choices, the table's choices
   it started from (`tableChoices`), one decision per sequential key, per parallel row and for the thread target (which
   rule decided it, `one-record` or `two-record`; adopted or kept, the default's choice, under the rule of one steady
-  record the table's, and the derived one, the gains per group that is evidence, why it was kept or won; for a
+  record — and where fewer than two records are evidence — the table's, and the derived one, the gains per group that is evidence, why it was kept or won; for a
   parallel row also the row blocks of the default's, the table's and the derived row, and the derived row's gains at
   its other row counts; under the rule of one steady record its `evidence`, above), the groups whose case is not
   current (record, case, row count and how the case differs), the lines that state them (per record its groups —

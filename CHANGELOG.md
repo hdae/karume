@@ -91,7 +91,8 @@ measurements in `docs/research/`.
   default's choice at 4 and 8 rows in the same record; a row block clears the bar over the row's own kernel at one row
   count; and the table's choice stays unless beaten by the bar in the same group. Any other shape is decided by the
   earlier rule of two records. The field is now the table's choices with the derived ones in place (a shape no record
-  measured keeps the table's choice). A decision carries its evidence (every candidate timed at M = 1 with its gain,
+  measured keeps the table's choice, and so does a decision of the rule of two records that fewer than two records
+  are evidence for — a lone unsteady record no longer writes the default's choices back). A decision carries its evidence (every candidate timed at M = 1 with its gain,
   gaps, check and break-even margin, and its row's kernels under each row block), and
   `redecideLinearGemvChoices(derivation, margin)` decides it again under another margin from the output alone and
   lists what changes; `decideOneRecord` is the rule itself. The result's `rule` names every number of both rules, and

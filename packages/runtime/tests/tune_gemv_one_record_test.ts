@@ -17,7 +17,8 @@
 // Faults injected: 19 groups; 5 of 20 groups beyond ×1.05; a gain under its bar (×1.08 with gaps of
 // 1.01); a kernel ×0.99 the default's choice at M = 4; a record without M = 8; a row block ×1.05 the
 // candidate's own kernel; a challenger ×1.04 over the table's choice; the table's choice screened out;
-// the table's choice slower than the default's; one record of an unsteady device; a pass of 10 ms; a
+// the table's choice slower than the default's; one record of an unsteady device; one unsteady or
+// classless record against a table that moved PLE's choices (the default's written back); a pass of 10 ms; a
 // second steady record at ×1.05; a re-timed reference ×0.9 its rounds' minimum.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -352,6 +353,66 @@ describe("⑦ an unsteady record", () => {
     assertEquals(sequentialOf(derive([unsteady("a.json")])).outcome, "kept");
     const two = sequentialOf(derive([unsteady("a.json"), unsteady("bb.json")]));
     assertEquals([two.path, two.outcome, two.derivedChoice], ["two-record", "adopted", "c64u8"]);
+  });
+
+  /**
+   * A table whose choices for PLE's shape are not the default's: the exception c64u8 and the row
+   * staged-l8 with a row block of 8 (the default's: c32u4 and parallel-l4 with a row block of 4).
+   */
+  const MOVED: GeometryProfile = {
+    ...TABLE,
+    linearGemv: {
+      ...DEFAULT_GEOMETRY_PROFILE.linearGemv,
+      sequential: {
+        ...DEFAULT_GEOMETRY_PROFILE.linearGemv.sequential,
+        shapes: [
+          ...DEFAULT_GEOMETRY_PROFILE.linearGemv.sequential.shapes,
+          { storage: "i4", n: 8960, k: 1536, variant: { cols: 64, unroll: 8 } },
+        ],
+      },
+      parallelShapes: DEFAULT_GEOMETRY_PROFILE.linearGemv.parallelShapes.map((row) =>
+        row.storage === "i4" && row.n === 8960 && row.k === 1536 && row.group === 32
+          ? { ...row, lanes: 8, stagedActivations: true, rowBlock: 8 }
+          : row,
+      ),
+    },
+  };
+  const pleRow = (derivation: LinearGemvDerivation) =>
+    (derivation.linearGemv ?? derivation.defaults).parallelShapes.find(
+      (row) => row.storage === "i4" && row.n === 8960 && row.k === 1536 && row.group === 32,
+    );
+
+  it("leaves the table's choices of a shape that fewer than two records are evidence for, and says so (fault: one unsteady record, and one of no class, wrote the default's back)", () => {
+    for (const lone of [unsteady("a.json"), record("a.json", [ple1({})], { groups: 19 })]) {
+      const derivation = derive([lone], MOVED);
+      const sequential = sequentialOf(derivation);
+      assertEquals(
+        [sequential.path, sequential.outcome, sequential.derivedChoice, sequential.tableChoice],
+        ["two-record", "kept", "c64u8", "c64u8"],
+      );
+      assertStringIncludes(sequential.reason ?? "", "so the table's choice stays");
+      const parallel = parallelOf(derivation);
+      assertEquals(
+        [parallel.outcome, parallel.derivedChoice, parallel.derivedRowBlock],
+        ["kept", "staged-l8", 8],
+      );
+      assertStringIncludes(parallel.reason ?? "", "so the table's choice stays");
+      assertEquals(derivation.linearGemv, MOVED.linearGemv);
+      assertStringIncludes(derivation.verdicts.join("\n"), "keeps c64u8 (the default's: c32u4)");
+    }
+  });
+
+  it("still writes the default's choice where two records are evidence and keep it (control: ×1.05 in both, under ×1.10)", () => {
+    const near = (path: string) => record(path, [ple1({ c64u8: faster(1.05) })], { unsteady: 10 });
+    const derivation = derive([near("a.json"), near("bb.json")], MOVED);
+    const sequential = sequentialOf(derivation);
+    assertEquals(
+      [sequential.path, sequential.outcome, sequential.derivedChoice, sequential.tableChoice],
+      ["two-record", "kept", "c32u4", undefined],
+    );
+    assertEquals(pleException(derivation), undefined);
+    // Its parallel candidates are evidence in both records too (at the default's time): the default's row
+    assertEquals([pleRow(derivation)?.lanes, pleRow(derivation)?.rowBlock], [4, 4]);
   });
 });
 
