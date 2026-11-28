@@ -155,7 +155,9 @@ The unit is one test file. After a file runs, a reporter writes a record of what
 | data | Each file the test read, by content hash (by size and modification time above 32 MiB), a module of its import closure included; each directory it listed; each `git ls-files` it ran. |
 | code | The static import closure of the test file and the setup file, the runtime's sources included, each module by its identity (below). A module imported with a query (`.wgsl?raw`) is its file. |
 
-A record also keeps the WGSL texts the file dispatched. They are not part of the key.
+A record also keeps the kernels the file dispatched: each pipeline's label and the sha256 of its WGSL text (not the
+text), and one fingerprint of that set (`packages/test-support/src/kernel-record.ts`). They are not part of the key; a
+`record` run compares the fingerprint with the earlier record's (below).
 
 ### A module's identity
 
