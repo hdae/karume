@@ -1247,9 +1247,11 @@ export type EstimateFusionFacts = Omit<
  * weights an external step may not bind (`sharedOrPooledWeights`, with the expert plan's pooled
  * weights — `pooled` — as the executor takes its pool's). The GEMV choices are the default
  * profile's: an estimate has no adapter. An embedded table without `linearGemv` resolves to them.
- * NOTE: a table that carries its own makes this plan an approximation of the Session's in one
- * place. Of the choices, the fusion pass reads which shapes have a parallel row (the
- * linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing), and no
+ * NOTE: a table that carries its own makes this plan an approximation of the Session's in two
+ * places. Of the choices, the fusion pass reads which shapes have a parallel row (the
+ * linear → static_quantize fusion) and a row's packed-activation flag (the packed pairing); under
+ * the private split-K key the linear selection reads which shapes have a parallel row too, because
+ * the split-K entry comes after the GEMV family's, and the split's partial sums are a temporary; no
  * size reads the rest (the sequential variants, a row's lanes, staged flag and row block: the
  * kernels they select hold no temporary). Every embedded table adds parallel rows — `nvidia-ampere`
  * on one shape (bf16), `nvidia-blackwell` on 20 (5 of them bf16), `apple-metal-3` on 13 (3 of them
@@ -1257,6 +1259,10 @@ export type EstimateFusionFacts = Omit<
  * table): on such an adapter a linear of one of those shapes that feeds a `static_quantize`, at
  * `reorder` and up to 8 rows, folds in the Session and not here. No graph of a Gemma 4 distribution
  * has one, so their plans are the Session's (docs/limitations.md, the `workspaceBytes` section).
+ * Under the split-K key, a linear of one of those shapes that the default's choices leave to the
+ * split-K GEMM takes the parallel GEMV in the Session: the estimate counts partial sums that Session
+ * does not allocate, an overcount (tests/estimate_fused_steps_test.ts states it on bf16
+ * `[1536, 2048]` at 4 rows under `nvidia-ampere`'s choices: 196,608 bytes).
  *
  * `options` are checked values (the entry of {@link estimateGraphMemory} ran
  * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the

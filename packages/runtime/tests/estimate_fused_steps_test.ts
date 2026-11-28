@@ -17,11 +17,13 @@ import { defineRule, type FusionMatch, type NodePlan } from "../kernel.ts";
 import { PipelineKeyConflictError } from "../src/gpu/pipeline-cache.ts";
 import { UNREAD_ATTENTION_DEVICE } from "../src/runtime/attention-route.ts";
 import { estimateFusionFacts } from "../src/runtime/estimate.ts";
-import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, LINEAR_SPLIT_K } from "../src/runtime/executor.ts";
 import { planFusions } from "../src/runtime/fusion.ts";
+import { linearKnobsOf, resolveLinearStrategy } from "../src/runtime/linear-strategies.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { sessionFusionContext } from "../src/runtime/session-fusion-context.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";
 import { openGraph, weight } from "./helpers/estimate-graphs.ts";
 import { fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
@@ -190,6 +192,67 @@ describe("the estimate counts the split-K linear's partial sums", () => {
     );
     // Without the key the linear is the reference GEMM: y alone.
     assertEquals(model.estimate({ ...LIMITS }).scenarios[0].workspaceBytes, 256);
+  });
+
+  it("resolves the strategy with the default profile's GEMV choices: on a shape an adapter's table gives a parallel GEMV row, it counts partial sums that adapter's Session does not allocate (the documented overcount)", () => {
+    // x [4, 2048] → w [1536, 2048] bf16 at `reorder` (parallel GEMV reduction) under the key. The
+    // default profile's choices have no parallel row for this shape, so the selection reaches the
+    // split-K entry: 2048 is 128 K tiles, so 8 slices, partial sums [8, 4, 1536] = 196,608 B beside
+    // y [4, 1536] = 24,576 B (two regions, as above). nvidia-ampere's table adds a parallel row for it
+    // (tests/linear_gemv_profile_test.ts), so a Session on that adapter takes the parallel GEMV, one
+    // dispatch into y: its slot table is y alone — docs/limitations.md, the `workspaceBytes`
+    // section, states this overcount.
+    const [m, n, k] = [4, 1536, 2048];
+    const graph: DeclarationJson = {
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["linear"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
+      outputs: ["y"],
+      initializers: { w: {}, b: {} },
+      values: {
+        w: { dtype: "f32", shape: [n, k] },
+        b: { dtype: "f32", shape: [n] },
+        y: { dtype: "f32", shape: [m, n] },
+      },
+      nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+    };
+    // bf16 0x3c00 = 2⁻⁷ for every weight.
+    const bf16 = new Uint8Array(new Uint16Array(n * k).fill(0x3c00).buffer);
+    const model = openGraph(graph, [
+      weight("w", bf16, { codec: "bf16" }),
+      weight("b", f32Bytes(new Array(n).fill(0.5))),
+    ]);
+    const options = { [LINEAR_SPLIT_K]: true, numerics: { level: "reorder" } } as const;
+    assertEquals(
+      model.estimate({ ...LIMITS, ...options }).scenarios[0].workspaceBytes,
+      m * n * 4 + 8 * m * n * 4,
+    );
+    // The two selections the estimate and that Session make: the Session's linear seat at the same
+    // options, with the default profile's GEMV choices and with nvidia-ampere's.
+    const facts = estimateFusionFacts(
+      planWeightResidency(model.graph),
+      undefined,
+      { ...LIMITS, ...options },
+      UNREAD_ATTENTION_DEVICE,
+    );
+    const ampere = BUILTIN_GEOMETRY_PROFILES.find(({ id }) => id === "nvidia-ampere")?.linearGemv;
+    assert(ampere !== undefined, "nvidia-ampere carries its GEMV choices");
+    const strategy = (linearGemv: typeof ampere): string => {
+      const resolution = resolveLinearStrategy({
+        plan: planGraph(model.graph, {}, undefined).nodes[0],
+        weightStorage: "bf16",
+        groupSize: undefined,
+        knobs: { ...linearKnobsOf(facts.knobs), linearSplitK: true },
+        linearGemv,
+        packed: undefined,
+        prologue: undefined,
+      });
+      return "choice" in resolution ? resolution.choice.id : resolution.refusal;
+    };
+    assertEquals(strategy(facts.linearGemv), "gemm-splitk");
+    assertEquals(strategy(ampere), "gemv-parallel");
   });
 });
 

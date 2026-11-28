@@ -101,7 +101,9 @@ class R (only the order of the additions differs):
   i8a8 path, a packed pairing nor the GEMV family takes it, and the slice rule cuts its K: the largest of 16, 8, 4 and
   2 slices whose shortest slice holds at least 16 K tiles (256 terms; the reduction's last tile may be partial).
 - Its partial sums are a temporary of `slices × m × n` f32 values between its two passes. The memory estimate takes the
-  same private key and counts them.
+  same private key and counts them. It resolves the strategy with the default profile's GEMV choices, so on a shape
+  only the adapter's table gives a parallel GEMV row it counts partial sums the Session, which takes the parallel
+  GEMV there, does not allocate ([limitations](../limitations.md), the section on `workspaceBytes`).
 
 ## Named approximations
 
