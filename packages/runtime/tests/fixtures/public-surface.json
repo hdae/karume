@@ -685,6 +685,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "DeriveGemmGridOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DeriveGeometryProfileOptions",
         "kind": "typeAlias"
       },
@@ -698,6 +702,26 @@
       },
       {
         "name": "EXPLORE_QUICK_LOOK_MARGIN",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_LADDER",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_LARGEST_MIN_WORKGROUPS",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MAX_PADDING",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MIN_K",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMM_GRID_MIN_WORKGROUPS",
         "kind": "variable"
       },
       {
@@ -735,6 +759,30 @@
       {
         "name": "GEOMETRY_MIN_SPEEDUP",
         "kind": "variable"
+      },
+      {
+        "name": "GemmGridCaseOutcome",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridDerivation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridPairVerdict",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridReading",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmGridRecord",
+        "kind": "typeAlias"
       },
       {
         "name": "GemvCandidateEvidence",
@@ -1078,6 +1126,10 @@
       },
       {
         "name": "decideOneRecord",
+        "kind": "function"
+      },
+      {
+        "name": "deriveGemmGrid",
         "kind": "function"
       },
       {

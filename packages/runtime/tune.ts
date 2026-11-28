@@ -510,3 +510,31 @@ export type {
 /** The u32 identity comparison of two word arrays, NaN by a declared policy. */
 export { wordIdentity } from "./src/tune/word-identity.ts";
 export type { NanPolicy, WordIdentity, WordMismatch } from "./src/tune/word-identity.ts";
+/**
+ * The grid-fill rule of the GEMM (ADR 0157 — `GeometryProfile.gemmGrid`): the ladder of five tiles
+ * the geometry sweep's `grid` set times ({@link GEMM_GRID_LADDER}), the K floor and the padding bound a
+ * derivation writes beside a device's two integers, and the grid of integer pairs it tries.
+ * {@link deriveGemmGrid} derives the field for a table from that device's grid records: a pair
+ * qualifies when on every case of the set its tile is identical to the default, measured against the
+ * table's tile (a steady record alone, any other beside a second one) and not slower than it in any
+ * reading beyond the bar `1 ÷ (margin × the two rows' gaps)` (margin ×1.065 by default), and when the
+ * census-weighted GEMM time under it is at most `1 ÷ minSpeedup` of the table's (×1.05 by default);
+ * the qualifying pair of the lowest weighted time is taken, none qualifying leaves the field absent.
+ * Records of another set, format, adapter or runtime, quantised or wall-clock ones, and a shared
+ * table are refused.
+ */
+export { GEMM_GRID_LADDER, GEMM_GRID_MAX_PADDING, GEMM_GRID_MIN_K } from "./src/tune/gemm-grid.ts";
+export {
+  deriveGemmGrid,
+  GEMM_GRID_LARGEST_MIN_WORKGROUPS,
+  GEMM_GRID_MIN_WORKGROUPS,
+} from "./src/tune/gemm-grid-derive.ts";
+export type {
+  DeriveGemmGridOptions,
+  GemmGridCaseOutcome,
+  GemmGridDerivation,
+  GemmGridInput,
+  GemmGridPairVerdict,
+  GemmGridReading,
+  GemmGridRecord,
+} from "./src/tune/gemm-grid-derive.ts";

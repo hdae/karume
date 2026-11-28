@@ -329,13 +329,13 @@ maintainer's ruling of 2026-11-06).
        dispatch grid's workgroup count by an optional table field instead of the M buckets. The field, its checks and
        the selection at the three call sites are built
        ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)), and so is the sweep's `grid` set that times
-       the ladder ([spec](spec/workbench.md#the-geometry-sweeps-grid-set)); no table carries the field. Left, in this
-       order:
-       - G3: the derivation of the two integers from grid records and the generator writing the field, with a dry run on
-         this machine for the maintainer;
-       - G4: two grid records on the RTX 3080 Ti, `nvidia-ampere` regenerated and this machine's corpus census rows
+       the ladder ([spec](spec/workbench.md#the-geometry-sweeps-grid-set)), and the derivation of the two integers with
+       the generator's `--grid-records` ([spec](spec/geometry-profiles.md#deriving-the-grid-fill-rule)); no table
+       carries the field. Left, in this order:
+       - G4: `nvidia-ampere` regenerated from grid records of the RTX 3080 Ti and this machine's corpus census rows
          rewritten — waits for the maintainer's confirmation, gated by the full `vp test` with every output row
-         unchanged;
+         unchanged (the dry run of 2026-11-28 on two records, its integers and the would-be table diff:
+         [research](research/2026-11-28-gemm-grid-fill.md) §5);
        - G5: the end-to-end Session A/B (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at
          P = 1K and 4K) against the same table without the field — K-116's kill criterion;
        - G6: other devices (their own grid records; ladders with the skeleton forms where their tables carry forms) and

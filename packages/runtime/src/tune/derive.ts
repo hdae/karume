@@ -107,7 +107,8 @@
  * `attentionOnline` likewise when no attention-bench records are given. Without `base` (or for a
  * family `base` has no entry for), an uncovered family keeps the default and gets no entry. A
  * base's `linearGemv` (the GEMV choices, which only GEMV sweep records decide —
- * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is.
+ * `deriveLinearGemvChoices` in gemv-derive.ts) is carried as it is, and so is its `gemmGrid` (the
+ * grid-fill rule, which only grid records decide — `deriveGemmGrid` in gemm-grid-derive.ts).
  *
  * ## Shared tables (ADR 0156)
  *
@@ -3356,6 +3357,7 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * (a stale entry throws — sweep that family again), and, without `attentionBench`, its
    * `attentionOnline` and attention-bench block likewise (stale: measure the attention bench again).
    * Its `linearGemv` is carried as it is: GEMV sweep records decide it (`deriveLinearGemvChoices`).
+   * So is its `gemmGrid`: grid records decide it (`deriveGemmGrid`).
    * The records must cover every family they have a row of completely (every case of its current
    * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
    * these options. With `shared`, `base` is a shared table of the records' adapters, and a family

@@ -131,6 +131,43 @@ count instead of the row count alone (`gemmGrid` — ADR [0157](../decisions/015
   `gemmRows`, the field its sweep records decide, also in a table that carries the rule: they do not cover the rule,
   as they do not cover the GEMV choices. A derivation on a base table carries the base's rule as it is.
 
+### Deriving the grid-fill rule
+
+`deriveGemmGrid` of `@karume/runtime/tune` derives the field for a table from that device's grid records (the
+generator's `--grid-records`, [below](#the-command)).
+
+- **What is code and what is the table's**: the ladder (`GEMM_GRID_LADDER` — 128 × 128, 64 × 64 / 256, 64 × 32 / 128,
+  32 × 32 / 128, 16 × 16 / 64), the K floor (256) and the padding bound (1.5) are the code's, written into the field;
+  the two workgroup counts are derived. The pairs tried are `keepLargest.minWorkgroups` ∈ {128, 192, 256, 288, 320,
+  384, 480} × `minWorkgroups` ∈ {32, 48, 64, 96, 128}.
+- **Today's tile** of a case is the table's choice for its shape (`gemmShapeGeometry` of the table the field is
+  derived for: its `gemmRows` rule, or its own field). It must have a time in the records; a tile off the ladder (a
+  table whose rule carries a skeleton form) has none, and every pair is refused.
+- **A record's class**: the GEMV rule's (`gemvSteadiness`) over the cases' default rows — steady when at least 20
+  cases have a default row of two positive rounds or more and at most 20 % of those spread beyond ×1.05; a steady
+  record timed in ns is evidence on its own, any other only beside a second record that times the same two tiles.
+- **A reading** of the pair's tile X against today's tile T in one record: the gain `T.perDispatch ÷ X.perDispatch`
+  (each the least of its aligned rounds ÷ reps) and both rows' gaps (second-smallest round ÷ smallest). X is not
+  slower than today in it when `gain × margin × gap(X) × gap(T) ≥ 1`, the margin ×1.065 (the GEMV rule's,
+  `GEMV_MARGIN`) unless given.
+- **A pair qualifies** when, on every case of the grid set, its tile wrote the default's words and did not fail in any
+  record that timed it, has readings that are evidence against today's tile, and is not slower than today in any of
+  them (a case where the pair takes today's tile has a gain of 1); and when the census-weighted GEMM time under it —
+  each case weighted by its `censusCount` × today's time, its time divided by the geometric mean of its readings'
+  gains — is at most `1 ÷ minSpeedup` of today's (`minSpeedup` ×1.05 by default, the generator's `--min-speedup`).
+  The ×1.05 of the tile derivation stays as this threshold on the total; no case needs a gain of its own.
+- **The outcome**: the qualifying pair with the lowest weighted time (ties to the smaller pair), written with the code's
+  ladder, K floor and padding bound; none qualifying, the table carries no field. The verdict lines give the outcome
+  with each record's class, one line per pair (qualifies or the first reason it does not, with its weighted time), and
+  the cases of the chosen pair — or, none qualifying, of the measured pair with the lowest weighted time — each with
+  its tile, today's tile, its gain and every reading's gain and gaps.
+- **Refused** (thrown): no record, one record given twice, records of two adapters, a record that is not of the grid
+  set, not timed by GPU timestamps, quantised, of another case set, default kernels or measured candidates' kernels
+  than the current runtime's, a row of another case or shape, a case without exactly one default row; a shared table
+  (its integers would be one device's), a table whose match the records' adapter does not fit, and a table whose
+  provenance names another vendor, architecture or device (not the description: under Node on Dawn that is the
+  driver's version, and a table takes records made after a driver update — the GEMV derivation's rule).
+
 ## A record
 
 - A workbench record (`karume-workbench/1`), unwrapped to its `data`, or a bare runtime record
@@ -696,8 +733,8 @@ written.
 ## The command
 
 `node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,…]] [--attention-bench=<path>[,…]]
-[--gemv-records=<path>[,…] [--gemv-margin=<x>]] [--vendor=<v> [--architecture=<a> [--description=<d>]]]
-[--min-speedup=<x>] [--dry-run]`
+[--gemv-records=<path>[,…] [--gemv-margin=<x>]] [--grid-records=<path>[,…]]
+[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]`
 
 `node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
 [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]`
@@ -706,9 +743,13 @@ written.
 
 - A registered id uses its table as base and its table's match; giving a match is an error. An id that is not
   registered needs `--vendor` and `--records`.
-- At least one of `--records` and `--gemv-records` is given. With `--gemv-records` alone, a registered table keeps its
-  tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`. `--min-speedup` is the tile
-  geometry's threshold only.
+- At least one of `--records`, `--gemv-records` and `--grid-records` is given. With `--gemv-records` alone, a
+  registered table keeps its tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`.
+  `--min-speedup` is the tile geometry's threshold and the grid-fill rule's threshold on the weighted total.
+- `--grid-records` takes records of the geometry sweep's `grid` set and derives the grid-fill rule
+  ([above](#deriving-the-grid-fill-rule)) onto the table, after the tile geometry and the GEMV choices; alone, a
+  registered table keeps everything else. Without it a table's field is carried; with it a table no pair qualifies for
+  carries none. The header lists the grid records and states the rule.
 - `--gemv-margin` is the GEMV derivation's margin (`DeriveLinearGemvOptions.margin`, default ×1.065), refused as a
   usage error where the API refuses it (`gemvMarginOf`: a finite number of at least 1) and without
   `--gemv-records`. The lowest margin whose rows the records hold is `GEMV_LOWEST_MARGIN` (×1.03): the sweep times at
@@ -718,14 +759,15 @@ written.
   choice changes at `GEMV_LOWEST_MARGIN` (`redecideLinearGemvChoices` of the output; none listed when the margin is
   that one), so a table's header shows what the lower margin would move.
 - `--shared` derives a shared table ([above](#shared-tables)): a first one needs `--vendor` and `--architecture`, a
-  registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records` and
-  `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.
+  registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records`,
+  `--grid-records` and `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.
 - `--gemv-plan` derives nothing: it prints what the GEMV records lack ([above](#planning-the-gemv-measurements)) and
   writes its batch (with `--dry-run`, prints it); `--records`, `--attention-bench`, a match and `--min-speedup` beside
   it are usage errors. A registered id's table checks the records' adapter as the derivation does.
 - `--dry-run` writes nothing and prints the derived profile, the verdict lines (with the GEMV decisions shape by shape
-  and whether the table would carry the field) and every field that differs from the registered table; with GEMV
-  records, `linearGemv` is compared as each table runs with it (the default's choices where a table has no field).
+  and whether the table would carry the field, and with grid records whether it would carry `gemmGrid`) and every
+  field that differs from the registered table; with GEMV records, `linearGemv` is compared as each table runs with it
+  (the default's choices where a table has no field).
 - A new table is written but not registered: the command prints the two edits registration needs (the array of
   `BUILTIN_GEOMETRY_PROFILES` and the list `geometry_profile_test.ts` compares it with).
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else.
@@ -766,6 +808,12 @@ written.
   case measures one kernel under two names, the derivation adopting a tile with a field and refusing a field where no
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
+- The grid-fill rule's derivation (core lane): replaying the recon's interleaved medians of the ladder on the grid
+  cases against `nvidia-ampere`'s tiles adopts (256, 48); a ladder row not identical to the default refuses every
+  pair that picks it there; a tile slower than today beyond the bar refuses the pairs that pick it and not the others;
+  a weighted gain below the threshold refuses every pair; one unsteady record is no evidence and two are; today's tile
+  is the table's own; the refusals. The generator's `--grid-records`: the dry run, the written field and header, the
+  field carried through a regeneration of the tile geometry, and the usage errors.
 - The grid-fill rule (core lane): the walk at its edges (the K floor, the least workgroup count, a padding of exactly
   the bound, the batch on the z axis, the last tile); on the recon's 125 shapes of 2026-11-28 the tile the recon's own
   fitting script picked; the lookup without the field equal to the `gemmRows` rule of M on every registered table and

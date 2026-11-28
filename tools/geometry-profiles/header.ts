@@ -9,7 +9,7 @@
  */
 
 import type { GeometryProfile } from "@karume/runtime";
-import type { LinearGemvRule } from "@karume/runtime/tune";
+import type { GemmGridDerivation, LinearGemvRule } from "@karume/runtime/tune";
 import type { LoadedRecord } from "./records.ts";
 
 /** A header line would end the comment early. */
@@ -32,6 +32,14 @@ export type HeaderInput = {
   readonly gemv?: {
     readonly records: readonly LoadedRecord[];
     readonly rule: LinearGemvRule;
+  };
+  /**
+   * The grid records the grid-fill rule was derived from, with the numbers of its rule; absent when
+   * this generation did not derive it (its verdict lines are among `verdicts`).
+   */
+  readonly grid?: {
+    readonly records: readonly LoadedRecord[];
+    readonly rule: GemmGridDerivation["rule"];
   };
   /**
    * The registered table the derivation took as its base: the last commit that touched its file
@@ -190,23 +198,28 @@ const ONLINE = "the online attention's key axis (attention-bench records)";
 
 const GEMV = "the GEMV choices of linear (GEMV sweep records)";
 
+const GRID = "the grid-fill rule of the GEMM (grid records)";
+
 /** The header comment (with its closing line and a final newline). */
 export const profileHeader = (input: HeaderInput): string => {
-  const { profile, records, attentionBench, base, minSpeedup, gemv } = input;
+  const { profile, records, attentionBench, base, minSpeedup, gemv, grid } = input;
   const { derived, carried } = derivedFamilies(profile, records);
   const adapters = profile.provenance?.adapters;
   const benchGiven = attentionBench.length > 0;
   const benchCarried = !benchGiven && profile.provenance?.attentionBench !== undefined;
   const gemvCarried = gemv === undefined && profile.linearGemv !== undefined;
+  const gridCarried = grid === undefined && profile.gemmGrid !== undefined;
   const derivedNames = [
     ...derived,
     ...(benchGiven ? [ONLINE] : []),
     ...(gemv === undefined ? [] : [GEMV]),
+    ...(grid === undefined ? [] : [GRID]),
   ];
   const carriedNames = [
     ...carried,
     ...(benchCarried ? [ONLINE] : []),
     ...(gemvCarried ? ["the GEMV choices of linear"] : []),
+    ...(gridCarried ? ["the grid-fill rule of the GEMM"] : []),
   ];
   const lines = [
     `Geometry profile \`${profile.id}\` (**generated — do not edit by hand**).`,
@@ -232,11 +245,20 @@ export const profileHeader = (input: HeaderInput): string => {
           "The GEMV choices of linear (`linearGemv`) come from records of the `gemv-sweep` entry",
           "(`--gemv-records=<path>,<path>[,…]`).",
         ]),
+    ...(grid === undefined && profile.gemmGrid === undefined
+      ? []
+      : [
+          "The grid-fill rule of the GEMM (`gemmGrid`) comes from records of the `geometry-sweep` entry's",
+          "`grid` set (`--grid-records=<path>[,<path>…]`); where the table carries it, it replaces the",
+          "row-count buckets for linear / matmul / bmm.",
+        ]),
     "",
     `Derived in this generation: ${derivedNames.length === 0 ? "none" : derivedNames.join(", ")}.`,
     "",
     ...(adapters === undefined
-      ? [...records, ...attentionBench, ...(gemv?.records ?? [])].flatMap(recordLines)
+      ? [...records, ...attentionBench, ...(gemv?.records ?? []), ...(grid?.records ?? [])].flatMap(
+          recordLines,
+        )
       : sharedRecordLines(adapters, records)),
     ...(base === undefined
       ? []
@@ -308,6 +330,20 @@ export const profileHeader = (input: HeaderInput): string => {
           "any); among those, the one whose smallest gain is largest. The choice's time is its fastest over",
           `the records, and only when a second record repeats it within ${ratio(gemv.rule.referenceRepeat)}. Shared sequential keys whose`,
           "cases disagree keep their choice, and so do the rows with packed activations.",
+        ]),
+    ...(grid === undefined
+      ? []
+      : [
+          "",
+          "Grid-fill rule: the ladder (largest first)",
+          `${grid.rule.ladder.join(", ")},`,
+          `the K floor ${grid.rule.minK} and the padding bound ${grid.rule.maxPadding} are the code's; the two integers are`,
+          "the pair, of a fixed grid, that qualifies with the lowest census-weighted GEMM time over the",
+          "grid set's cases. A pair qualifies when, on every case, the tile it picks wrote the default's",
+          "words in every record that timed it, is timed against the table's tile for the case (by a",
+          "steady record alone, else beside a second record: the GEMV rule's class of a record) and is not",
+          `slower than it in any such reading beyond 1 ÷ (${ratio(grid.rule.margin)} × the two rows' gaps), and when the`,
+          `weighted time is the table's ÷ ${ratio(grid.rule.minSpeedup)} or less. No pair qualifying, the table carries no rule.`,
         ]),
     "",
     // A verdict can quote a record's error text, which may span lines: a line break inside it would

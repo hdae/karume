@@ -1,10 +1,12 @@
 > This document is a point-in-time snapshot (measurements of 2026-11-28, one RTX 3080 Ti, Node + Dawn / Vulkan) of the
 > GEMM tile chosen from the dispatch grid's workgroup count instead of the row count alone: the recon's kernel timings
-> of every tile on the default presets' shapes and the rule fitted to them. It is not a design source of truth: the decision is ADR
+> of every tile on the default presets' shapes, the rule fitted to them, and the first two records of the built `grid`
+> set with the derivation's dry run on them (§5). It is not a design source of truth: the decision is ADR
 > [0157](../decisions/0157-gemm-tile-from-grid-fill.md), what runs is
 > [spec/geometry-profiles.md](../spec/geometry-profiles.md). The recon's scripts and data are under
 > `outputs/misc/gemm-geometry-recon-2026-11-28/` (`bench.ts`, `shapes.ts`, `fit.ts`, `pairs.ts`, `final.tsv`,
-> `table.tsv`, `fit-rule.txt`), local and untracked; the numbers below are their output.
+> `table.tsv`, `fit-rule.txt`) and §5's under its `impl/` folder, local and untracked; the numbers below are their
+> output.
 
 # The GEMM tile from the grid fill
 
@@ -91,3 +93,47 @@ the end-to-end shares are inferences.
 | umT5-XXL (i8, L = 512) | 5 of 5 | 500 ms | 67 ms (×0.87) | one encode per Wan request |
 
 Decode is untouched: M = 1 runs the GEMV family.
+
+## 5. The built rule's first grid records (2026-11-28)
+
+After the field, the `grid` set and the derivation were built (ADR 0157, the specs), two records of the `grid` set were
+taken on the same RTX 3080 Ti with the workbench's Node command (`geometry-sweep --candidateSet=grid --rounds=7
+--idleSeconds=0`, each case its own device), one after the other under the GPU lock, and the generator was run on them
+as a dry run for `nvidia-ampere` (no table written). The records, the dry run's output, the would-be table and its diff
+are under `outputs/misc/gemm-geometry-recon-2026-11-28/impl/` (untracked).
+
+- **Identity**: both records pass with 165 rows each, no error and every one of the 2 × 132 ladder rows that is not
+  a case's default writing the default's words.
+- **Class**: both records are unsteady by the GEMV rule's class — the default's rounds spread beyond ×1.05 in 9 and
+  8 of 33 cases (27 % and 24 %, above 20 %) — so each is evidence only beside the other, as this machine's GEMV
+  records are. Several arms read round spreads of ×2 to ×3 (the 64 × 64 and 64 × 32 arms of the full grids among
+  them); the least round each rule reads is not moved by a slow round.
+- **The derived pair is (256, 48)**, the recon's. 4 of the 35 pairs qualify — (128, 48), (192, 48), (256, 48) and
+  (288, 48) —, the last two at the lowest weighted time, ×0.926 of today's GEMM time over the grid set's cases
+  (a gain of ×1.080, above ×1.05); the tie goes to the smaller pair. Every other pair is refused by a case where its
+  tile is slower than today's beyond its bar: at a smaller-tile count of 32, EmbeddingGemma 2's M 64 N 512 (32 × 32
+  ×0.839 of 16 × 16); at 64 or more, siglip2 base's PV bmm (64 × 32 ×0.882 of 64 × 64) or sbv2's M 128 N 1024
+  (32 × 32 ×0.901 of 64 × 32).
+- **Against the recon**, the chosen pair's gain per case agrees within ×1.093 (the largest gap: depth-anything's QK
+  bmm, K 64, ×1.617 against the recon's ×1.767), once the recon's lucida M 1024 N 768 K 3072 row is read at its own
+  ×0.675 rather than at its final.tsv value, a re-run whose reference hit a transient slow state.
+- **Per census unit** (the grid set's cases of that unit only, not whole models — a ratio of that unit's GEMM time under
+  the pair to today's): depth-anything ×0.521, so400m ×0.794, lucida ×0.909, birefnet ×0.879, EmbeddingGemma 2
+  ×0.791 (T = 256) and ×0.790 (T = 64), Gemma 4 E2B in bf16 ×0.922, the anima text stages ×0.758, the QAT E2B ×0.735,
+  E4B ×0.851, 12B ×1.000 (its one case is a full grid), the 26B router ×0.319, umT5 ×0.916; siglip2 base and sbv2
+  ×1.000 (their cases keep today's tile).
+- **What `nvidia-ampere` would get**: the field alone — the ladder, `keepLargest: { minWorkgroups: 256, minK: 256 }`,
+  `minWorkgroups: 48`, `maxPadding: 1.5` — and a header that lists the two grid records and their verdict lines; the
+  other families and the GEMV choices are carried, so their adoption lines move out of the header to the commit the
+  header names, as for any regeneration that does not derive them.
+- **Time**: 478 s and 481 s per record at 7 rounds, 52 to 53 % of it in the timed passes (8 to 27 s a case, median
+  15 s); at the default 5 rounds about 6.7 min (inference: the untimed part per case — pipelines, the warm start of at
+  least 1 s, the calibration, idle runs of at least 500 ms per arm — stays, the timed part scales with the rounds).
+
+### What adding the grid set to the benchmark page's explore run would cost
+
+The page's explore run (116 GEMV cases and 78 geometry cases) takes about 1 h 7 min on this machine. The grid set
+would add its 33 cases: about 7 to 8 min here at 5 to 7 rounds, about a tenth more. The passes are sized to the
+protocol's 80 ms target on any device, so most of the timed part does not shrink or grow with the GPU; a slower device
+adds where its smaller tiles run long passes (the 16 × 16 arm of a full grid is up to 3.5 times the default's pass) and
+in its compile and warm-start times (inference, not measured on another device).

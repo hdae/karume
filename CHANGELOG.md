@@ -93,6 +93,13 @@ measurements in `docs/research/`.
   stays `karume-geometry-sweep/4`; `deriveGeometryProfile` refuses it. The sweep's linear cases may now carry bf16
   weights. The workbench's `geometry-sweep` entry takes `candidateSet=grid` and summarises each tile against the
   case's default by the median of its per-round ratios.
+- `@karume/runtime/tune`: `deriveGemmGrid` derives the grid-fill rule's two workgroup counts for a table from its
+  device's grid records, with the ladder (`GEMM_GRID_LADDER`), the K floor and the padding bound the code fixes and
+  the pairs it tries (`GEMM_GRID_LARGEST_MIN_WORKGROUPS`, `GEMM_GRID_MIN_WORKGROUPS`): a pair qualifies when its tile
+  is identical to the default on every case, not slower than the table's tile beyond `1 ÷ (×1.065 × the two rows'
+  gaps)` in any reading (a steady record alone, any other beside a second), and gains at least ×1.05 on the
+  census-weighted total; none qualifying, the table carries no field. The generator takes the records with
+  `--grid-records`. No embedded table was regenerated with it.
 
 ### Changed
 

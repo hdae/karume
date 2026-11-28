@@ -21,6 +21,11 @@ GEMV sweep records (`--gemv-records`, the workbench's `gemv-sweep` entry) derive
 onto the registered table when only GEMV records are given). Without them, a table that carries the field keeps it.
 `--gemv-plan` writes, instead, the workbench batch that measures what those records lack.
 
+Records of the geometry sweep's `grid` set (`--grid-records`, the workbench's `geometry-sweep` entry with
+`candidateSet=grid`) derive the grid-fill rule of the GEMM (`gemmGrid`) with `deriveGemmGrid`, onto the table the
+other options give (or onto the registered table when only grid records are given). Without them, a table that
+carries the field keeps it ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-grid-fill-rule)).
+
 ## The command
 
 From the repository root:
@@ -28,6 +33,7 @@ From the repository root:
 ```sh
 node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
   [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…] [--gemv-margin=<x>]] \
+  [--grid-records=<path>[,<path>…]] \
   [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
 node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] \
   [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
@@ -64,8 +70,14 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   first shared table needs `--vendor` and `--architecture` and takes no `--description`; a registered one is
   regenerated onto records of its own adapters. A shared table carries tile geometries only: `--attention-bench`,
   `--gemv-records` and `--gemv-plan` are usage errors beside it. Its verdict lines give each device's ratios.
-- `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
-  keep their own rules (`--gemv-margin`).
+- `--grid-records` adds grid records of the table's adapter: a pair of integers of a fixed grid qualifies when, on
+  every grid case, its ladder tile wrote the default's words, is timed against the table's tile (by a steady record
+  alone, else beside a second one) and is not slower than it beyond `1 ÷ (×1.065 × the two rows' gaps)` in any such
+  reading, and when the census-weighted GEMM time under it is at most `1 ÷ --min-speedup` of the table's; the lowest
+  weighted time is taken, and none qualifying leaves the table without the field. A registered id can take
+  `--grid-records` alone; `--shared` and `--gemv-plan` refuse it.
+- `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default) and the grid-fill
+  rule's threshold on the weighted total; the GEMV choices keep their own rules (`--gemv-margin`).
 - Without `--dry-run` it writes the table file and prints what it wrote and the verdict lines. With `--dry-run` it
   writes nothing and prints the derived profile as JSON, the verdict lines and, for a registered id, every field that
   differs from the registered table (the provenance fields listed apart). With GEMV records the verdict lines end with
