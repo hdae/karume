@@ -1,6 +1,7 @@
 /**
  * What a person reads of a geometry sweep run: the live status line, and after the run the totals
- * and one line per finished case — for the evaluation set `k88`, the K-88 summary instead. Pure,
+ * and one line per finished case — for the evaluation set `k88`, the K-88 summary instead, and for
+ * the `grid` set the grid summary (./grid.ts). Pure,
  * over the same per-case records the record body is merged from.
  */
 
@@ -20,10 +21,11 @@ import {
   ratioText,
   stopText,
 } from "../per-case-sweep.ts";
+import { gridLines } from "./grid.ts";
 import { K88_SET, type K88Summary, k88Summary } from "./k88.ts";
 import { type CaseSummaryRow, caseSummaryRows, mergeSweepReports } from "./record.ts";
 import type { SweepLive, SweepRunOutcome, SweepStop } from "./run.ts";
-import type { SweepPlan } from "./settings.ts";
+import { GRID_SET, type SweepPlan } from "./settings.ts";
 
 /**
  * The live status as one line: the cases done, then the case being swept (with its rows so far, the
@@ -178,7 +180,9 @@ export const geometrySweepResult = (
   const details =
     report.settings.candidateSet === K88_SET
       ? k88Lines(k88Summary(report, geometrySweepCases(K88_SET)), unit)
-      : caseSummaryRows(report.rows, report.cases).map((row) => caseLine(row, unit));
+      : report.settings.candidateSet === GRID_SET
+        ? gridLines(report)
+        : caseSummaryRows(report.rows, report.cases).map((row) => caseLine(row, unit));
   return {
     ...verdict,
     summary: [totalsLine(plan, reports, report, stop), ...details],

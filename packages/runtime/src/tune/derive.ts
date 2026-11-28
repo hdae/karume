@@ -180,6 +180,7 @@ import {
   isSweepSet,
   type SweepSet,
 } from "./geometries.ts";
+import { GRID_SET } from "./gemm-grid.ts";
 import { casePlan } from "./harness.ts";
 import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
@@ -675,6 +676,13 @@ export const parseSweepReport = (
     throw new Error(
       `${where}: settings.candidateSet ${evaluation} is an evaluation set (perf-ledger ${evaluationSetLedgerId(evaluation)}): ` +
         "it measures cases outside the sweep's case set, and no table is derived from it",
+    );
+  }
+  // MUST: no field is derived from the grid set either: it times the grid-fill rule's ladder on cases
+  // of its own, and only that rule's derivation reads it
+  if (recordedSet === GRID_SET) {
+    throw new Error(
+      `${where}: settings.candidateSet ${GRID_SET} is the grid set: it times the grid-fill rule's ladder on cases outside the sweep's case set, and only the derivation of that rule reads it`,
     );
   }
   const adapter = parsed.adapter;

@@ -35,7 +35,8 @@
  *
  * The evaluation set `k88` (perf-ledger K-88) has a table of its own ({@link K88_CASES}), outside
  * {@link SWEEP_CASES}: the case-set version and the kernel fingerprints of the table-deriving sets
- * do not see it ({@link sweepCasesFor}).
+ * do not see it ({@link sweepCasesFor}). So has the `grid` set ({@link GRID_CASES} — the grid-fill
+ * rule of the GEMM, ADR 0157), whose records derive that rule's two integers and nothing else.
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
@@ -95,9 +96,10 @@ export type LinearCase = {
 
 /**
  * The weight storages of the f32-compute cases: `f16` is the census's, the others those of the
- * models the `k88` cases are copied from (i4 at a group length — {@link LinearCase.groupSize}).
+ * models the `k88` and `grid` cases are copied from (i4 at a group length —
+ * {@link LinearCase.groupSize}).
  */
-export type CaseWeight = "f32" | "f16" | "i8" | "i4";
+export type CaseWeight = "f32" | "f16" | "bf16" | "i8" | "i4";
 
 /**
  * matmul (`a[M,K] · b[K,N]`, f32 × f32). The same GEMM skeleton as linear; the only differences are
@@ -129,6 +131,8 @@ export type BmmCase = {
   readonly n: number;
   readonly k: number;
   readonly censusCount: number;
+  /** What `censusCount` counts (the `grid` cases — {@link GRID_CENSUS}). */
+  readonly censusGroup?: string;
   readonly source: string;
 };
 
@@ -832,23 +836,423 @@ export const K88_CASES: readonly SweepCase[] = [
 ];
 
 /**
- * The case table a candidate set sweeps: the evaluation set `k88` its own table, every other set
- * (`explore` among them) {@link SWEEP_CASES}. The sweep, its record's case-set version and default
- * fingerprint, and the page's case list take it from here.
+ * What the `censusCount` of a `grid` case counts (its `censusGroup` — the unit of the case's node
+ * count). Each count is the node count of the shape in that unit's graph, from the recon of
+ * 2026-11-28 (its `shapes.ts`, the census of the default presets' GEMM-path linears and bmms).
+ */
+export const GRID_CENSUS = {
+  depthAnything: "one depth-anything v2 small forward (518 px, 1,370 tokens)",
+  siglip2Base: "one siglip2 base vision forward (196 patches)",
+  so400m: "one siglip2 so400m vision forward (729 patches)",
+  lucida: "one lucida 1024 matte forward",
+  birefnet: "one birefnet-hr 1024 forward",
+  embeddinggemma2: "one EmbeddingGemma 2 text forward at T = 256 (assumed)",
+  embeddinggemma2Short: "one EmbeddingGemma 2 text forward at T = 64 (assumed)",
+  gemma4E2b: "one Gemma 4 E2B (bf16) prefill chunk (M = 768)",
+  gemma4QatE2b: "one Gemma 4 QAT E2B (int4 g32) prefill chunk (M = 768)",
+  gemma4QatE4b: "one Gemma 4 QAT E4B (int4 g32) prefill chunk (M = 768)",
+  gemma4Qat12b: "one Gemma 4 QAT 12B (int4 g32) prefill chunk (M = 768)",
+  gemma4Qat26b: "one Gemma 4 QAT 26B A4B (int4 g32) prefill chunk, dense part (M = 768)",
+  animaText: "one anima text encoder (T = 64) and text conditioner (512 target tokens) forward",
+  sbv2: "one sbv2 text encoder forward (T = 128 assumed)",
+  umt5: "one umT5-XXL encoder forward (L = 512)",
+} as const;
+
+/** A `grid` linear (f32 compute, the model's weight storage). */
+const gridLinear = (shape: {
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly weight: CaseWeight;
+  readonly groupSize?: number;
+  readonly count: number;
+  readonly group: string;
+  readonly what: string;
+}): LinearCase => {
+  const { m, n, k, weight, groupSize, count, group, what } = shape;
+  const storage = `${weight}${groupSize === undefined ? "" : ` g${groupSize}`}`;
+  return {
+    id: `grid-linear-m${m}-n${n}-k${k}-w${weight}${groupSize === undefined ? "" : `g${groupSize}`}`,
+    op: "linear",
+    m,
+    n,
+    k,
+    weight,
+    ...(groupSize === undefined ? {} : { groupSize }),
+    censusCount: count,
+    censusGroup: group,
+    source: `${what} [${m},${k}] × [${n},${k}] ${storage}`,
+  };
+};
+
+/** A `grid` bmm (f32). */
+const gridBmm = (shape: {
+  readonly batch: number;
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly count: number;
+  readonly group: string;
+  readonly what: string;
+}): BmmCase => {
+  const { batch, m, n, k, count, group, what } = shape;
+  return {
+    id: `grid-bmm-b${batch}-m${m}-n${n}-k${k}`,
+    op: "bmm",
+    batch,
+    m,
+    n,
+    k,
+    censusCount: count,
+    censusGroup: group,
+    source: `${what} [${batch},${m},${k}] × [${batch},${k},${n}]`,
+  };
+};
+
+/**
+ * The cases of the `grid` set (ADR 0157 — the grid-fill rule of the GEMM): 33 linears and bmms of
+ * the default presets, copied from the recon of 2026-11-28 (its census of the GEMM-path nodes, not
+ * read at run time), chosen to span the dispatch grid's workgroup count on every step of the ladder
+ * (`GEMM_GRID_LADDER` in gemm-grid.ts): 128 × 128's grid from 4 to 1,728 workgroups and 64 × 64's
+ * from 8 to 3,072; full grids (Gemma 4's gate / up at N ≥ 6,144, lucida's M 4,096 × N 3,072),
+ * under-filled ones (Gemma 4's k / v at N 256, the 26B router at N 128, so400m and depth-anything),
+ * padded ones (N 32 to 192 at large M, M 64 to 196) and short-K bmm (K 64 to 128). Storages: f32,
+ * f16, bf16 and int4 at group 32, as the presets store them, under f32 compute; the integer cases
+ * have M above 64, so they run the GEMM rather than the GEMV family. Outside {@link SWEEP_CASES}:
+ * the families' case-set versions and kernel fingerprints do not see them.
+ *
+ * `censusCount` counts the nodes in the unit its `censusGroup` names ({@link GRID_CENSUS}).
+ */
+export const GRID_CASES: readonly SweepCase[] = [
+  // f32 storage
+  gridLinear({
+    m: 1370,
+    n: 384,
+    k: 1536,
+    weight: "f32",
+    count: 12,
+    group: GRID_CENSUS.depthAnything,
+    what: "depth-anything fc2",
+  }),
+  gridLinear({
+    m: 1370,
+    n: 384,
+    k: 384,
+    weight: "f32",
+    count: 48,
+    group: GRID_CENSUS.depthAnything,
+    what: "depth-anything q / k / v / o",
+  }),
+  gridLinear({
+    m: 196,
+    n: 768,
+    k: 3072,
+    weight: "f32",
+    count: 12,
+    group: GRID_CENSUS.siglip2Base,
+    what: "siglip2 base fc2",
+  }),
+  gridLinear({
+    m: 729,
+    n: 1152,
+    k: 1152,
+    weight: "f32",
+    count: 110,
+    group: GRID_CENSUS.so400m,
+    what: "so400m q / k / v / o",
+  }),
+  gridLinear({
+    m: 729,
+    n: 4304,
+    k: 1152,
+    weight: "f32",
+    count: 27,
+    group: GRID_CENSUS.so400m,
+    what: "so400m fc1",
+  }),
+  gridLinear({
+    m: 1024,
+    n: 768,
+    k: 3072,
+    weight: "f32",
+    count: 18,
+    group: GRID_CENSUS.lucida,
+    what: "lucida fc2",
+  }),
+  gridLinear({
+    m: 4096,
+    n: 3072,
+    k: 768,
+    weight: "f32",
+    count: 18,
+    group: GRID_CENSUS.lucida,
+    what: "lucida fc1",
+  }),
+  gridLinear({
+    m: 17424,
+    n: 384,
+    k: 384,
+    weight: "f32",
+    count: 2,
+    group: GRID_CENSUS.lucida,
+    what: "lucida decoder projection",
+  }),
+  gridLinear({
+    m: 65536,
+    n: 192,
+    k: 768,
+    weight: "f32",
+    count: 2,
+    group: GRID_CENSUS.lucida,
+    what: "lucida decoder projection",
+  }),
+  gridLinear({
+    m: 256,
+    n: 1536,
+    k: 6144,
+    weight: "f32",
+    count: 2,
+    group: GRID_CENSUS.lucida,
+    what: "lucida bottleneck fc2",
+  }),
+  // f16 storage
+  gridLinear({
+    m: 1024,
+    n: 768,
+    k: 3072,
+    weight: "f16",
+    count: 18,
+    group: GRID_CENSUS.birefnet,
+    what: "birefnet fc2",
+  }),
+  gridLinear({
+    m: 4096,
+    n: 768,
+    k: 3072,
+    weight: "f16",
+    count: 18,
+    group: GRID_CENSUS.birefnet,
+    what: "birefnet fc2",
+  }),
+  // bf16 storage
+  gridLinear({
+    m: 256,
+    n: 512,
+    k: 512,
+    weight: "bf16",
+    count: 96,
+    group: GRID_CENSUS.embeddinggemma2,
+    what: "EmbeddingGemma 2 k / v",
+  }),
+  gridLinear({
+    m: 64,
+    n: 2048,
+    k: 512,
+    weight: "bf16",
+    count: 52,
+    group: GRID_CENSUS.embeddinggemma2Short,
+    what: "EmbeddingGemma 2 MLP gate / up",
+  }),
+  gridLinear({
+    m: 64,
+    n: 512,
+    k: 512,
+    weight: "bf16",
+    count: 96,
+    group: GRID_CENSUS.embeddinggemma2Short,
+    what: "EmbeddingGemma 2 k / v",
+  }),
+  gridLinear({
+    m: 768,
+    n: 256,
+    k: 1536,
+    weight: "bf16",
+    count: 59,
+    group: GRID_CENSUS.gemma4E2b,
+    what: "Gemma 4 E2B k / v",
+  }),
+  gridLinear({
+    m: 768,
+    n: 6144,
+    k: 1536,
+    weight: "bf16",
+    count: 30,
+    group: GRID_CENSUS.gemma4E2b,
+    what: "Gemma 4 E2B MLP gate / up of the 6,144-wide layers",
+  }),
+  gridLinear({
+    m: 768,
+    n: 12288,
+    k: 1536,
+    weight: "bf16",
+    count: 40,
+    group: GRID_CENSUS.gemma4E2b,
+    what: "Gemma 4 E2B MLP gate / up of the 12,288-wide layers",
+  }),
+  gridLinear({
+    m: 64,
+    n: 3072,
+    k: 1024,
+    weight: "bf16",
+    count: 56,
+    group: GRID_CENSUS.animaText,
+    what: "anima text encoder MLP",
+  }),
+  gridLinear({
+    m: 512,
+    n: 1024,
+    k: 1024,
+    weight: "bf16",
+    count: 37,
+    group: GRID_CENSUS.animaText,
+    what: "anima text conditioner projection",
+  }),
+  // int4 storage at group 32
+  gridLinear({
+    m: 768,
+    n: 2048,
+    k: 1536,
+    weight: "i4",
+    groupSize: 32,
+    count: 28,
+    group: GRID_CENSUS.gemma4QatE2b,
+    what: "Gemma 4 QAT E2B q of the sliding layers",
+  }),
+  gridLinear({
+    m: 768,
+    n: 2560,
+    k: 10240,
+    weight: "i4",
+    groupSize: 32,
+    count: 42,
+    group: GRID_CENSUS.gemma4QatE4b,
+    what: "Gemma 4 QAT E4B MLP down",
+  }),
+  gridLinear({
+    m: 768,
+    n: 512,
+    k: 2560,
+    weight: "i4",
+    groupSize: 32,
+    count: 40,
+    group: GRID_CENSUS.gemma4QatE4b,
+    what: "Gemma 4 QAT E4B k / v of the full layers",
+  }),
+  gridLinear({
+    m: 768,
+    n: 15360,
+    k: 3840,
+    weight: "i4",
+    groupSize: 32,
+    count: 96,
+    group: GRID_CENSUS.gemma4Qat12b,
+    what: "Gemma 4 QAT 12B MLP gate / up",
+  }),
+  gridLinear({
+    m: 768,
+    n: 128,
+    k: 2816,
+    weight: "i4",
+    groupSize: 32,
+    count: 30,
+    group: GRID_CENSUS.gemma4Qat26b,
+    what: "Gemma 4 QAT 26B A4B router",
+  }),
+  gridLinear({
+    m: 128,
+    n: 1024,
+    k: 1024,
+    weight: "i4",
+    groupSize: 32,
+    count: 88,
+    group: GRID_CENSUS.sbv2,
+    what: "sbv2 text encoder attention projection",
+  }),
+  // bmm (f32)
+  gridBmm({
+    batch: 6,
+    m: 1370,
+    n: 64,
+    k: 1370,
+    count: 12,
+    group: GRID_CENSUS.depthAnything,
+    what: "depth-anything attention PV",
+  }),
+  gridBmm({
+    batch: 6,
+    m: 1370,
+    n: 1370,
+    k: 64,
+    count: 12,
+    group: GRID_CENSUS.depthAnything,
+    what: "depth-anything attention QK",
+  }),
+  gridBmm({
+    batch: 12,
+    m: 196,
+    n: 64,
+    k: 196,
+    count: 12,
+    group: GRID_CENSUS.siglip2Base,
+    what: "siglip2 base attention PV",
+  }),
+  gridBmm({
+    batch: 16,
+    m: 729,
+    n: 72,
+    k: 729,
+    count: 27,
+    group: GRID_CENSUS.so400m,
+    what: "so400m attention PV",
+  }),
+  gridBmm({
+    batch: 864,
+    m: 144,
+    n: 32,
+    k: 144,
+    count: 18,
+    group: GRID_CENSUS.lucida,
+    what: "lucida window attention PV",
+  }),
+  gridBmm({
+    batch: 16,
+    m: 64,
+    n: 64,
+    k: 128,
+    count: 28,
+    group: GRID_CENSUS.animaText,
+    what: "anima text encoder attention PV",
+  }),
+  gridBmm({
+    batch: 64,
+    m: 512,
+    n: 64,
+    k: 512,
+    count: 24,
+    group: GRID_CENSUS.umt5,
+    what: "umT5 attention PV",
+  }),
+];
+
+/**
+ * The case table a candidate set sweeps: the evaluation set `k88` and the `grid` set their own
+ * tables, every other set (`explore` among them) {@link SWEEP_CASES}. The sweep, its record's
+ * case-set version and default fingerprint, and the page's case list take it from here.
  */
 export const sweepCasesFor = (set: SweepSet): readonly SweepCase[] =>
-  set === "k88" ? K88_CASES : SWEEP_CASES;
+  set === "k88" ? K88_CASES : set === "grid" ? GRID_CASES : SWEEP_CASES;
 
 /**
  * Every case any set sweeps (the lookup of the measured-candidate fingerprint — a row names its case
- * by id; the ids of the two tables never meet).
+ * by id; the ids of the three tables never meet).
  */
-export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K88_CASES];
+export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K88_CASES, ...GRID_CASES];
 
 /**
  * A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op.
- * `censusCount` is set on the cases of the evaluation set `k88` only: the node count in the unit
- * `censusGroup` names (0 and no group for a shape of no model) — the weight of that unit's sum.
+ * `censusCount` is set on the cases of the evaluation set `k88` and of the `grid` set only: the node
+ * count in the unit `censusGroup` names (0 and no group for a shape of no model) — the weight of that
+ * unit's sum.
  */
 export type SweepCaseEntry = {
   readonly id: string;
@@ -860,13 +1264,13 @@ export type SweepCaseEntry = {
 /**
  * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}; the
  * `explore` set sweeps `full`'s, {@link SWEEP_CASES}) as its id and op, in the table's order (the
- * `k88` cases with their `censusCount` and `censusGroup`). A new array of new objects on every call:
+ * `k88` and `grid` cases with their `censusCount` and `censusGroup`). A new array of new objects on every call:
  * the table itself stays internal (its other descriptive fields are no public surface), and nothing a
  * caller does to the result reaches the case set or the fingerprints.
  */
 export const sweepCaseEntries = (set: SweepSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
-  set === "k88"
-    ? K88_CASES.map((sweepCase) => ({
+  set === "k88" || set === "grid"
+    ? sweepCasesFor(set).map((sweepCase) => ({
         id: sweepCase.id,
         op: sweepCase.op,
         censusCount: sweepCase.censusCount,

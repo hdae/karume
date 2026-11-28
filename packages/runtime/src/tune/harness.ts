@@ -197,6 +197,7 @@ import {
   k88Conv2dCandidates,
   k88GemmCandidates,
 } from "./geometries.ts";
+import { GRID_SET } from "./gemm-grid.ts";
 import {
   type CaseSummary,
   compareToDefault,
@@ -411,7 +412,7 @@ const rawWeightBytes = (payloadBytes: number): number =>
 
 /**
  * The weight buffer of an f32-compute case (`n` rows of `k` elements in `weight` storage) and its
- * scale (per channel for i8, per group for i4 — none for f32 / f16): the raw-byte classes of
+ * scale (per channel for i8, per group for i4 — none for f32 / f16 / bf16): the raw-byte classes of
  * src/runtime/session-build.ts with the scale lengths of format/container/codecs.ts. i4 nibbles take
  * the i8 fill (any bit pattern is a valid nibble).
  */
@@ -426,6 +427,8 @@ const weightResources = (
       return [{ name: "w", bytes: n * k * F32, fill: "f32" }];
     case "f16":
       return [{ name: "w", bytes: rawWeightBytes(n * k * 2), fill: "f16" }];
+    case "bf16":
+      return [{ name: "w", bytes: rawWeightBytes(n * k * 2), fill: "bf16" }];
     case "i8":
       return [{ name: "w", bytes: rawWeightBytes(n * k), fill: "i8" }];
     case "i4": {
@@ -2381,6 +2384,237 @@ export const sweepCase = async (
   }
 };
 
+/**
+ * The order of the arms in round `round` of a `grid` case: the arms in their order on an even round
+ * and reversed on an odd one, the order followed by its own reverse — a palindrome, so every arm is
+ * timed twice a round, once on each side of the round's middle, and a drift within the round falls
+ * on every arm alike. Pure.
+ */
+export const gridRoundOrder = (arms: number, round: number): number[] => {
+  const forward = Array.from({ length: arms }, (_, index) => index);
+  const order = round % 2 === 0 ? forward : forward.toReversed();
+  return [...order, ...order.toReversed()];
+};
+
+/**
+ * One round of a `grid` arm from its two passes in the round's palindrome: their mean, a clamped
+ * pass left out (the round is clamped when both were), in the record's unit and in wall clock.
+ */
+const gridRoundSample = (passes: readonly PassSample[]): PassSample => {
+  const kept = passes.filter((pass) => !pass.clamped);
+  const mean = (values: readonly number[]): number =>
+    values.reduce((sum, value) => sum + value, 0) / values.length;
+  const wallNs = mean(passes.map((pass) => pass.wallNs));
+  if (kept.length === 0) return { wallNs, gpu: 0, clamped: true };
+  const timed = kept.flatMap((pass) => (pass.gpu === undefined ? [] : [pass.gpu]));
+  return timed.length === 0
+    ? { wallNs, clamped: false }
+    : { wallNs, gpu: mean(timed), clamped: false };
+};
+
+/**
+ * Measures one case of the `grid` set (the grid-fill rule's ladder — gemm-grid.ts): every arm's
+ * pipeline (the default geometry first, then the candidates), a warm start on the default, every arm
+ * once from a zeroed output and its digest (the word comparison with the default), the reps from the
+ * default's calibration (protocol rule 1) shared by every arm, idle runs of every arm at those reps
+ * (rule 3), then `rounds` rounds that time every arm twice in the palindrome of
+ * {@link gridRoundOrder}. A row's round is the mean of its two passes ({@link gridRoundSample}), so
+ * the rows of the case share `reps` and their `rounds` are aligned: round i of every row was timed in
+ * the same palindrome, and the ratio of two rows' round i compares passes taken under the same
+ * clocks. `perDispatch` is the row's least round ÷ reps (rule 2) and `speedupVsDefault` its ratio to
+ * the default row's, as in every set. No quick look and no re-measurement of the default: every arm
+ * is timed, and the interleaving stands for the drift ratio (the case has no `defaultRepeat`).
+ *
+ * An arm whose pipeline or first run fails is a failure row and takes no round; a failure of the
+ * default, of the warm start, the calibration or a round makes every arm a failure row (the rounds
+ * are one measurement); a device loss does the same for what is left. An abort before the rounds
+ * end makes no row.
+ */
+export const sweepGridCase = async (
+  context: SweepContext,
+  target: SweepCase,
+  candidates: readonly GeometryCandidate[],
+  settings: Pick<SweepSettings, "rounds">,
+  hooks: SweepHooks = {},
+): Promise<CaseResult> => {
+  const { gpu } = context;
+  const started = performance.now();
+  const rows: SweepRow[] = [];
+  let aborted = false;
+  const emit = (row: SweepRow): void => {
+    rows.push(row);
+    hooks.onRow?.(row);
+  };
+  const step = (phase: GeometrySweepPhase, done: number, total: number): void =>
+    hooks.onStep?.({ caseId: target.id, phase, done, total });
+  const finish = (): CaseResult => {
+    const summary: CaseSummary = {
+      caseId: target.id,
+      elapsedMs: performance.now() - started,
+      screened: 0,
+    };
+    hooks.onCase?.(summary);
+    return { rows, summary, aborted };
+  };
+  const abortRequested = (): boolean => hooks.signal?.aborted === true;
+  let plan: CasePlan;
+  try {
+    plan = casePlan(target, gpu.limits.maxComputeWorkgroupsPerDimension, context.dp4a);
+  } catch (cause) {
+    candidates.forEach((candidate) => emit(errorRow(target, candidate, false, cause)));
+    return finish();
+  }
+  const ordered = [
+    plan.defaultCandidate,
+    ...candidates.filter((candidate) => candidate.name !== plan.defaultCandidate.name),
+  ];
+  const failAll = (cause: unknown): void =>
+    ordered.forEach((candidate, index) => emit(errorRow(target, candidate, index === 0, cause)));
+  hooks.onProgress?.(`${target.id}: preparing inputs`);
+  let resources: Map<string, GPUBuffer>;
+  try {
+    resources = await createResources(context, plan.resources);
+  } catch (cause) {
+    failAll(cause);
+    return finish();
+  }
+  const prepared: ReadyLaunch[] = [];
+  try {
+    const output = resources.get(plan.output);
+    if (output === undefined) throw new Error(`${target.id}: output ${plan.output} is missing`);
+    // 1. Every pipeline first (a compile idles the device)
+    const states: ({ readonly ready: ReadyLaunch } | { readonly cause: unknown })[] = [];
+    step("prepare", 0, ordered.length);
+    for (const [index, candidate] of ordered.entries()) {
+      if (abortRequested()) {
+        aborted = true;
+        return finish();
+      }
+      try {
+        const ready = await prepareLaunch(context, plan.launch(candidate), resources);
+        prepared.push(ready);
+        states.push({ ready });
+      } catch (cause) {
+        states.push({ cause });
+      }
+      step("prepare", index + 1, ordered.length);
+    }
+    const reference = states[0];
+    if (!("ready" in reference)) {
+      failAll(reference.cause);
+      return finish();
+    }
+    const timed: {
+      readonly index: number;
+      readonly ready: ReadyLaunch;
+      readonly digest: string;
+    }[] = [];
+    const failures = new Map<number, unknown>();
+    let reps: number;
+    const passes: PassSample[][][] = [];
+    try {
+      for (const launch of plan.prelude) {
+        const ready = await prepareLaunch(context, launch, resources);
+        try {
+          await runPass(context, ready, 1, false);
+        } finally {
+          ready.params.destroy();
+        }
+      }
+      // 2. The warm start on the default geometry
+      hooks.onProgress?.(`${target.id}: warm start on ${ordered[0].name}`);
+      step("warm-start", 0, 1);
+      await warmStart(context, reference.ready);
+      step("warm-start", 1, 1);
+      // 3. Every arm once from a zeroed output: its words, for the comparison with the default
+      for (const [index, state] of states.entries()) {
+        if (!("ready" in state)) {
+          failures.set(index, state.cause);
+          continue;
+        }
+        try {
+          await runPass(context, state.ready, 1, false, output);
+          timed.push({ index, ready: state.ready, digest: await outputDigest(context, output) });
+        } catch (cause) {
+          if (index === 0) throw cause;
+          failures.set(index, cause);
+        }
+      }
+      // 4. The default's reps for every arm, and idle runs of every arm at them
+      reps = await calibrate(context, reference.ready);
+      for (const arm of timed) await warmUp(context, arm.ready, reps);
+      // 5. The interleaved rounds
+      step("timing", 0, settings.rounds);
+      for (let round = 0; round < settings.rounds; round += 1) {
+        if (abortRequested()) {
+          aborted = true;
+          return finish();
+        }
+        if (gpu.lost !== undefined) throw new Error(`device lost: ${gpu.lost.message}`);
+        hooks.onProgress?.(`${target.id}: round ${round + 1}/${settings.rounds}`);
+        const inRound: PassSample[][] = timed.map(() => []);
+        for (const position of gridRoundOrder(timed.length, round)) {
+          inRound[position].push(await measurePass(context, timed[position].ready, reps));
+        }
+        passes.push(inRound);
+        step("timing", round + 1, settings.rounds);
+      }
+    } catch (cause) {
+      failAll(cause);
+      return finish();
+    }
+    // 6. The rows: the default first, then the candidates in their order
+    let referenceRow: DefaultReference = {};
+    for (const [index, candidate] of ordered.entries()) {
+      const failure = failures.get(index);
+      if (failure !== undefined) {
+        emit(errorRow(target, candidate, index === 0, failure));
+        continue;
+      }
+      const position = timed.findIndex((arm) => arm.index === index);
+      const arm = timed[position];
+      const timing = roundsTiming(
+        reps,
+        passes.map((round) => gridRoundSample(round[position])),
+      );
+      const measured = {
+        ...rowHead(target, candidate, index === 0),
+        key: arm.ready.launch.key,
+        workgroups: arm.ready.launch.workgroups,
+        reps: timing.reps,
+        rounds: timing.rounds,
+        wallRounds: timing.wallRounds,
+        clampedNegativeSamples: timing.clampedNegativeSamples,
+      } satisfies SweepRow;
+      const realNs = context.unit === "ns" ? timing.perDispatch : timing.wallNsPerDispatch;
+      const row: SweepRow =
+        timing.perDispatch === undefined
+          ? {
+              ...measured,
+              wallNsPerDispatch: timing.wallNsPerDispatch,
+              error: ALL_ROUNDS_NEGATIVE,
+            }
+          : {
+              ...measured,
+              perDispatch: timing.perDispatch,
+              wallNsPerDispatch: timing.wallNsPerDispatch,
+              ...(realNs !== undefined && realNs > 0
+                ? { tflops: caseFlops(target) / realNs / 1e3 }
+                : {}),
+              outputSha256: arm.digest,
+            };
+      if (index === 0) {
+        referenceRow = { perDispatch: row.perDispatch, outputSha256: row.outputSha256 };
+      }
+      emit(compareToDefault(row, referenceRow));
+    }
+    return finish();
+  } finally {
+    for (const ready of prepared) ready.params.destroy();
+    for (const buffer of resources.values()) buffer.destroy();
+  }
+};
+
 /** The result of the whole sweep (rows and per-case records). */
 export type SweepResult = {
   readonly rows: readonly SweepRow[];
@@ -2440,13 +2674,16 @@ export const runSweep = async (
       geometries: plannedGeometries(target, candidates, dropped),
       skipped: candidates.filter(({ name }) => dropped.has(name)).length,
     });
-    const result = await sweepCase(
-      context,
-      target,
-      candidates,
-      { rounds: settings.rounds, quickLookMargin: settings.quickLookMargin, dropped },
-      hooks,
-    );
+    const result =
+      settings.candidateSet === GRID_SET
+        ? await sweepGridCase(context, target, candidates, { rounds: settings.rounds }, hooks)
+        : await sweepCase(
+            context,
+            target,
+            candidates,
+            { rounds: settings.rounds, quickLookMargin: settings.quickLookMargin, dropped },
+            hooks,
+          );
     rows.push(...result.rows);
     summaries.push(result.summary);
     if (result.aborted) {

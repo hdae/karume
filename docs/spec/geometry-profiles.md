@@ -124,6 +124,9 @@ count instead of the row count alone (`gemmGrid` — ADR [0157](../decisions/015
   which thread computes which output, not the order of a K reduction); below the WGSL it is a fact of the device's
   compiler, checked by a GPU test on the development machine (every storage, every step of the ladder, matmul, bmm and
   the split-K partial at one slice).
+- **The grid set** of the geometry sweep times the ladder in interleaved rounds on cases of its own
+  ([workbench.md](workbench.md#the-geometry-sweeps-grid-set)); `deriveGeometryProfile` refuses its records, naming
+  the set.
 - **Matching** (`geometryProfileMismatch`) and the per-family kernel fingerprint take the `gemm` family over
   `gemmRows`, the field its sweep records decide, also in a table that carries the rule: they do not cover the rule,
   as they do not cover the GEMV choices. A derivation on a base table carries the base's rule as it is.

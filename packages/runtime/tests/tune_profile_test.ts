@@ -2046,7 +2046,7 @@ describe("the retired evaluation set k85: no table is derived from its record", 
     assertThrows(
       () => derive(k85),
       Error,
-      'settings.candidateSet is none of quick+ / quick / full / k88 ("k85")',
+      'settings.candidateSet is none of quick+ / quick / full / k88 / grid ("k85")',
     );
     // Control: the same record under a table-deriving set derives
     assertEquals(

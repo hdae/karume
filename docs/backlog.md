@@ -328,9 +328,9 @@ maintainer's ruling of 2026-11-06).
        [research 2026-11-28](research/2026-11-28-gemm-grid-fill.md)): the tile of linear, matmul and bmm chosen from the
        dispatch grid's workgroup count by an optional table field instead of the M buckets. The field, its checks and
        the selection at the three call sites are built
-       ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)); no table carries it. Left, in this order:
-       - G2: the sweep's `grid` set (census-derived cases spanning the grid fill, the ladder only, interleaved
-         rounds) in the tune module and the workbench's `geometry-sweep` entry;
+       ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)), and so is the sweep's `grid` set that times
+       the ladder ([spec](spec/workbench.md#the-geometry-sweeps-grid-set)); no table carries the field. Left, in this
+       order:
        - G3: the derivation of the two integers from grid records and the generator writing the field, with a dry run on
          this machine for the maintainer;
        - G4: two grid records on the RTX 3080 Ti, `nvidia-ampere` regenerated and this machine's corpus census rows

@@ -24,7 +24,10 @@ import type { SweepSet } from "./geometries.ts";
  *
  * A record of the `explore` set (geometries.ts's `EXPLORE_SET`) is a /4 record: its rows of a
  * candidate the set no longer measured in a case carry `skipped`, which a reader takes as no
- * observation, as it takes a screened row. A reader that predates the set refuses such a record: by
+ * observation, as it takes a screened row. A record of the `grid` set (gemm-grid.ts) is a /4 record
+ * too, with no new field: the rows of a case share `reps` and their `rounds` are aligned (round i
+ * of every row was timed in the same palindrome — harness.ts's `sweepGridCase`), and its cases have
+ * no `defaultRepeat`; the tile geometry's derivation refuses it by its candidate set. A reader that predates the set refuses such a record: by
  * `candidateKernels` when it has skipped rows (that reader's fingerprint counts their kernels, the
  * writer's does not), by its candidate set otherwise.
  */

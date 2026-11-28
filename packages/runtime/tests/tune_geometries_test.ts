@@ -382,8 +382,8 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
 });
 
 describe("the candidate sets", () => {
-  it("are quick+, quick, full and the evaluation set k88 (the evaluation set k85 is retired — its cases are the sweep's own and its grid is the i8a8 linear's full)", () => {
-    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k88"]);
+  it("are quick+, quick, full, the evaluation set k88 and the grid set (the evaluation set k85 is retired — its cases are the sweep's own and its grid is the i8a8 linear's full)", () => {
+    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k88", "grid"]);
     assertEquals(EVALUATION_SETS, ["k88"]);
   });
 });

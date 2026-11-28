@@ -86,6 +86,13 @@ measurements in `docs/research/`.
   of linear (and its split-K partial), matmul and bmm. A table injected with `acquireGpu({ geometryProfile })` may
   carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. Neither the default profile nor any
   built-in table carries one, so no Session's keys or kernels change.
+- `@karume/runtime/tune`: the geometry sweep's `grid` candidate set (`runGeometrySweep({ candidateSet: "grid" })`):
+  the grid-fill rule's ladder of five tiles on 33 linears and bmms of the default presets (`geometrySweepCases("grid")`,
+  weights in f32, f16, bf16 and int4 as the presets store them), timed in interleaved palindrome rounds at one reps
+  per case, with no quick look (a margin other than 0 is refused) and no re-measurement of the default. The record
+  stays `karume-geometry-sweep/4`; `deriveGeometryProfile` refuses it. The sweep's linear cases may now carry bf16
+  weights. The workbench's `geometry-sweep` entry takes `candidateSet=grid` and summarises each tile against the
+  case's default by the median of its per-round ratios.
 
 ### Changed
 

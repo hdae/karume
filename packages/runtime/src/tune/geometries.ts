@@ -23,9 +23,11 @@
  * (perf-ledger K-88 — {@link gemmFieldCandidatesIn}, {@link conv2dFieldCandidatesIn}; the sweep adds
  * them only to a case whose kernel takes the fields, harness.ts's `candidatesFor`). One more set,
  * `k88`, is an evaluation set ({@link EVALUATION_SETS}): the same fields on cases of its own,
- * outside the sweep's case set, so it changes neither the other sets nor any fingerprint. The sweep
- * runs one more set, `explore` ({@link EXPLORE_SET}): `full`'s candidates in fewer rows, no grid of
- * its own.
+ * outside the sweep's case set, so it changes neither the other sets nor any fingerprint. The `grid`
+ * set has cases of its own too (cases.ts's `GRID_CASES`): it times the grid-fill rule's ladder
+ * (`GEMM_GRID_LADDER` of gemm-grid.ts — {@link gridLadderCandidates}) in interleaved rounds, and its
+ * records derive that rule's integers alone. The sweep runs one more set, `explore`
+ * ({@link EXPLORE_SET}): `full`'s candidates in fewer rows, no grid of its own.
  */
 import {
   assertGemmGeometry,
@@ -53,6 +55,7 @@ import {
   type GeometryProfile,
 } from "../kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../kernels/geometry-profiles/index.ts";
+import { GEMM_GRID_LADDER } from "./gemm-grid.ts";
 
 /** One candidate for the f32 skeleton (linear / fused attention / conv2d's implicit GEMM). */
 export type GemmCandidate = {
@@ -435,12 +438,19 @@ export const k88Conv2dCandidates = (
 };
 
 /**
+ * The tiles of the grid-fill rule's ladder as candidates, largest first (the `grid` set's candidates
+ * of every case — the default geometry of a case is one of them).
+ */
+export const gridLadderCandidates = (): GemmCandidate[] =>
+  unique(GEMM_GRID_LADDER.map(gemmCandidate));
+
+/**
  * The vocabulary of candidate sets (the CLI's `--set` and the page's select — both removed in
  * 0.15 — and the JSON's `settings.candidateSet`).
  */
-export const CANDIDATE_SETS = ["quick+", "quick", "full", "k88"] as const;
+export const CANDIDATE_SETS = ["quick+", "quick", "full", "k88", "grid"] as const;
 
-/** A candidate set (`quick` / `quick+` / `full` / `k88` — {@link CANDIDATE_SETS}). */
+/** A candidate set (`quick` / `quick+` / `full` / `k88` / `grid` — {@link CANDIDATE_SETS}). */
 export type CandidateSet = (typeof CANDIDATE_SETS)[number];
 
 /**
@@ -501,6 +511,8 @@ const noCandidates = (set: CandidateSet, family: string, reason: string): never 
 const K88_PER_CASE =
   "they depend on the case's row count or m-tile class — candidatesFor gives them per case";
 
+const GRID_GEMM_ONLY = "it times the ladder of the GEMM of linear / matmul / bmm";
+
 /**
  * The set for the f32 skeleton, as tiles (no skeleton form): what the fused attention measures, and
  * the bases of {@link gemmFieldCandidatesIn}.
@@ -515,6 +527,8 @@ export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
       return gemmCandidates();
     case "k88":
       return noCandidates(set, "f32 skeleton", K88_PER_CASE);
+    case "grid":
+      return gridLadderCandidates();
   }
 };
 
@@ -532,6 +546,8 @@ export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
       return conv2dCandidates();
     case "k88":
       return noCandidates(set, "conv2d", K88_PER_CASE);
+    case "grid":
+      return noCandidates(set, "conv2d", GRID_GEMM_ONLY);
   }
 };
 
@@ -616,5 +632,7 @@ export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
       return i8a8Candidates();
     case "k88":
       return noCandidates(set, "i8a8", "it measures the f32 skeleton and conv2d");
+    case "grid":
+      return noCandidates(set, "i8a8", GRID_GEMM_ONLY);
   }
 };
