@@ -1926,7 +1926,25 @@ class TestGemma4Bf16Product:
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
-        assert "its weights shipped unchanged (bf16)" in card
+        assert (
+            "the main model's weights shipped unchanged (bf16), the drafter's\nquantized to int8"
+            in card
+        )
         assert "the checkpoint's bf16 values unchanged" in card
         assert "Original weights (bf16)" in card
         assert "keep the checkpoints' BF16 values unchanged" in notice
+
+    def test_the_opening_says_bf16_unchanged_alone_only_without_a_drafter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The attribution's opening states each stored form: a manifest without a drafter keeps
+        every weight at the checkpoint's bf16 values, one with drafters names their int8."""
+        _without_e4b_drafter(monkeypatch)
+        _, bf16_only = _assemble_e4b(tmp_path, drafter=False)
+
+        card = render_gemma4_model_card(bf16_only, "hdae/karume-gemma4")
+
+        assert (
+            "Converted from the upstream checkpoint, its weights shipped unchanged (bf16)" in card
+        )
+        assert "int8" not in card.split("## Base weights and attribution")[1].split("\n\n")[1]

@@ -150,8 +150,8 @@ The level-2 sections come in this order:
   by `karume.modelcard.changes_made_here`: "- **Changes made here** (listed in full in `NOTICE.md`, per <clause>):",
   the clause being the one of the license that asks for the notice of the changes — "Apache 2.0 §4(b)" on the Apache
   cards, "CC BY-SA 4.0 §3(a)(1)(B)" on `karume-sbv2-jvnv` — and none where the card cites none (the MIT, Gemma and
-  CircleStone cards). `karume-gemma4` and `karume-gemma4-qat` still write "(also listed in `NOTICE.md`…)". The Anima
-  cards' license paragraph says that `NOTICE.md` holds the attribution notices and the list of modifications.
+  CircleStone cards). The Anima cards' license paragraph says that `NOTICE.md` holds the attribution notices and the
+  list of modifications.
 - A sentence an upstream license requires in its own words is kept as it is, beside the non-endorsement sentence,
   which does not stand in for it: the CircleStone attribution and rights-grant notices and the NVIDIA notice (Anima),
   the Black Forest Labs non-endorsement (MOSS-Image).

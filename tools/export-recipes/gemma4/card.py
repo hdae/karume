@@ -34,9 +34,11 @@ from typing import TYPE_CHECKING, Any
 from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from karume.modelcard import (
     APACHE_LICENSE_REFERENCE,
+    APACHE_MODIFICATION_CLAUSE,
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    changes_made_here,
     default_model,
     from_pretrained,
     frontmatter,
@@ -414,8 +416,9 @@ def _gemma4_overview(
 
 def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
     """The attribution's opening sentence: the main model's weights ship as the checkpoint's own
-    bf16 values. MUST: a manifest whose `model` role stores anything else is not drawn — the
-    sentence would state a storage the distribution does not carry."""
+    bf16 values, and the drafters' (when the manifest carries any) as int8. MUST: a manifest whose
+    `model` role stores anything else is not drawn — the sentence would state a storage the
+    distribution does not carry."""
     dtypes = {
         dtype
         for model in manifest["models"].values()
@@ -426,10 +429,20 @@ def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
             f"the main model's weights are stored as {sorted(dtypes)} — this card states the"
             f" checkpoint's {GEMMA4_CHECKPOINT_DTYPE} values unchanged"
         )
+    drafters = _gemma4_drafters(manifest)
+    if not drafters:
+        return [
+            "Converted from the upstream checkpoint, its weights shipped unchanged (bf16) — the"
+            " original",
+            "checkpoint files are not distributed here.",
+        ]
+    # The drafters are int8 throughout (`gemma4.distribution.GEMMA4_STORAGE_REQUIREMENTS`), which
+    # the opening would otherwise contradict.
+    rounded = "the drafter's" if len(drafters) == 1 else "the drafters'"
     return [
-        "Converted from the upstream checkpoint, its weights shipped unchanged (bf16) — the"
-        " original",
-        "checkpoint files are not distributed here.",
+        "Converted from the upstream checkpoints: the main model's weights shipped unchanged"
+        f" (bf16), {rounded}",
+        "quantized to int8 — the original checkpoint files are not distributed here.",
     ]
 
 
@@ -494,7 +507,7 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 #: The "Changes made here" item up to its last line (the regular line's models all carry
 #: per-layer embeddings); {@link _gemma4_changes} ends it.
 _GEMMA4_CHANGES: tuple[str, ...] = (
-    "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+    f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the text",
     "  decoder was extracted and re-expressed in the Karume container format; the weights keep",
     "  the checkpoint's bf16 values unchanged; the per-layer embeddings were moved out of the",
     "  graph into container assets that the host gathers; the exit was narrowed to the selected",
@@ -831,7 +844,7 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         else []
     )
     lines += [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+        f"{changes_made_here(APACHE_MODIFICATION_CLAUSE)} the text",
         "  decoder was extracted and re-expressed in the Karume container format; the linear",
         "  weights and the embedding table keep the checkpoint's own 4-bit grid, stored as packed",
         "  int4 (group 32: its codes and one step per group, refitted from the stored values)",

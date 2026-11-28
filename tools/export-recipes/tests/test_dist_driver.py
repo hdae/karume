@@ -929,11 +929,6 @@ class TestTheUsageOfEveryPublishedCard:
         assert pin in "\n".join(block)
 
 
-#: The cards whose changes bullet points at the notice in other words ("also listed in"): two of
-#: the Gemma 4 ones, whose recipes change in a stage of their own
-#: (docs/spec/distribution-cards.md#license-statements).
-CARDS_WITH_ANOTHER_CHANGES_POINTER = frozenset({"karume-gemma4", "karume-gemma4-qat"})
-
 #: The head of every card's changes bullet (`karume.modelcard.changes_made_here`).
 _CHANGES_HEAD = re.compile(
     re.escape("- **Changes made here** (listed in full in `NOTICE.md`") + r"(, per [^:]+)?\):"
@@ -959,8 +954,7 @@ class TestTheLegalPointersOfEveryPublishedCard:
         bullets = [line for line in card.split("\n") if line.startswith("- **Changes made here**")]
 
         assert len(bullets) == 1
-        shared = _CHANGES_HEAD.match(bullets[0]) is not None
-        assert shared is (directory not in CARDS_WITH_ANOTHER_CHANGES_POINTER), bullets
+        assert _CHANGES_HEAD.match(bullets[0]) is not None, bullets
 
 
 def _root_files(pipeline: str, models: list[str]) -> Mapping[str, str]:
