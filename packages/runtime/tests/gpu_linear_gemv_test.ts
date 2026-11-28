@@ -77,7 +77,8 @@ import {
 } from "../src/kernels/linear-gemv.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import { linearKey } from "../src/kernels/linear.ts";
-import { gemmRowsGeometry, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import type { GemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import { gemmRowsGeometry, gemmShapeGeometry } from "../src/kernels/geometry-profile.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
@@ -315,8 +316,11 @@ type DoorCase = {
   readonly m: number;
   /** If true this shape goes to the GEMV family; if false it falls to the default `linear:`. */
   readonly gemv: boolean;
-  /** The `linear:` key expected for a shape that falls to the default (unused for shapes that enter GEMV). */
-  readonly fallback?: (profile: GeometryProfile) => string;
+  /**
+   * The `linear:` key expected for a shape that falls to the default (unused for shapes that enter
+   * GEMV), given the geometry the call sites' one lookup (`gemmShapeGeometry`) gives the case's shape.
+   */
+  readonly fallback?: (geometry: GemmGeometry) => string;
 };
 
 /**
@@ -378,8 +382,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 32 },
     m: GEMM_ROWS,
     gemv: false,
-    fallback: (profile) =>
-      linearKey("i4", true, "f32", GEMM_ROWS, 32, gemmRowsGeometry(profile, GEMM_ROWS)),
+    fallback: (geometry) => linearKey("i4", true, "f32", GEMM_ROWS, 32, geometry),
   },
   {
     // Drops only the group length (16 = a 32-element word crosses groups)
@@ -387,7 +390,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 1,
     gemv: false,
-    fallback: (profile) => linearKey("i4", true, "f32", 1, 16, gemmRowsGeometry(profile, 1)),
+    fallback: (geometry) => linearKey("i4", true, "f32", 1, 16, geometry),
   },
   {
     // Drops the same condition on the row-block side too
@@ -395,7 +398,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 2,
     gemv: false,
-    fallback: (profile) => linearKey("i4", true, "f32", 2, 16, gemmRowsGeometry(profile, 2)),
+    fallback: (geometry) => linearKey("i4", true, "f32", 2, 16, geometry),
   },
   {
     // Drops only v4 (n % 4 != 0 — to the default scalar variant)
@@ -403,7 +406,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 1,
     gemv: false,
-    fallback: (profile) => linearKey("i4", false, "f32", 1, 32, gemmRowsGeometry(profile, 1)),
+    fallback: (geometry) => linearKey("i4", false, "f32", 1, 32, geometry),
   },
   {
     // Drops the same condition on the row-block side too
@@ -411,7 +414,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 2,
     gemv: false,
-    fallback: (profile) => linearKey("i4", false, "f32", 2, 32, gemmRowsGeometry(profile, 2)),
+    fallback: (geometry) => linearKey("i4", false, "f32", 2, 32, geometry),
   },
 ];
 
@@ -448,7 +451,9 @@ test.skipIf(!GPU_AVAILABLE)(
             `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
           );
         } else {
-          const fallback = door.fallback?.(profile);
+          const fallback = door.fallback?.(
+            gemmShapeGeometry(profile, { m: door.m, n, k, batch: 1 }),
+          );
           assert(
             fallback !== undefined && keys.includes(fallback),
             `${door.name}: did not run on the default-path key ${fallback} (breakdown: ${shown})`,
@@ -609,7 +614,8 @@ type DoorI8Case = {
   readonly shape: GemvI8Case;
   readonly m: number;
   readonly gemv: boolean;
-  readonly fallback?: (profile: GeometryProfile) => string;
+  /** The default path's key, given the geometry the call sites' one lookup gives the case's shape. */
+  readonly fallback?: (geometry: GemmGeometry) => string;
 };
 
 /**
@@ -646,8 +652,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 64 },
     m: GEMM_ROWS,
     gemv: false,
-    fallback: (profile) =>
-      linearKey("i8", true, "f32", GEMM_ROWS, undefined, gemmRowsGeometry(profile, GEMM_ROWS)),
+    fallback: (geometry) => linearKey("i8", true, "f32", GEMM_ROWS, undefined, geometry),
   },
   {
     // Drops only the reduction step (k=68 is a multiple of 4, so v4 stays up)
@@ -655,7 +660,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 68, n: 64 },
     m: 1,
     gemv: false,
-    fallback: (profile) => linearKey("i8", true, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
+    fallback: (geometry) => linearKey("i8", true, "f32", 1, undefined, geometry),
   },
   {
     // Drops the same condition on the row-block side too
@@ -663,7 +668,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 68, n: 64 },
     m: 2,
     gemv: false,
-    fallback: (profile) => linearKey("i8", true, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
+    fallback: (geometry) => linearKey("i8", true, "f32", 2, undefined, geometry),
   },
   {
     // Drops only v4 (n % 4 != 0 — to the default scalar variant)
@@ -671,8 +676,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 33 },
     m: 1,
     gemv: false,
-    fallback: (profile) =>
-      linearKey("i8", false, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
+    fallback: (geometry) => linearKey("i8", false, "f32", 1, undefined, geometry),
   },
   {
     // Drops the same condition on the row-block side too
@@ -680,8 +684,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 33 },
     m: 2,
     gemv: false,
-    fallback: (profile) =>
-      linearKey("i8", false, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
+    fallback: (geometry) => linearKey("i8", false, "f32", 2, undefined, geometry),
   },
 ];
 
@@ -716,7 +719,9 @@ test.skipIf(!GPU_AVAILABLE)(
             `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
           );
         } else {
-          const fallback = door.fallback?.(profile);
+          const fallback = door.fallback?.(
+            gemmShapeGeometry(profile, { m: door.m, n, k, batch: 1 }),
+          );
           assert(
             fallback !== undefined && keys.includes(fallback),
             `${door.name}: did not run on the default-path key ${fallback} (breakdown: ${shown})`,
