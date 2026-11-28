@@ -17,7 +17,11 @@
  * apple-m5 and the shared table apple-metal-3-shared come from records of the current format only, so
  * every record any of their families cites, with the registered table as base (a shared derivation
  * for the shared table), and the GEMV sweep records the header cites (apple-m5's), whose `linearGemv`
- * is derived again rather than carried, derive an object deep-equal to the table. No GPU.
+ * is derived again rather than carried, derive an object deep-equal to the table. The GEMV
+ * derivation is given the table as the generator gives it, its own choices in place: the rule of one
+ * steady record keeps a choice the table holds unless a challenger beats it, so the table's choices
+ * are an input of the rule, and a derivation from the default's choices alone is not what the
+ * generator writes. No GPU.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -31,7 +35,6 @@ import {
   deriveGemvTable,
   deriveTable,
   PROFILES_DIRECTORY,
-  withLinearGemv,
 } from "../generate.ts";
 import { loadRecord } from "../records.ts";
 
@@ -179,11 +182,11 @@ describe("regenerating a table whose every family comes from records of the curr
           base,
           ...(shared ? { shared: true } : {}),
         }).profile;
-        // The GEMV choices are derived again from their records, not carried from the base
+        // The GEMV choices are derived again from their records, not carried from the base: every
+        // decision is taken again, from the table's own choices as the generator starts from them
+        assertEquals(tiled.linearGemv, base.linearGemv);
         const derived =
-          gemvRecords.length === 0
-            ? tiled
-            : deriveGemvTable(withLinearGemv(tiled, undefined), gemvRecords).profile;
+          gemvRecords.length === 0 ? tiled : deriveGemvTable(tiled, gemvRecords).profile;
         assertEquals(derived, base);
       },
     );

@@ -786,7 +786,10 @@ written.
 - On a machine that has the records: for `apple-m5` and `apple-metal-3-shared`, every record any of their families
   cites, with the registered table as base (a shared derivation for the shared one), and the GEMV sweep records the
   header of `apple-m5` cites, from which its `linearGemv` is derived again rather than carried, derive an object
-  equal to the registered table, provenance included.
+  equal to the registered table, provenance included. The GEMV derivation starts from the table's own choices, as
+  the generator does: the rule of one steady record keeps a choice the table holds unless a challenger beats it
+  ([the table's choice](#deriving-the-gemv-choices)), so a derivation from the default's choices alone is not what
+  the generator writes.
 - The shared derivation on hand-built records (core lane): a geometry faster on one device and slower on another is
   not taken; among the geometries eligible on every device the largest geometric mean of the per-device geometric
   means is taken (devices weigh equally, not cases); one slow case on one device rules a geometry out; a field one
