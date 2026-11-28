@@ -401,7 +401,9 @@ const carriedByItsRow = (name: string, first: GemvM1Group): boolean => {
  * on the GEMV sweep records of two devices (2026-11-19, two runs each, the derivation's decisions
  * against those of the full records): carrying the fastest three leaves 0 of 116 decisions different
  * on the RTX 5070 Ti and 9 of 214 on the Apple M2, the fastest one 1 and 23 — a class often holds
- * several rows a few percent apart, and the derivation needs the same row in two records.
+ * several rows a few percent apart, and the derivation needs the same row in two records. NOTE: a
+ * replay under the rule of two records; it has not been run again under the rule of one steady
+ * record, which reads the row in one steady record.
  */
 export const GEMV_EXPLORE_CARRIED_ROWS = 3;
 

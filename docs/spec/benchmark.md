@@ -90,7 +90,7 @@ GPU.
 ## The time left
 
 A pure function of the run's cases and what finished (`estimate.ts`): a case is expected to take the mean of the
-finished cases of the same kind in the run; before one finished, the prior of its kind — 28 s for a GEMV sentinel, 16 s
+finished cases of the same kind in the run; before one finished, the prior of its kind — 29 s for a GEMV sentinel, 17 s
 for another GEMV case, 58 s for a geometry case first of its class, 19 s for a later one —, scaled by how the finished
 cases of the same sweep (the other kind) fared against their priors when there are any. The time left is what the
 running case has left of its expectation (never below 0), the rest of the idle wait, and every case after it with the
@@ -100,9 +100,12 @@ The priors come from the maintainer's records: the GEMV sweep's `full` records o
 `explore` set's replay (half the in-group time), the geometry sweep's `full` records of an RTX 5070 Ti (2026-11-18) and
 the `explore` set's estimate on them (58 % less time in the cases). The GEMV priors were 27 and 15 s until the sweep
 re-timed each group's references and carried candidates from M = 1 down to ×1.03 (2026-11-28): on the `explore`
-records of 2026-11-27 that is about 6 to 7 % more passes than the rounds take and 1.4 to 3.9 % more timed rows, about
-4 % more of a GEMV case. The full run of both sweeps is then about 1 h 9 min (about 1 h 41 min with
-`?idleSeconds=10`).
+records of 2026-11-27 that is about 6 to 7 % more passes than the rounds take on a device without a table and 8.5 to
+8.9 % on one with an embedded table (its choices are re-timed too), and 1.4 to 3.9 % more timed rows, about 4 % more
+of a GEMV case; and the explore set's prediction at ×1.03 instead of ×1.10 adds 0.6 to 7.5 % to the other cases' timed
+passes (2.8 % on average on the four devices' records), an embedded table 1.3 to 4.8 % to the whole set's. Over the
+four devices with and without their table that gives 29 and 17 s. The full run of both sweeps is then about 1 h 11 min
+(about 1 h 43 min with `?idleSeconds=10`).
 
 ## The patterns found
 

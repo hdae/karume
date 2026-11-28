@@ -112,7 +112,13 @@ measurements in `docs/research/`.
   unsteady, "please run the page once more at another time"; too few groups so far —, and a note after an unsteady
   run asks for a second one. `unpack.ts` says beside the file it writes how the derivation will read each GEMV
   record (the same test). The GEMV priors of
-  the time left are 28 and 16 s (were 27 and 15: the re-timing and the ×1.03 carry add about 4 % to a GEMV case).
+  the time left are 29 and 17 s (were 27 and 15: the re-timing, the ×1.03 carry, the explore set's prediction at ×1.03
+  and a device table's choices add 5.5 and 8.4 % on average over four devices); a run of the defaults takes about
+  1 h 11 min.
+- `@karume/runtime/tune`: the GEMV sweep's `explore` set predicts, of a sentinel's rows, every one at least ×1.03
+  (`GEMV_LOWEST_MARGIN`) faster than the default's choice there (was ×1.10), so that one steady explore record holds
+  the rows a re-decision of the derivation at ×1.03 reads; on the four devices' records the other cases' timed passes
+  grow by 0.6 to 7.5 %.
 - `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
   the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
   record — and its re-decision at ×1.03 — reads there.

@@ -254,7 +254,8 @@ margin.
    screened rows. The rule and its evidence are measurement.ts's `QUICK_LOOK_MARGIN` (×1.25) and, for the `explore`
    set, `EXPLORE_QUICK_LOOK_MARGIN` (×1.10: replayed on the GEMV sweep records of 2026-11-18/19, it left the
    derivation's decisions unchanged on the RTX 5070 Ti, 0 of 116, and changed 2 of 214 on the Apple M2, each within
-   2 %; ×1.05 lost adoptions on both).
+   2 %; ×1.05 lost adoptions on both — a replay under the rule of two records, not run again under the rule of one
+   steady record).
 4. Every kernel that goes on, the baseline first, runs once from a zeroed output and is calibrated from its quick
    look's probe (from a probe of its own with the quick look off): the dispatches per pass that fill the target, from
    the wall clock of passes of growing length. A calibration whose pass comes out below a quarter of the target (with
@@ -300,16 +301,21 @@ A short run of the `full` set's row counts, for measuring a device in minutes (g
   words of their weight rows and between their column counts, plus 100 for another storage and 0.5 for another i4
   group length (`gemvCaseDistance`). The count is where the decisions of replayed records stopped improving fast
   (2026-11-19: 6, 8, 12 and 16 sentinels left 18, 14, 8 and 5 of 214 decisions different on the Apple M2 and 1, 0, 0
-  and 0 of 116 on the RTX 5070 Ti).
+  and 0 of 116 on the RTX 5070 Ti — a replay under the rule of two records and the prediction at ×1.10 of that time,
+  not run again under the rule of one steady record).
 - The planned sentinels are measured first, with every candidate, then the other cases; each part in the table's
   order.
 - Every other case measures at M = 1, besides the references, the fastest sequential variant and the fastest plain
   or staged parallel row — each among the rows whose check held, timed (a finite time), not screened, skipped or
   failed — of the nearest sentinel of the case's storage that has one (the first of equally near ones; the i4 group
   length may differ), each with every other kernel of its kind at that sentinel, among the same rows, that the
-  derivation could adopt there: at least ×1.10 faster than its class's reference there — the default's choice at
-  `exact` (the baseline) for a sequential variant, at `reorder` for a plain or staged row; none when that reference
-  has no time there —, and their neighbours on the candidate grid: one step of the columns per workgroup or of the
+  derivation could adopt there at the lowest margin its output may be re-decided under: at least ×1.03
+  (`GEMV_LOWEST_MARGIN`) faster than its class's reference there — the default's choice at `exact` (the baseline)
+  for a sequential variant, at `reorder` for a plain or staged row; none when that reference has no time there —,
+  so that one steady explore record holds the rows a re-decision at ×1.03 reads as well as those of ×1.065 (the
+  prediction was ×1.10, the rule of two records' threshold, until 2026-11-28; on the devices' records the change
+  adds 0.6 to 7.5 % to the other cases' timed passes and 0.5 to 6.1 % to the whole set's), and their neighbours on
+  the candidate grid: one step of the columns per workgroup or of the
   words read ahead; one step of the lanes, and the other of plain and staged at the same lanes
   (`gemvExploreSelection`). A sentinel of another storage
   does not predict: the storage decides the decode. A name
