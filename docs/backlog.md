@@ -145,7 +145,26 @@ maintainer's ruling of 2026-11-06).
      - The split-K linear (the split of the GEMM skeleton since 2026-11-28, every storage under f32 compute —
        [research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)): left are its selection by level with a
        per-profile thread target, the per-device evidence for that target, and the sha rows of the `reorder` presets it
-       would move (perf-ledger K-115).
+       would move (perf-ledger K-115). Before any level selects it, the selection must settle:
+       - **The A/B band at large K** (the maintainer's ruling): `LINEAR_SPLITK_AB_BAND = 2` follows ADR 0147's rule
+         (at least 4 × the worst measured |split − reference GEMM| / op band, at most 2 × the f64 band) only up to
+         about K = 10240. On the kernel-check's bands fixture (m 37, 2 to 16 slices, RTX 3080 Ti) the worst is 0.457 at
+         K = 8960 (4 × = 1.83) and 0.710 at K = 16384 (2.84) and 0.859 at K = 32768 (3.44) (n 68 on the default
+         geometry; f32, bf16, i4 g32 and i2 at 8960, f32 and bf16 above); on every storage, n 68 and 69 and both band
+         geometries it is 0.498 at K = 10240 (1.99, f32 at 16 slices) and 0.606 at K = 12288 (2.42, i4 g128 at 16
+         slices). Gemma 4's down projections (K = 10240 and 12288), where the split pays, lie at that edge
+         ([research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)). The selection needs either a K ceiling
+         or a band that scales with K.
+       - **The f64 band's meaning at large K** (the same open point): on inputs outside the kernel-check fixture's
+         scale (|x| from 1e-3 to 1e3, an offset of +10, × 100) both the reference GEMM and the split leave the op band,
+         by 5 to 70 times, and stay near each other against the error model eps · Σ|x·w|; in one bf16 case (K 4096,
+         8 slices, the first half of K positive and the second negative) only the split leaves it, 1.065 against the
+         reference's 0.839.
+       - **The binding limit**: the selection does not read `maxStorageBufferBindingSize`, so a linear whose output
+         fits but whose partial sums (`slices × m × n × 4` bytes) do not makes the Session fail. It must fall back to
+         the reference GEMM instead.
+       - **f16 compute**: under the key with `linearCompute: "f16"` a Session runs `gemm-f16` without a word. Whether
+         a Session should refuse the pair instead is open.
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
   4. **Requirement levels** ([spec/numerics.md](spec/numerics.md)):
      - The regression corpus ([spec/verification.md](spec/verification.md#the-regression-corpus)): entries for the f16

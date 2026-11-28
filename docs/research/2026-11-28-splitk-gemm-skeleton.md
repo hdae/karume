@@ -3,8 +3,8 @@
 > error. It is not a design source of truth: what runs is [spec/numerics.md](../spec/numerics.md#strategies-admitted-only-by-a-private-key),
 > the kernel's contract is in `packages/runtime/src/kernels/linear-splitk.ts` and its checks in
 > `packages/runtime/tests/gpu_linear_splitk_test.ts`. The scripts are under `outputs/misc/splitk-recon-2026-11-28/`
-> (the design recon, `bench*.ts`) and its `impl/` folder (this note, `bench-split.ts`), local and untracked; the
-> numbers below are their output.
+> (the design recon, `bench*.ts`), its `impl/` folder (this note, `bench-split.ts`) and its `review/` and `fix/`
+> folders (the error at large K), local and untracked; the numbers below are their output.
 
 # The split-K linear as a split of the GEMM skeleton
 
@@ -138,6 +138,23 @@ slices).
 
 The A/B band of the test is declared at 2 × the op band (ADR 0147 decision 2: at least 4 × the worst measured, 0.393 ×
 4 = 1.57, and at most 2 × the f64 band).
+
+The worst split against the reference GEMM grows with K. By raw dispatches on the kernel check's bands fixture (m 37,
+the `irregular` weights, 2 to 16 slices), as a share of the op band, with the lower bound the rule then sets:
+
+| K | Covered | Worst split vs reference | 4 × worst | Where |
+| --- | --- | --- | --- | --- |
+| 8960 | f32, bf16, int4 g32, int2; n 68; default geometry | 0.457 | 1.83 | f32, 16 slices |
+| 10240 | eight storages; n 68 and 69; both band geometries | 0.498 | 1.99 | f32, 16 slices |
+| 12288 | eight storages; n 68 and 69; both band geometries | 0.606 | 2.42 | int4 g128, 16 slices |
+| 16384 | f32, bf16; n 68; default geometry | 0.710 | 2.84 | bf16, 8 slices |
+| 32768 | f32, bf16; n 68; default geometry | 0.859 | 3.44 | f32, 16 slices |
+
+The K = 8960, 16384 and 32768 rows are the review's (`outputs/misc/splitk-recon-2026-11-28/review/bands*.ts`), the
+K = 10240 and 12288 rows `outputs/misc/splitk-recon-2026-11-28/fix/bands-k10240-12288.ts` (256 cases). Against f64 the
+split stays within the band at every K measured (at worst 0.422 at K = 10240 and 0.456 at K = 12288, where the
+reference GEMM reads 0.463 and 0.565). So the band of 2 meets the rule up to about K = 10240 and not at K = 12288; the
+down projections of Gemma 4 (K = 10240 and 12288), where the split pays, sit at that edge.
 
 ## 6. Not measured
 
