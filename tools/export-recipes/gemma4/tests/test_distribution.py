@@ -1039,6 +1039,16 @@ class TestGemma4Card:
         # The spelling the summary states is the one taken from the manifest (not baked in).
         assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in overview
 
+    def test_the_overview_links_the_upstream_it_names(self, gemma4_assembled) -> None:
+        """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — a repository the card
+        names is a link with its ID as plain text, never code font."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
+
+        assert f"of {hf_link(GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL])},\n" in overview
+        assert re.findall(r"`(?:google|hdae)/[^`]+`", card) == []
+
     def test_it_names_the_device_limits_a_quant_declares(self, gemma4_assembled) -> None:
         """`requiredLimits` is a field for "knowing in advance which devices it does not fit", so
         it appears in the text.

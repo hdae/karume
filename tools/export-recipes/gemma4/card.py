@@ -40,6 +40,7 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
+    hf_link,
     introduction,
     knob,
     model_sections,
@@ -262,8 +263,8 @@ def _gemma4_drafters(manifest: Mapping[str, Any]) -> list[tuple[str, str]]:
 def _gemma4_upstream_spellings(
     manifest: Mapping[str, Any], upstream: Mapping[str, str] = GEMMA4_UPSTREAM
 ) -> str:
-    """The upstream spellings the prose names — read from the manifest for **the models this
-    distribution actually carries** only.
+    """The upstreams the prose names, each a link (`karume.modelcard.hf_link`) — read from the
+    manifest for **the models this distribution actually carries** only.
 
     `upstream` is the line's attribution table (the base models for the regular line, the QAT
     checkpoints for the q4_0 QAT line — {@link GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM}).
@@ -271,7 +272,7 @@ def _gemma4_upstream_spellings(
     MUST: do not bake model spellings into the prose (the same reason as {@link GEMMA4_TITLE}'s
     MUST).
     """
-    return " / ".join(f"`{upstream[name]}`" for name in manifest["models"])
+    return " / ".join(hf_link(upstream[name]) for name in manifest["models"])
 
 
 def _spell_models(names: Iterable[str]) -> str:

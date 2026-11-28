@@ -119,8 +119,7 @@ The level-2 sections come in this order:
   `[<owner>/<name>](https://huggingface.co/<owner>/<name>)` (`karume.modelcard.hf_link`), the quant tables'
   cross-repository note included; the Anima origins link a Civitai source by its address as link text
   (`[civitai.com/models/…](…)`). No card or notice writes a URL without a link (no bare or angle-bracket URL), except
-  the NVIDIA notice of the Anima texts, whose wording was ruled with its parenthesized addresses. The Gemma 4 cards
-  still name some repositories in code font.
+  the NVIDIA notice of the Anima texts, whose wording was ruled with its parenthesized addresses.
 - A card pins every upstream it stores, and every upstream of a component it fetches from another Karume repository,
   at the full commit the bytes were taken from: `` [<owner>/<name>](…) at commit `<40 hex digits>` ``
   (`karume.modelcard.pinned`). The commits are the ones the recipes and their `THIRD_PARTY_NOTICES.md` ledgers

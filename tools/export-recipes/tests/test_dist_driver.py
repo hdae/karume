@@ -573,8 +573,7 @@ class TestTheLinksOfEveryPublishedRepository:
         ]
 
         assert re.findall(r"\[`[^`]+`\]\(https://huggingface\.co/", prose) == []
-        # The Gemma 4 cards name their repositories in code font until their stage.
-        assert coded == [] or directory in GEMMA4_REPOSITORIES, coded
+        assert coded == []
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_no_card_or_notice_writes_a_url_without_a_link(
