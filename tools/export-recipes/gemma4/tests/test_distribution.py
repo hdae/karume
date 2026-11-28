@@ -58,7 +58,7 @@ from gemma4.distribution import (
     gemma4_sources,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
-from gemma4.sources import REGULAR_DRAFTER_PINS
+from gemma4.sources import REGULAR_DRAFTER_PINS, REGULAR_TOKENIZER_PINS
 from gemma4.tests import product_fixture as fixture
 from karume.container import AssetInput, container_parts
 from karume.dist import (
@@ -68,7 +68,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.modelcard import APACHE_LICENSE_REFERENCE
+from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 #: Role name → part count (the PLE assets take parts of their own, so only `model` has more).
@@ -957,6 +957,25 @@ class TestGemma4Card:
         assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE) == 1
         assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
         assert GEMMA_LICENSE_PAGE not in body
+
+    def test_the_card_pins_every_upstream_at_the_commit_sources_records(
+        self, tmp_path: Path
+    ) -> None:
+        """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — each model at the commit
+        its hand-placed checkpoint was fetched at, each drafter at its pin."""
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        for model in ("e2b", "e4b"):
+            for pin in (REGULAR_TOKENIZER_PINS[model], REGULAR_DRAFTER_PINS[model]):
+                assert f"{hf_link(pin.repo)} at commit `{pin.revision}`" in card, pin.repo
 
     def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
         self, gemma4_assembled, tmp_path: Path

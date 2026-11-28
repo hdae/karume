@@ -48,6 +48,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
@@ -406,10 +407,9 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         pins = SOURCES[name].pins
         weights, tokenizer = pins.weights, pins.tokenizer
         lines.append(
-            f"- **`{name}`**: the weights are [{weights.repo}](https://huggingface.co/{weights.repo})"
-            f" at commit `{weights.revision}`; the tokenizer is that of its base model"
-            f" [{tokenizer.repo}](https://huggingface.co/{tokenizer.repo}) at commit"
-            f" `{tokenizer.revision}` (Google's glitch-token fixes of 2026-11-03, which the mobile"
+            f"- **`{name}`**: the weights are {pinned(weights.repo, weights.revision)}; the"
+            f" tokenizer is that of its base model {pinned(tokenizer.repo, tokenizer.revision)}"
+            " (Google's glitch-token fixes of 2026-11-03, which the mobile"
             f" repository has not received); both are licensed **{QAT_LICENSE}**"
             f" {APACHE_LICENSE_REFERENCE}."
         )

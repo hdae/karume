@@ -125,8 +125,10 @@ The level-2 sections come in this order:
   at the full commit the bytes were taken from: `` [<owner>/<name>](…) at commit `<40 hex digits>` ``
   (`karume.modelcard.pinned`). The commits are the ones the recipes and their `THIRD_PARTY_NOTICES.md` ledgers
   record (a fetch record, the commit a checkpoint's own config names for its text encoder, a pinned source table).
-  A Civitai source, which has no commits, is pinned by its model version ("(version `<id>`)"). Every `base_model`
-  is pinned somewhere in the card, except on `karume-gemma4` and `karume-gemma4-qat`, which pin no upstream.
+  The Gemma 4 cards take them from `gemma4.sources`; `karume-gemma4`'s hand-placed checkpoints are pinned at the
+  commit their tokenizer files were fetched at (`REGULAR_TOKENIZER_PINS`), where `model.safetensors` is the blob
+  their weights were read from. A Civitai source, which has no commits, is pinned by its model version ("(version `<id>`)"). Every `base_model`
+  is pinned somewhere in the card.
 - A commit of another Karume repository (the manifest holds it in full) is written as its first 16 hex digits and
   "…", in the quant tables' note "Some components are fetched from … at commit … — those bytes are identical to this
   model's own, so they are not stored here a second time." (`karume.modelcard.quants`).

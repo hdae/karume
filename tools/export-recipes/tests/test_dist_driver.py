@@ -775,10 +775,6 @@ class TestTheTitleAndTheNonEndorsementSentence:
             assert upstream.name in named and upstream.author in publishers
 
 
-#: The cards that do not pin their upstreams yet: two of the Gemma 4 ones, whose recipes change in
-#: a stage of their own (docs/spec/distribution-cards.md#naming-and-pinning-an-upstream).
-CARDS_WITHOUT_PINS = frozenset({"karume-gemma4", "karume-gemma4-qat"})
-
 #: A shortened commit or digest of a card (the 16 hex digits and "…" a card may write for a commit
 #: of another Karume repository or a file digest).
 _SHORTENED_HEX = re.compile(r"`([0-9a-f]{7,39})…`")
@@ -798,7 +794,7 @@ class TestThePinsOfEveryPublishedCard:
             if re.search(re.escape(f"{hf_link(repo)} at commit `") + "[0-9a-f]{40}`", card) is None
         ]
 
-        assert bool(unpinned) is (directory in CARDS_WITHOUT_PINS), unpinned
+        assert unpinned == []
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_a_pin_is_a_commit_and_only_a_karume_commit_is_shortened(

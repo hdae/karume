@@ -50,7 +50,7 @@ from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, Hub
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import MAX_QUANT_DESCRIPTION_CHARS, DistError, assemble_family
-from karume.modelcard import APACHE_LICENSE_REFERENCE
+from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link
 from karume.ple import PLE_INDEX_ROLE, PLE_ROLES
 
 #: The per-layer embedding width of the stand-in: two groups of the line's grid per layer (the
@@ -951,6 +951,19 @@ class TestQatCard:
         assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE)
         assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
         assert GEMMA_LICENSE_PAGE not in body
+
+    def test_the_card_pins_every_upstream_at_the_commit_sources_records(
+        self, tmp_path: Path
+    ) -> None:
+        """docs/spec/distribution-cards.md#naming-and-pinning-an-upstream — each model's QAT
+        weights and its base model (the tokenizer's source), and each QAT drafter, at its pin."""
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        for model in ("e2b", "12b"):
+            pins = QAT_LINE_PINS[model]
+            for pin in (pins.weights, pins.tokenizer, QAT_DRAFTER_PINS[model]):
+                assert f"{hf_link(pin.repo)} at commit `{pin.revision}`" in card, pin.repo
 
     def test_only_a_model_carrying_the_embedder_is_said_to_take_images(
         self, tmp_path: Path

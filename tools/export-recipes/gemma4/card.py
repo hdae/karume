@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from karume.modelcard import (
@@ -40,15 +40,18 @@ from karume.modelcard import (
     default_model,
     from_pretrained,
     frontmatter,
-    hf_link,
     introduction,
     knob,
     model_sections,
     models,
+    pinned,
     quants,
     render,
     require_pipeline,
 )
+
+if TYPE_CHECKING:
+    from .sources import HubPin
 
 #: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 GEMMA4_SUPPORTED_PIPELINE = "gemma4/1"
@@ -429,9 +432,26 @@ def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _pinned(repo: str, pins: Mapping[str, HubPin], name: str) -> str:
+    """`repo` at the commit its stored bytes were taken from: model `name`'s pin in `pins` (a table
+    of `gemma4.sources`), spelled by `karume.modelcard.pinned`.
+
+    MUST: a model without a pin, or a pin of another repository, fails the render — the card would
+    name no commit, or one the upstream it names does not have.
+    """
+    pin = pins.get(name)
+    if pin is None or pin.repo != repo:
+        raise ValueError(f"model '{name}': no pinned commit of {repo} (pin: {pin})")
+    return pinned(repo, pin.revision)
+
+
 def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     """The attribution section. Use (capabilities, limitations, safety, evaluation) is **left to
     the upstream card**."""
+    # `gemma4.sources` builds its pins from this module's attribution tables, so it is imported
+    # when a card is drawn rather than at module scope (the two modules would import each other).
+    from .sources import REGULAR_DRAFTER_PINS, REGULAR_TOKENIZER_PINS
+
     lines = [
         "## Base weights and attribution",
         "",
@@ -439,16 +459,20 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        repo = GEMMA4_UPSTREAM[name]
+        # The regular line's checkpoints are hand-placed (`inputs/gemma4/`): their tokenizer files
+        # were fetched at the commit `REGULAR_TOKENIZER_PINS` names, their weights at an earlier one
+        # whose `model.safetensors` is the same blob (`THIRD_PARTY_NOTICES.md`), so every byte
+        # stored here is the repository's at that commit.
+        pin = _pinned(GEMMA4_UPSTREAM[name], REGULAR_TOKENIZER_PINS, name)
         lines.append(
-            f"- **`{name}`**: {hf_link(repo)}, licensed **{GEMMA4_LICENSE}**"
-            f" {APACHE_LICENSE_REFERENCE}."
+            f"- **`{name}`**: {pin}, licensed **{GEMMA4_LICENSE}** {APACHE_LICENSE_REFERENCE}."
         )
     # Each drafter is labelled by its model (the q4_0 QAT card's form): with more than one, a label
     # taken from the repository name would read `assistant` for every one of them.
     for name, drafter in _gemma4_drafters(manifest):
         lines.append(
-            f"- **`{name}` drafter**: {hf_link(drafter)}, the multi-token-prediction drafter head,"
+            f"- **`{name}` drafter**: {_pinned(drafter, REGULAR_DRAFTER_PINS, name)}, the"
+            " multi-token-prediction drafter head,"
             f" licensed **{GEMMA4_LICENSE}** under the same terms."
             " It is redistributed here with its clustered sparse output head replaced by a dense"
             " projection over the full vocabulary, and it reads the key/value states and embedding"
@@ -750,6 +774,11 @@ def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
 def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     """The attribution section: each model's QAT checkpoint and base model, each drafter, the
     changes made, and a pointer to the upstream card (the regular card's rule)."""
+    # The pins are imported here for the reason of `_gemma4_base_weights`.
+    from .sources import QAT_DRAFTER_PINS, QAT_LINE_PINS
+
+    weights_pins = {model: pins.weights for model, pins in QAT_LINE_PINS.items()}
+    base_pins = {model: pins.tokenizer for model, pins in QAT_LINE_PINS.items()}
     lines = [
         "## Base weights and attribution",
         "",
@@ -758,18 +787,20 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        weights, base = _qat_q4_0_weights(name), GEMMA4_UPSTREAM[name]
+        weights = _pinned(_qat_q4_0_weights(name), weights_pins, name)
+        base = _pinned(GEMMA4_UPSTREAM[name], base_pins, name)
         lines.append(
-            f"- **`{name}`**: the weights are {hf_link(weights)}, Google's QAT (Q4_0) checkpoint of"
-            f" the base model {hf_link(base)}, which is also the source of the tokenizer, the chat"
-            f" template and the generation defaults; both are licensed **{GEMMA4_LICENSE}**"
+            f"- **`{name}`**: the weights are {weights}, Google's QAT (Q4_0) checkpoint of the base"
+            f" model {base}, which is also the source of the tokenizer, the chat template and the"
+            f" generation defaults; both are licensed **{GEMMA4_LICENSE}**"
             f" {APACHE_LICENSE_REFERENCE}."
         )
     drafters = _qat_q4_0_drafters(manifest)
     for name, drafter in drafters:
         lines.append(
-            f"- **`{name}` drafter**: {hf_link(drafter)}, the QAT multi-token-prediction drafter"
-            f" head, licensed **{GEMMA4_LICENSE}** under the same terms."
+            f"- **`{name}` drafter**: {_pinned(drafter, QAT_DRAFTER_PINS, name)}, the QAT"
+            f" multi-token-prediction drafter head, licensed **{GEMMA4_LICENSE}** under the same"
+            " terms."
             " It reads the key/value states and the embedding table of the main model rather than"
             " carrying its own, and runs its output head over the full vocabulary (a clustered"
             " sparse head an assistant checkpoint carries is not used)."
