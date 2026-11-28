@@ -10,8 +10,9 @@
 //    outputs/misc/gemm-geometry-recon-2026-11-28/shapes.ts), through an injected test profile with
 //    the fitted integers (256, 48), the rule picks the tile the recon's own fitting script (fit.ts,
 //    `two(256, 48, 1.5, 256)`) picked — an oracle written apart from this implementation.
-// 3. Without the field nothing moves: on every registered table and the default profile, for every
-//    shape of a grid, the lookup is the `gemmRows` rule of M (the call sites' keys follow it).
+// 3. Without the field nothing moves: on every registered table (the field taken off the one that
+//    carries it, `nvidia-ampere`) and the default profile, for every shape of a grid, the lookup is
+//    the `gemmRows` rule of M (the call sites' keys follow it).
 // 4. A broken rule fails loudly at the check and at the lookup (fault injection: a ladder out of
 //    order); the JSON of a table with the rule reads back to the same rule.
 // 5. The linear's dispatch program takes the rule's tile in its GEMM key, and the split-K partial
@@ -349,8 +350,17 @@ describe("the grid-fill rule on the recon's 125 shapes (RTX 3080 Ti, 2026-11-28)
 describe("without the field, the lookup is the gemmRows rule of M", () => {
   it("gives, on the default profile and every registered table, the gemmRows geometry of M for every shape of a grid", () => {
     const rows = [1, 16, 17, 64, 65, 300, 512, 513, 768, 4096, 65536];
-    for (const profile of [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES]) {
-      assertEquals(profile.gemmGrid, undefined, `${profile.id} carries no grid-fill rule`);
+    // nvidia-ampere carries the field (from the RTX 3080 Ti's grid records); its buckets are read
+    // with the field taken off, as every other table's are without one
+    assertEquals(
+      BUILTIN_GEOMETRY_PROFILES.filter(({ gemmGrid }) => gemmGrid !== undefined).map(
+        ({ id }) => id,
+      ),
+      ["nvidia-ampere"],
+    );
+    assertEquals(DEFAULT_GEOMETRY_PROFILE.gemmGrid, undefined);
+    for (const table of [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES]) {
+      const { gemmGrid: _rule, ...profile } = table;
       for (const m of rows) {
         for (const [n, k, batch] of [
           [32, 64, 1],

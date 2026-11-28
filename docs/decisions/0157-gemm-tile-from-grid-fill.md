@@ -6,8 +6,11 @@
   the item and took the recon's recommended options). The adoption into `nvidia-ampere` was built the same day and
   taken back: in the full `vp test` every output row held and 8 census rows moved by the tile alone, but a Session
   with a zero-element GEMM (a symbolic dimension of 0) failed — the lookup refuses a shape with a zero dimension, a
-  case a table without the field never reaches — and seven tests read this machine's tile by the M buckets; the
-  table carries no field until those are settled ([backlog](../backlog.md), G4)
+  case a table without the field never reaches — and seven tests read this machine's tile by the M buckets. The
+  maintainer then ruled those points: a GEMM with a zero dimension takes the bucket tile of M, the tests expect the
+  call sites' one lookup, and the k88 set's candidate list moves with the field; `nvidia-ampere` carries the field
+  again, (256, 48) from the same two records, with the same 8 census rows rewritten and every output row unchanged
+  in the full `vp test` ([backlog](../backlog.md), G4)
 - Date: 2026-11-28
 - Related: [0022](0022-gemm-register-blocking.md) (the tile geometry changes the work split only) /
   [0115](0115-geometry-profiles.md) (geometry profiles, a static table per adapter, no run-time autotuning) /

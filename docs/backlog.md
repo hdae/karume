@@ -352,22 +352,19 @@ maintainer's ruling of 2026-11-06).
        the selection at the three call sites are built
        ([spec](spec/geometry-profiles.md#the-grid-fill-rule-of-the-gemm)), and so is the sweep's `grid` set that times
        the ladder ([spec](spec/workbench.md#the-geometry-sweeps-grid-set)), and the derivation of the two integers with
-       the generator's `--grid-records` ([spec](spec/geometry-profiles.md#deriving-the-grid-fill-rule)); no table
-       carries the field. Left, in this order:
-       - G4: `nvidia-ampere` with the field, (256, 48), from the two grid records of the RTX 3080 Ti kept at
-         `outputs/workbench/node-nvidia-geforce-rtx-3080-ti/geometry-sweep_2026-11-28T05-13-00.json` and
-         `…T05-21-20.json` (outside git). Built on 2026-11-28 and taken back the same day: in the full `vp test` every
-         output row held and 8 of the corpus's 22 census rows moved by the tile alone, but
-         - the lookup (`gemmShapeGeometry`) refuses a GEMM with a zero dimension, so on that adapter a Session with a
-           zero-element tensor fails (`e2e_public_api_test`, a symbolic dimension of 0, at `buildMatmul`) — the rule
-           for such a shape is to be decided (one candidate: a GEMM with no outputs takes the bucket tile of M, the
-           lookup without the field);
-         - seven tests read this machine's tile by the M buckets (`gpu_f16_compute_test` four, `gpu_linear_gemv_test`
-           two, the k88 case of `tune_geometries_test` — the k88 set's candidates are each table's
-           `gemmShapeGeometry`, so that set's candidate list moves with the field);
-         - a derivation with `--grid-records` on a table that carries the field reads today's tile as the rule's own,
-           so no pair clears ×1.05 and the regenerated table carries no field (re-deriving drops it);
-         then the table again, with the census rows rewritten;
+       the generator's `--grid-records` ([spec](spec/geometry-profiles.md#deriving-the-grid-fill-rule)). G4 is done
+       (2026-11-28): `nvidia-ampere` carries the field, (256, 48), derived against its bucket-only table from the two
+       grid records of the RTX 3080 Ti kept at
+       `outputs/workbench/node-nvidia-geforce-rtx-3080-ti/geometry-sweep_2026-11-28T05-13-00.json` and
+       `…T05-21-20.json` (outside git), its header still citing its 24 GEMV sweep records (the generator given both).
+       A first adoption the same day was taken back; the maintainer then ruled its three open points: a GEMM with a zero
+       dimension takes the bucket tile of M (the lookup no longer refuses it — a Session with a zero-element tensor
+       runs on that adapter); the seven tests that read this machine's tile by the M buckets expect the call sites' one
+       lookup (`gemmShapeGeometry`); the k88 set's candidate list moves with the field. This machine's 8 corpus census
+       rows that the tile moves are rewritten, every output row unchanged in the full `vp test`. Pitfall kept: a
+       derivation with `--grid-records` on a table that carries the field reads today's tile as the rule's own, so no
+       pair clears ×1.05 and the regenerated table carries none — derive against the table without the field. Left,
+       in this order:
        - G5: the end-to-end Session A/B (depth-anything, siglip2 so400m, lucida 1024, Gemma 4 E2B / E4B prefill at
          P = 1K and 4K) against the same table without the field — K-116's kill criterion;
        - G6: other devices — their own grid records, which the benchmark page's default run takes since 2026-11-28 (a
