@@ -1,7 +1,8 @@
 /**
  * verify-cache: when a result must not be reused, how a started command enters the key, the
  * judgement of a prediction against the run that followed it, and the `reuse` mode — the decision
- * before a run, the mode variable, the stub of a reused file and the files a command line names.
+ * before a run, the mode variable, the stub of a reused file and the files a command line names —
+ * and the code layer's import closure.
  */
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
@@ -21,10 +22,18 @@ import {
   roleOfCommand,
   stubModuleText,
   summarize,
+  sha256Of,
   summarizeReuse,
 } from "../src/verify-cache.ts";
+import { ImportClosures } from "../src/verify-cache-reporter.ts";
 
 const PASSED = { passed: 3, failed: 0, skipped: 1 };
+
+/** A module reader over in-memory files (absolute path → source text). */
+const filesOf =
+  (files: Readonly<Record<string, string>>) =>
+  (path: string): Uint8Array<ArrayBuffer> | undefined =>
+    Object.hasOwn(files, path) ? new TextEncoder().encode(files[path]) : undefined;
 const LAYERS: Layers = { environment: "e", data: "d", code: "c" };
 
 describe("reasonsNotReusable", () => {
@@ -322,5 +331,17 @@ describe("keyOf / summarize", () => {
         contradicted: [{ file: "wrong.ts", why: ["other kernels"] }],
       },
     );
+  });
+});
+
+describe("ImportClosures", () => {
+  it("takes a module imported with a query (`?raw`) as its file, identified by the file's bytes", () => {
+    const wgsl = "@compute @workgroup_size(1) fn main() {}\n";
+    const closures = new ImportClosures(
+      new Map(),
+      filesOf({ "/repo/a.ts": 'import text from "./k.wgsl?raw";\n', "/repo/k.wgsl": wgsl }),
+    );
+    assertEquals(closures.closureOf(["/repo/a.ts"]), ["/repo/a.ts", "/repo/k.wgsl"]);
+    assertEquals(closures.hashOfModule("/repo/k.wgsl"), sha256Of(wgsl));
   });
 });

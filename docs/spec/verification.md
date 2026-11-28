@@ -153,7 +153,7 @@ The unit is one test file. After a file runs, a reporter writes a record of what
 | --- | --- |
 | environment | The adapter's identity, features and limits; the Node version and platform; the lockfile and `vite.config.ts`; every `KARUME_*` variable except `KARUME_VERIFY_CACHE`. The driver version is recorded and is not part of the key. |
 | data | Each file the test read, by content hash (by size and modification time above 32 MiB); each directory it listed; each `git ls-files` it ran. |
-| code | The static import closure of the test file and the setup file, the runtime's sources included. |
+| code | The static import closure of the test file and the setup file, the runtime's sources included. A module imported with a query (`.wgsl?raw`) is its file. |
 
 A record also keeps the WGSL texts the file dispatched. They are not part of the key.
 

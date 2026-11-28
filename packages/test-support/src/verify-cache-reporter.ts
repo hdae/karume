@@ -117,9 +117,18 @@ const identityOfCommand = (command: readonly string[]): string => {
   }
 };
 
-type Workspace = ReadonlyMap<string, ReadonlyMap<string, string>>;
-
 /** Workspace packages: name → export subpath → absolute file. */
+export type Workspace = ReadonlyMap<string, ReadonlyMap<string, string>>;
+
+/** The bytes of a module by its absolute path, or `undefined` when there is no such file. */
+export type ReadModule = (path: string) => Uint8Array<ArrayBuffer> | undefined;
+
+/** Decodes a source as `readFileSync(path, "utf8")` does (a byte order mark stays in the text). */
+const SOURCE_TEXT = new TextDecoder("utf-8", { ignoreBOM: true });
+
+const readModuleFromDisk: ReadModule = (path) =>
+  existsSync(path) && !statSync(path).isDirectory() ? readFileSync(path) : undefined;
+
 const readWorkspace = (): Workspace => {
   const packages = new Map<string, Map<string, string>>();
   for (const group of ["packages", "tools"]) {
@@ -144,26 +153,38 @@ const readWorkspace = (): Workspace => {
 };
 
 /** The static import closure of entry files, with each module read and parsed once per run. */
-class ImportClosures {
-  readonly #workspace = readWorkspace();
+export class ImportClosures {
+  readonly #workspace: Workspace;
+  readonly #read: ReadModule;
   readonly #imports = new Map<string, readonly string[]>();
   readonly #hashes = new Map<string, string>();
+
+  constructor(workspace: Workspace, read: ReadModule) {
+    this.#workspace = workspace;
+    this.#read = read;
+  }
 
   hashOfModule(path: string): string {
     let hash = this.#hashes.get(path);
     if (hash === undefined) {
-      hash = existsSync(path) ? sha256Of(readFileSync(path)) : "missing";
+      const bytes = this.#read(path);
+      hash = bytes === undefined ? "missing" : sha256Of(bytes);
       this.#hashes.set(path, hash);
     }
     return hash;
   }
 
   #resolve(from: string, written: string): string | undefined {
-    if (written.startsWith("./") || written.startsWith("../")) return join(dirname(from), written);
-    if (written.startsWith("file:")) return fileURLToPath(written);
-    const parts = written.split("/");
-    const name = written.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
-    const rest = written.slice(name.length);
+    // A query (`.wgsl?raw`) asks Vite for another form of the same file: the file is the module.
+    const queryAt = written.indexOf("?");
+    const specifier = queryAt === -1 ? written : written.slice(0, queryAt);
+    if (specifier.startsWith("./") || specifier.startsWith("../")) {
+      return join(dirname(from), specifier);
+    }
+    if (specifier.startsWith("file:")) return fileURLToPath(specifier);
+    const parts = specifier.split("/");
+    const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+    const rest = specifier.slice(name.length);
     return this.#workspace.get(name)?.get(rest === "" ? "." : `.${rest}`);
   }
 
@@ -172,8 +193,9 @@ class ImportClosures {
     if (known !== undefined) return known;
     let resolved: string[] = [];
     // Only TypeScript sources are parsed; a JSON or WGSL module is a leaf of the graph.
-    if (/\.[cm]?tsx?$/.test(path) && existsSync(path)) {
-      resolved = importSpecifiersOf(path, readFileSync(path, "utf8"))
+    const bytes = /\.[cm]?tsx?$/.test(path) ? this.#read(path) : undefined;
+    if (bytes !== undefined) {
+      resolved = importSpecifiersOf(path, SOURCE_TEXT.decode(bytes))
         .map((written) => this.#resolve(path, written))
         .filter((target): target is string => target !== undefined);
     }
@@ -287,7 +309,7 @@ const outcomeOf = (testModule: TestModule): Outcome => {
 
 export default class VerifyCacheReporter implements Reporter {
   readonly #mode = cacheModeOf(process.env);
-  readonly #closures = new ImportClosures();
+  readonly #closures = new ImportClosures(readWorkspace(), readModuleFromDisk);
   readonly #checkout = readCheckout();
   readonly #variables = keyVariablesOf(process.env);
   readonly #fixed = {
