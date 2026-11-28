@@ -16,7 +16,8 @@
  */
 
 import { isNotFound, stat } from "@karume/test-support/fs";
-import type { IrGraph } from "../../../runtime/src/format/ir.ts";
+import { evalDim, parseDim } from "../../../runtime/src/format/dims.ts";
+import type { IrDim, IrGraph } from "../../../runtime/src/format/ir.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../../runtime/src/kernels/geometry-profile.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
@@ -250,6 +251,48 @@ export const decodeFusionPlan = (
     ]),
   );
   return planDistributionFusions(graph, inputShapes, options, undefined, stateShapes);
+};
+
+/** A value for each symbol of a graph, by name. */
+export type SymbolBinding = Readonly<Record<string, number>>;
+
+/**
+ * The input and state shapes of `graph` with its symbols bound by name (a derived dimension such
+ * as `S+1519` or `9n` is evaluated).
+ *
+ * MUST: an unbound symbol, or a binding that names a symbol the graph does not have, fails loudly —
+ * a renamed symbol would otherwise be planned at made-up shapes, and the check would pin a plan no
+ * Session makes.
+ */
+export const boundShapes = (
+  graph: IrGraph,
+  binding: SymbolBinding,
+): {
+  readonly inputs: Readonly<Record<string, readonly number[]>>;
+  readonly states: ReadonlyMap<string, readonly number[]>;
+} => {
+  const stray = Object.keys(binding).filter((name) => !graph.symbols.includes(name));
+  if (stray.length > 0) {
+    throw new Error(
+      `the binding names ${stray.join(", ")}, not symbols of the graph [${graph.symbols.join(", ")}]`,
+    );
+  }
+  const bind = (shape: readonly IrDim[]): number[] =>
+    shape.map((dim) => (typeof dim === "number" ? dim : evalDim(parseDim(dim), binding)));
+  return {
+    inputs: Object.fromEntries(graph.inputs.map((spec) => [spec.name, bind(spec.shape)])),
+    states: new Map(Object.entries(graph.states).map(([name, slot]) => [name, bind(slot.shape)])),
+  };
+};
+
+/** The fusion hit counts of `graph` planned at {@link boundShapes}. */
+export const boundFusionCounts = (
+  graph: IrGraph,
+  binding: SymbolBinding,
+  options: FusionCountOptions = {},
+): FusionCounts => {
+  const { inputs, states } = boundShapes(graph, binding);
+  return fusionCounts(graph, inputs, options, undefined, states);
 };
 
 /** Every built-in counter at 0 (the checks spread their expected hits over it). */
