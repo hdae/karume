@@ -297,7 +297,9 @@ One constant, imported where it is written:
 - In `_shared`: the license texts and the layout of `LICENSE.md` (`_shared/licenses`), the publishers' spelling
   (`_shared.upstream.UPSTREAM_AUTHORS`) and the Gemma license page (`_shared.upstream.GEMMA_LICENSE_PAGE`).
 - Within a family, for its card and its notice: Anima's attribution, rights-grant and NVIDIA notices; MOSS-Image's
-  Black Forest Labs non-endorsement (`moss.card.MOSS_BFL_NON_ENDORSEMENT`). Each quotation is one `UpstreamQuote` of
-  its family's card module.
+  Black Forest Labs non-endorsement (`moss.card.MOSS_BFL_NON_ENDORSEMENT`); for the three Gemma 4 lines, the usage
+  (`gemma4.card.gemma4_usage`), the per-model sections with their notes (`gemma4.card.gemma4_model_sections`) and the
+  notices' opening (`gemma4.distribution.gemma4_notice_opening`, the license title `GEMMA4_NOTICE_LICENSE`). Each
+  quotation is one `UpstreamQuote` of its family's card module.
 
 Everything else above (the "What is this" sentences among it) is written per family.

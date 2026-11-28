@@ -352,54 +352,54 @@ maintainer's ruling of 2026-11-06).
   release)**. How a distribution repository's `README.md`, `NOTICE.md` and `LICENSE.md` are written is the spec
   [distribution-cards](spec/distribution-cards.md); the rules every published repository satisfies are checked by
   `tools/export-recipes/tests/test_dist_driver.py`.
-  - **Built (2026-11-27, on the maintainer's twelve rulings of that day), not uploaded**: the generators of the
-    sixteen repositories outside Gemma 4 follow the spec — license names, full-commit pins, the Gemma license link of
-    `karume-embeddinggemma-2`, the fenced primary text, the upstream-card bullet, repository IDs in the notices, the
-    publishers' spelling, one section order, the runtime sentence, the `base_model` of fetched components, verbatim
-    quotations of the upstream cards, and dated measurement notes in place of measured preset descriptions. The
-    Gemma 4 texts are byte for byte what they were. The review material (each repository's new texts and their diff
-    against its mirror) is `outputs/misc/cards-stage2-2026-11-27/` (untracked).
-  - **Uploads**: each of the sixteen repositories needs one re-upload carrying every change. Where a preset
+  - **Built on the maintainer's twelve rulings of 2026-11-27, not uploaded**: the generators of all nineteen
+    repositories follow the spec — license names, full-commit pins, the Gemma license link, the fenced primary text,
+    the upstream-card bullet, repository IDs in the notices, the publishers' spelling, one section order, the runtime
+    sentence, the `base_model` of fetched components, verbatim quotations of the upstream cards, and dated measurement
+    notes in place of measured preset descriptions. The sixteen outside Gemma 4 were built on 2026-11-27 (review
+    material `outputs/misc/cards-stage2-2026-11-27/`, untracked), the three Gemma 4 ones (the `gemma4` and
+    `gemma4_qat` recipes) on 2026-11-28: the mobile card's common sections, usage and tags, links in place of
+    code-font repository IDs, the notices opened through one helper that names the models a build holds, Google's QAT
+    note quoted on `karume-gemma4-qat`, and `karume-gemma4`'s attribution stating its int8 drafters (review material
+    `outputs/misc/cards-gemma4-2026-11-28/`, untracked).
+  - **Uploads**: each of the nineteen repositories needs one re-upload carrying every change. Where a preset
     description moved into a note, the manifest changes too (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`,
-    `karume-irodori-v4.1-small-mf`, `karume-sbv2-jvnv`, `karume-wan2.2`), so those mirrors are rebuilt first. The
-    package pins move at the next release.
-  - **The three Gemma 4 repositories** (the `gemma4` and `gemma4_qat` recipes), in a stage of their own:
-    - `karume-gemma4-qat-mobile` has no `## What is this` and no `## Usage`, heads its model sections `## <name>`, and
-      its tags do not begin with its pipeline tag.
-    - License naming: "licensed **Apache 2.0**" in place of the HF identifier; `LICENSE.md` is unfenced.
-    - Pins: `karume-gemma4` and `karume-gemma4-qat` pin no upstream.
-    - The changes pointer reads "(also listed in `NOTICE.md`…)" on `karume-gemma4` and `karume-gemma4-qat`.
-    - `karume-gemma4`'s attribution opens "its weights shipped unchanged (bf16)", while both drafters it ships are
-      int8.
-    - The upstream-card bullet of `karume-gemma4` and `karume-gemma4-qat` links the default model's card only.
-    - Repository IDs in code font instead of links; no runtime sentence.
-    - Measured words in preset descriptions ("Faster than i4 on the tested … device"), to become measurement notes.
-    - The mobile QAT card's dated tokenizer claim, an upstream statement in the recipe's words.
-    - Per-recipe literals for shared wording: the Apache text link, the Gemma license page (`GEMMA4_LICENSE_LINK`,
-      the value of `_shared.upstream.GEMMA_LICENSE_PAGE`) and the notices' closing paragraph; `base_model_relation`
-      derived from every dtype.
+    `karume-irodori-v4.1-small-mf`, `karume-sbv2-jvnv`, `karume-wan2.2` and the three Gemma 4 repositories), so those
+    mirrors are rebuilt first; `karume-gemma4-qat`'s rebuild also brings 26B's drafter (item 1 of `next`), staged
+    with the new texts at `outputs/misc/local-dist/karume-gemma4-qat`. The package pins move at the next release.
   - **Needs a ruling** (left as it was; each has legal weight or rests on a fact not read):
     - Upstream statements left in the recipe's words, because their source at the pinned commit is not the Hub card:
       `karume-depth-anything-v2`'s line that upstream licenses Base and Large **cc-by-nc-4.0** (their cards were not
       read); `karume-birefnet-hr`'s line that several datasets the BiRefNet repository draws on are distributed for
       research purposes (from the GitHub README, which has no pinned commit here); `karume-lucida`'s explanation that
       the m35 variant has `Normalize` folded into its first convolution (from a table cell of the upstream card);
-      `karume-anima-2.9b`'s summary of the upstream's recommended steps and guidance (numbers, not a sentence).
+      `karume-anima-2.9b`'s summary of the upstream's recommended steps and guidance (numbers, not a sentence);
+      `karume-gemma4-qat-mobile`'s note that each tokenizer is that of "Google's glitch-token fixes of 2026-11-03, which
+      the mobile repository has not received" (the fixes and their date are the upstream's commit history — the
+      commits titled "Remediate 233 / 219 glitch tokens" — which no card of it states; that the mobile repository's
+      `tokenizer.json` is the older file is the recipe's own check of the digests).
     - The NVIDIA notice of the Anima texts writes bare URLs; it is ruled wording (rulings 39 a / 40 a, 2026-10-29).
     - The changes bullet cites no clause on the MIT, Gemma and CircleStone cards; whether to cite one is a legal call.
-    - `base_model_relation` is decided per family (derived in birefnet, `quantized` elsewhere); unifying it needs
-      SBV2's source dtypes, which were not read.
+    - `base_model_relation` is decided per family (derived in birefnet, from every stored dtype on the regular
+      Gemma 4 card, `quantized` elsewhere); unifying it needs SBV2's source dtypes, which were not read.
     - `karume-wan2.2`'s `base_model` leaves out the Wan2.1 checkpoint its two text assets come from: it is not a model
       Wan2.2 derives from, and the attribution section states it.
     - The measurement notes give the GPU of the August measurements as the development machine's at the time (NVIDIA
       GeForce RTX 3080 Ti); their records name no device, except ADR 0026's. The SBV2 notes measured on a voice of
-      another distribution name it "another Style-Bert-VITS2 JP-Extra voice".
+      another distribution name it "another Style-Bert-VITS2 JP-Extra voice". The q4_0 QAT E2B / E4B notes of
+      2026-11-04 name the RTX 3080 Ti under Node with Dawn as the recipe's comment recorded the run; the records
+      themselves (`outputs/diag/gemma4-lines-2026-11-04/legA/`) name no device.
     - Preset labels that rank quality ("Highest fidelity (f16 synthesis)", "Balanced") are labels, not descriptions,
       and were left.
   - **Left as they were, outside the published texts**: the local umT5 intake card changed only through the shared
     helpers; the notice of the Anima evaluation distribution (`anima/eval_dist.py`) lists `OFFICIAL_MODELS`.
-  - **Proposal**: v4-Large's preset timing and the listening behind its default (ADR 0151, 2026-11-14) as measurement
-    notes on its card.
+  - **Left as they were in the Gemma 4 texts**: `karume-gemma4-qat`'s `## Long context` states its measurements
+    (research 2026-11-05 and 2026-11-06) with the device and without the dates — a family section, not a preset
+    description.
+  - **Proposals**: v4-Large's preset timing and the listening behind its default (ADR 0151, 2026-11-14) as measurement
+    notes on its card; the dates of `karume-gemma4-qat`'s long-context measurements in its section; the mobile E2B
+    `i4-fast` measurement of the same B570 run as E4B's (research 2026-09-26-gemma-flag-bench) as a note — its
+    description never carried one, so none was added.
 
 - **Keep bf16 where the upstream is bf16 (filed 2026-11-17; the maintainer's direction; for Anima decided 2026-11-18 —
   ADR [0154](decisions/0154-anima-bf16-preset-names.md))**. A component whose upstream checkpoint is BF16 and that a
