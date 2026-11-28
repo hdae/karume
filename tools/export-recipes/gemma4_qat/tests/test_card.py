@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from _shared.upstream import GEMMA_LICENSE_PAGE
 from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
@@ -283,3 +284,11 @@ class TestQatNotice:
 
     def test_it_is_the_notice_the_pipeline_ships(self) -> None:
         assert distribution.PIPELINE.root_files["NOTICE.md"] == NOTICE
+
+
+class TestQatLicense:
+    def test_it_ships_the_apache_text_fenced_byte_for_byte(self) -> None:
+        """docs/spec/distribution-cards.md#licensemd — the primary text inside a fence."""
+        assert distribution.PIPELINE.root_files["LICENSE.md"].encode("utf-8") == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )

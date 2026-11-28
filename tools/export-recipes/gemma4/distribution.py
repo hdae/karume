@@ -106,7 +106,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from _shared.container_read import read_asset, read_asset_declarations
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import assert_upstream_provenance
 from karume.container import ContainerFormatError
 from karume.dist import (
@@ -2171,12 +2171,13 @@ def gemma4_root_files(models: Sequence[str]) -> dict[str, str]:
     ruling of 2026-09-01); §4(a) requires "giving recipients of derivative works a copy of the
     license", and §4(b) "causing modified files to carry prominent notices stating that you changed
     them". The license text is the original shared across families
-    ({@link _shared.licenses.apache_license_2_0}), read **verbatim** — reformatting or replacing it
-    would make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
+    ({@link _shared.licenses.apache_license_2_0}), read **verbatim** and fenced as every
+    `LICENSE.md` is ({@link _shared.licenses.license_markdown}) — reformatting or replacing it would
+    make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
     `NOTICE.md` holds the §4(b) modification notice only ({@link gemma4_notice_markdown}).
     """
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": gemma4_notice_markdown(models),
     }
 
@@ -2544,7 +2545,7 @@ def gemma4_qat_q4_0_root_files() -> dict[str, str]:
     """The line's legal texts at the repository root ({@link gemma4_root_files}'s rule: the
     licence verbatim and the line's modification notice)."""
     return {
-        "LICENSE.md": apache_license_2_0(),
+        "LICENSE.md": license_markdown(apache_license_2_0()),
         "NOTICE.md": GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN,
     }
 

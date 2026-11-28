@@ -1148,7 +1148,9 @@ class TestGemma4LegalText:
         other gates let it through.
         """
         out_dir, _ = gemma4_assembled
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
 
     def test_it_ships_the_modification_notice(self, gemma4_assembled) -> None:
         """The modification notice of Apache 2.0 §4(b)."""

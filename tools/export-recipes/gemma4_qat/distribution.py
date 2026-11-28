@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
 from gemma4.card import gemma4_usage
 from gemma4.distribution import (
@@ -538,5 +538,5 @@ PIPELINE = Pipeline(
     repo_name=repo_name,
     plan=qat_plan,
     card_profiles={"gemma4-qat-mobile": render_card},
-    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": NOTICE},
+    root_files={"LICENSE.md": license_markdown(apache_license_2_0()), "NOTICE.md": NOTICE},
 )

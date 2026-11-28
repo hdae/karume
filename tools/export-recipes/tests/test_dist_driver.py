@@ -1127,10 +1127,6 @@ class TestTheNoticeOfEveryPublishedRepository:
         assert closing[0].endswith(" not distributed here.")
 
 
-#: The repositories whose `LICENSE.md` begins with the primary text unfenced: the Gemma 4 ones,
-#: whose recipes change in a stage of their own (docs/spec/distribution-cards.md#licensemd).
-UNFENCED_LICENSES = GEMMA4_REPOSITORIES
-
 #: The heading of a further license text: `## <license> — <scope>`.
 _FURTHER_HEADING = re.compile(r"## \S.* — \S.*")
 
@@ -1146,13 +1142,12 @@ class TestTheLicenseTextOfEveryPublishedRepository:
     ) -> None:
         license_text = _root_files(pipeline, models)[LICENSE_FILENAME]
         primary, _ = PRIMARY_LICENSES[directory]
-        fence = "" if directory in UNFENCED_LICENSES else FENCE_OPEN
 
-        assert license_text.startswith(fence)
-        body = license_text[len(fence) :]
+        assert license_text.startswith(FENCE_OPEN)
+        body = license_text[len(FENCE_OPEN) :]
         if primary != "mit":
             text = _VERBATIM_TEXTS[primary].read_text(encoding="utf-8")
-            closing = "" if not fence else ("" if text.endswith("\n") else "\n") + FENCE_CLOSE
+            closing = ("" if text.endswith("\n") else "\n") + FENCE_CLOSE
             assert body.startswith(text + closing)
             return
         head, tail = MIT_LICENSE_PATH.read_text(encoding="utf-8").split(MIT_COPYRIGHT_PLACEHOLDER)
@@ -1162,14 +1157,12 @@ class TestTheLicenseTextOfEveryPublishedRepository:
         copyright_end = rest.find(tail)
         assert copyright_end > 0
         assert all(line.startswith("Copyright (c) ") for line in rest[:copyright_end].split("\n"))
-        assert rest[copyright_end + len(tail) :].startswith(FENCE_CLOSE if fence else "")
+        assert rest[copyright_end + len(tail) :].startswith(FENCE_CLOSE)
 
     @pytest.mark.parametrize(("pipeline", "models", "directory"), PUBLISHED)
     def test_every_further_text_follows_a_rule_a_scoped_heading_and_a_paragraph_in_a_fence(
         self, pipeline: str, models: list[str], directory: str
     ) -> None:
-        if directory in UNFENCED_LICENSES:
-            pytest.skip("the Gemma 4 LICENSE.md is the Apache text alone, unfenced")
         license_text = _root_files(pipeline, models)[LICENSE_FILENAME]
         # A further text follows the closing fence of the one before it.
         _, *further = re.split(r"(?<=```\n)\n---\n\n", license_text)

@@ -258,8 +258,7 @@ The level-2 sections come in this order:
 - `LICENSE.md` is built by `_shared.licenses.license_markdown`. It begins at its first byte with the primary license
   text inside a ```` ```text ```` fence (`fenced`), the text inside byte for byte the file it is read from
   (`_shared/licenses` or the family's own license files); a text is never reformatted, and one without a final line
-  break gets the line break that ends its last line before the closing fence (the CircleStone text). The three Gemma 4
-  repositories are the exception: their `LICENSE.md` is the Apache text alone, unfenced.
+  break gets the line break that ends its last line before the closing fence (the CircleStone text).
 
   | Primary text | Repositories |
   | --- | --- |

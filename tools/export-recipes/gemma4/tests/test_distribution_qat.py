@@ -1087,7 +1087,9 @@ class TestQatLegalText:
     def test_it_ships_the_license_verbatim_and_the_line_s_notice(self, tmp_path: Path) -> None:
         out_dir, _ = _assemble(tmp_path)
 
-        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        assert (out_dir / "LICENSE.md").read_bytes() == (
+            b"```text\n" + APACHE_LICENSE_2_0_PATH.read_bytes() + b"```\n"
+        )
         assert (out_dir / "NOTICE.md").read_text(encoding="utf-8") == (
             GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
         )

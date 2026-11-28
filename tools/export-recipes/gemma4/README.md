@@ -873,7 +873,8 @@ dtype and manifest all correct, and shows up only as wrong values):
   `pipelineConfig` parser accepts
 
 Apache 2.0 §4 applies to the redistribution, so the repository root also carries `LICENSE.md` (a
-verbatim copy of `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (the list of modifications). Both are
+verbatim copy of `../_shared/licenses/apache_license_2_0.txt`, inside a ```` ```text ```` fence) and `NOTICE.md` (the
+list of modifications). Both are
 `karume.dist`'s legal-text seat, not manifest-declared assets.
 
 Loading it back is `gemma.Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). The
