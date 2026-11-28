@@ -123,6 +123,7 @@ from karume.dist import (
     ir_graph,
     sha256_file,
 )
+from karume.modelcard import notice_closing
 from karume.ple import (
     PLE_FLOAT_BYTES,
     PLE_FLOAT_INDEX_SCHEMA,
@@ -2075,16 +2076,51 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return gemma4_plan(gemma4_sources(series_dir, model), model)
 
 
-#: The modification notice's opening and its list of the changes to the main models (Apache 2.0
-#: §4(b)); {@link gemma4_notice_markdown} adds the drafter paragraph of the models built.
-#: SPEC: docs/spec/distribution-cards.md#noticemd
-_GEMMA4_NOTICE_HEAD = """# NOTICE
+#: The license every Gemma 4 notice names, by its full title: the one spelling of the notices'
+#: openings ({@link gemma4_notice_opening} — this module's two lines and
+#: `gemma4_qat.distribution`'s mobile line).
+GEMMA4_NOTICE_LICENSE = "the Apache License, Version 2.0"
 
-This repository redistributes modified forms of `google/gemma-4-E2B-it` and
-`google/gemma-4-E4B-it`, which are licensed under the Apache License, Version 2.0 (see
-`LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`.
-The following changes were made:
+#: A space `textwrap` does not break at (it splits at ASCII whitespace only), put in place of the
+#: spaces a wrapped line must keep, then put back.
+_UNBROKEN = "\N{NO-BREAK SPACE}"
 
+#: The line between a notice's opening and its list of changes.
+GEMMA4_NOTICE_CHANGES_LEAD = "\nThe following changes were made:\n\n"
+
+#: What a Gemma 4 notice's closing says is not distributed (`karume.modelcard.notice_closing`).
+GEMMA4_NOT_DISTRIBUTED = "The original checkpoints are"
+
+
+def _spell_notice_list(items: Sequence[str]) -> str:
+    """`A` / `A and B` / `A, B and C`."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+# SPEC: docs/spec/distribution-cards.md#noticemd
+def gemma4_notice_opening(redistributed: str, *, several: bool = True) -> str:
+    """The opening of every Gemma 4 `NOTICE.md`: the title, then one paragraph naming what the
+    repository redistributes (`redistributed`, after "modified forms of", or "a modified form of"
+    when not `several`) and its license by its full title ({@link GEMMA4_NOTICE_LICENSE}) with
+    where its text is, wrapped like the rest of the notice (lines of at most 100 characters). The
+    license's title is kept on one line, so that it reads as one name in the text."""
+    form, verb = ("modified forms of", "are") if several else ("a modified form of", "is")
+    title = GEMMA4_NOTICE_LICENSE.replace(" ", _UNBROKEN)
+    paragraph = textwrap.fill(
+        f"This repository redistributes {form} {redistributed}, which {verb} licensed under"
+        f" {title} (see `LICENSE.md`). The models actually included are identified in"
+        " `README.md` and `karume.json`.",
+        width=100,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return f"# NOTICE\n\n{paragraph.replace(_UNBROKEN, ' ')}\n"
+
+
+#: The regular line's list of the changes to the main models (Apache 2.0 §4(b));
+#: {@link gemma4_notice_markdown} puts it after the opening that names the models built and before
+#: the drafter paragraph of the models built.
+_GEMMA4_NOTICE_CHANGES = """\
 - The **text decoder only** was extracted; the vision and audio towers were never read.
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors) in a states form suited to chunked prefill
@@ -2097,10 +2133,6 @@ The following changes were made:
   gathers.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
-"""
-
-_GEMMA4_NOTICE_TAIL = """
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
 
 
@@ -2123,8 +2155,9 @@ vocabulary, and the drafter reads the key/value states and the embedding table o
 instead of carrying its own. **The drafter's weights were quantized to int8 throughout**, linear
 layers included; its values are therefore not bit-identical to the source checkpoint.
 """
-    pairs = [f"`{GEMMA4_DRAFTER_UPSTREAM[model]}` for `{model}`" for model in drafters]
-    listed = ", ".join(pairs[:-1]) + " and " + pairs[-1]
+    listed = _spell_notice_list(
+        [f"`{GEMMA4_DRAFTER_UPSTREAM[model]}` for `{model}`" for model in drafters]
+    )
     # Wrapped like the rest of the notice (lines of at most 100 characters).
     opening = textwrap.fill(
         "For each model, this repository also redistributes a modified form of its"
@@ -2150,17 +2183,25 @@ def gemma4_notice_markdown(models: Sequence[str]) -> str:
 
     MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
     `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
-    The drafter paragraph is therefore derived from the models built: a build of one model names
-    that model's assistant alone, never a drafter the build does not ship.
+    The opening and the drafter paragraph are therefore derived from the models built: a build of
+    one model names that model's checkpoint and assistant alone, never an upstream the build does
+    not ship.
 
-    MUST: **on the day a model is added to `GEMMA4_UPSTREAM`, a line naming it is added to the
-    opening too** — the §4(b) notice must state "the modifications of every redistributed
-    upstream", so a text left unchanged while the models grow lacks the notice for one model. That
-    prose cannot be derived by machine, so a check covers it instead
-    (`tests/test_distribution.py::TestGemma4LegalText` checks it against both the attribution table
-    and the manifest, and turns red the moment a second entry comes in).
+    MUST: **on the day a model of another kind joins the line, its changes are added to the list**
+    — the §4(b) notice must state "the modifications of every redistributed upstream", and the list
+    states those of E2B / E4B's text decoders (per-layer embeddings included). That prose cannot be
+    derived by machine, so a check covers the names instead
+    (`tests/test_distribution.py::TestGemma4LegalText` checks them against both the attribution
+    table and the manifest).
     """
-    return _GEMMA4_NOTICE_HEAD + _gemma4_notice_drafters(models) + _GEMMA4_NOTICE_TAIL
+    upstreams = [f"`{GEMMA4_UPSTREAM[model]}`" for model in models]
+    return (
+        gemma4_notice_opening(_spell_notice_list(upstreams), several=len(upstreams) > 1)
+        + GEMMA4_NOTICE_CHANGES_LEAD
+        + _GEMMA4_NOTICE_CHANGES
+        + _gemma4_notice_drafters(models)
+        + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
+    )
 
 
 def gemma4_root_files(models: Sequence[str]) -> dict[str, str]:
@@ -2494,19 +2535,15 @@ def _qat_q4_0_notice_sources() -> str:
 #: it names every upstream of the line's attribution tables (built from them — tests).
 #: SPEC: docs/spec/distribution-cards.md#noticemd
 GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN = (
-    """# NOTICE
-
-This repository redistributes modified forms of Google's Gemma 4 q4_0 quantization-aware-trained
-(QAT) checkpoints, of their QAT multi-token-prediction drafters and of the tokenizers of their base
-models, listed below, which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`).
-The models actually included are identified in `README.md` and `karume.json`.
-
-"""
+    gemma4_notice_opening(
+        "Google's Gemma 4 q4_0 quantization-aware-trained (QAT) checkpoints, of their QAT"
+        " multi-token-prediction drafters and of the tokenizers of their base models, listed below"
+    )
+    + "\n"
     + _qat_q4_0_notice_sources()
-    + """
-
-The following changes were made:
-
+    + "\n"
+    + GEMMA4_NOTICE_CHANGES_LEAD
+    + """\
 - For the E2B and E4B checkpoints, the **text decoder only** was extracted; their vision and audio
   towers were never read.
 - For the 12B checkpoint, the **text decoder and the encoder-free vision embedder** were extracted,
@@ -2535,9 +2572,8 @@ The following changes were made:
 - Each drafter's output head is the dense projection over the full vocabulary (a clustered sparse
   head an assistant checkpoint carries is not used), and each drafter reads the key/value states
   and the embedding table of its main model instead of carrying its own.
-
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
+    + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
 )
 
 

@@ -11,16 +11,19 @@ from typing import Any
 
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0, license_markdown
-from _shared.upstream import GEMMA_LICENSE_PAGE, hf_upstreams
+from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
 from gemma4.card import gemma4_usage
 from gemma4.distribution import (
     GEMMA4_ASSETS,
+    GEMMA4_NOT_DISTRIBUTED,
+    GEMMA4_NOTICE_CHANGES_LEAD,
     GEMMA4_ROLE,
     assert_gemma4_graph,
     assert_gemma4_ple_assets,
     assert_gemma4_tokenizer,
     gemma4_hidden_size,
     gemma4_max_position,
+    gemma4_notice_opening,
     gemma4_pipeline_config,
     gemma4_ple_index,
     gemma4_rope,
@@ -48,6 +51,7 @@ from karume.modelcard import (
     introduction,
     model_sections,
     models,
+    notice_closing,
     pinned,
     quants,
     render,
@@ -415,8 +419,8 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
             f" {APACHE_LICENSE_REFERENCE}."
         )
     lines += [
-        "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by Google DeepMind"
-        f" ([technical report]({QAT_TECHNICAL_REPORT})).",
+        "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by"
+        f" {UPSTREAM_AUTHORS['google']} ([technical report]({QAT_TECHNICAL_REPORT})).",
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; the fixed",
         "  quantized integers, their scales and the static activation ranges were kept without",
@@ -493,23 +497,19 @@ def render_card(
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
 #: SPEC: docs/spec/distribution-cards.md#noticemd
 NOTICE = (
-    """# NOTICE
-
-This repository redistributes modified forms of the Google Gemma 4 mobile QAT checkpoints and of
-the tokenizers of their base models listed below (Google DeepMind), which are licensed under the
-Apache License, Version 2.0 (see `LICENSE.md`). The models actually included are identified in
-`README.md` and `karume.json`; `README.md` names the upstream commits each one was converted from.
-
-"""
+    gemma4_notice_opening(
+        f"{UPSTREAM_AUTHORS['google']}'s Gemma 4 mobile QAT checkpoints and of the tokenizers of"
+        " their base models, listed below"
+    )
+    + "\n"
     + "\n".join(
         f"- `{checkpoint_repo(model)}` and the tokenizer of its base model"
         f" `{SOURCES[model].pins.tokenizer.repo}`"
         for model in CHECKPOINTS
     )
-    + """
-
-The following changes were made:
-
+    + "\n"
+    + GEMMA4_NOTICE_CHANGES_LEAD
+    + """\
 - The **text decoder only** was converted; the vision and audio towers are not included, the
   checkpoint's key/value-cache scales are not used, and no multi-token-prediction (MTP) drafter is
   included.
@@ -528,9 +528,8 @@ The following changes were made:
   host gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
-
-No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
+    + f"\n{notice_closing(GEMMA4_NOT_DISTRIBUTED)}\n"
 )
 
 PIPELINE = Pipeline(

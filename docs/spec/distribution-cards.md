@@ -22,7 +22,7 @@ item "The model cards and notices across repositories".
 - The card is drawn by the pipeline's card renderer (`Pipeline.card_profiles`; every pipeline has one) from the
   manifest being written. The legal texts are fixed per pipeline, except where the notice names what only some
   models carry: then they follow the models built (`ROOT_FILES` of the driver) — Gemma 4's (`karume-gemma4`, whose
-  drafters differ per model), SigLIP2's (a checkpoint per model) and the Irodori MIT line's, whose three repositories
+  notice names the checkpoint and the drafter of each model built), SigLIP2's (a checkpoint per model) and the Irodori MIT line's, whose three repositories
   (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf`) are one pipeline: each
   carries the same `LICENSE.md` and a `NOTICE.md` naming its own checkpoint and the repositories it references.
 - The texts are written in American English with the ordinary terms: a quant preset is a "preset", never a "seat";
@@ -235,6 +235,11 @@ The level-2 sections come in this order:
   "The following changes were made:" and a
   bullet list; then a closing paragraph beginning "No retraining and no fine-tuning were performed." that says the
   original checkpoint is not distributed here, on one line (`karume.modelcard.notice_closing`).
+- The three Gemma 4 notices write their opening paragraph through one helper,
+  `gemma4.distribution.gemma4_notice_opening` ("This repository redistributes modified forms of …, which are licensed
+  under the Apache License, Version 2.0 (see `LICENSE.md`). The models actually included are identified in
+  `README.md` and `karume.json`."), and their closing through `notice_closing`. `karume-gemma4`'s names the
+  checkpoints of the models a build holds; the two QAT notices list every model of their line below the paragraph.
 - Every license a notice names is named by its full title, never by a short name ("Apache 2.0", "CC BY-SA 4.0",
   "(MIT)").
 - Statements a license or an upstream requires in its own words stand before the change list or after the closing

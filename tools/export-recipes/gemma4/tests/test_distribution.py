@@ -1261,17 +1261,35 @@ class TestGemma4LegalText:
     def test_a_model_the_notice_does_not_mention_is_caught(self, gemma4_assembled) -> None:
         """Evidence that it is not a tautology — the 2 above fail on a combination with a second
         entry added."""
-        out_dir, _ = gemma4_assembled
+        out_dir, manifest = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
         with pytest.raises(AssertionError, match=UNLISTED_CHECKPOINT):
             _assert_notice_names(
                 notice,
                 [
-                    *(GEMMA4_UPSTREAM[model] for model in GEMMA4_REGULAR_MODELS),
+                    *(GEMMA4_UPSTREAM[model] for model in manifest["models"]),
                     f"google/{UNLISTED_CHECKPOINT}",
                 ],
             )
+
+    def test_the_opening_names_the_checkpoints_of_the_models_built_alone(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#noticemd — a build of E2B alone names E2B's checkpoint,
+        not E4B's, which it does not redistribute; the opening of both names both."""
+        out_dir, _ = gemma4_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        both = " ".join(gemma4_notice_markdown(["e2b", "e4b"]).split())
+
+        assert "redistributes a modified form of `google/gemma-4-E2B-it`, which is licensed" in (
+            " ".join(notice.split())
+        )
+        assert "`google/gemma-4-E4B-it`" not in notice
+        assert (
+            "redistributes modified forms of `google/gemma-4-E2B-it` and `google/gemma-4-E4B-it`,"
+            " which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`)." in both
+        )
 
 
 #: Stand-in for E4B's upstream `tokenizer.json` (the gate does not read the contents and compares

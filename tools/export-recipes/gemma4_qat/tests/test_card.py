@@ -285,6 +285,17 @@ class TestQatNotice:
     def test_it_is_the_notice_the_pipeline_ships(self) -> None:
         assert distribution.PIPELINE.root_files["NOTICE.md"] == NOTICE
 
+    def test_the_card_and_the_notice_spell_the_publisher_as_upstream_authors(self) -> None:
+        """docs/spec/distribution-cards.md#title-and-the-non-endorsement-sentence — the publisher
+        of the `google` account is spelled one way on the card and in the notice."""
+        card = render_card(_qat_manifest(), REPO)
+
+        assert "DeepMind" not in NOTICE and "DeepMind" not in card
+        assert NOTICE.startswith(
+            "# NOTICE\n\nThis repository redistributes modified forms of Google's"
+        )
+        assert "checkpoints are released by Google ([technical report](" in card
+
 
 class TestQatLicense:
     def test_it_ships_the_apache_text_fenced_byte_for_byte(self) -> None:
