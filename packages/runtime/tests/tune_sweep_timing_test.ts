@@ -72,7 +72,12 @@ import {
 import { GEMV_CASES, type GemvCase } from "../src/tune/gemv-cases.ts";
 import { gemvKernelId } from "../src/tune/gemv-fingerprint.ts";
 import type { GemvSweepRow } from "../src/tune/gemv-report.ts";
-import { gemvLaunch, type GemvSweepStep, sweepGemvCase } from "../src/tune/gemv-sweep.ts";
+import {
+  gemvLaunch,
+  gemvSweepSession,
+  type GemvSweepStep,
+  sweepGemvCase,
+} from "../src/tune/gemv-sweep.ts";
 import {
   calibrate,
   candidatesFor,
@@ -1209,6 +1214,34 @@ describe("the GEMV sweep's references: the device table's choices and their re-t
       // The other references' passes read times
       assertEquals(rowAt(result.rows, 1, "parallel-l4").retimingUnread, undefined);
     }
+  });
+});
+
+describe("the GEMV sweep's session (gemvSweepSession)", () => {
+  it("builds its id from getRandomValues alone, which a context that is not secure has too (fault: crypto.randomUUID, absent there)", () => {
+    // A crypto of a page served over plain HTTP from a LAN address: no randomUUID
+    const filled: number[] = [];
+    const insecure: Pick<Crypto, "getRandomValues"> = {
+      getRandomValues: <T extends ArrayBufferView | null>(array: T): T => {
+        if (array instanceof Uint8Array) {
+          array.forEach((_, index) => {
+            array[index] = 0xff - index;
+            filled.push(index);
+          });
+        }
+        return array;
+      },
+    };
+    const session = gemvSweepSession(insecure, () => 42);
+    assertEquals(filled.length, 16);
+    // The bytes 0xff, 0xfe, … with the version 4 and the variant 10xx in place
+    assertEquals(session, { id: "fffefdfc-fbfa-49f8-b7f6-f5f4f3f2f1f0", startedAt: 42 });
+    assert(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        gemvSweepSession().id,
+      ),
+    );
+    assert(gemvSweepSession().id !== gemvSweepSession().id);
   });
 });
 

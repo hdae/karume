@@ -236,14 +236,27 @@ export type GemvSweepProgress =
 export type GemvSweepSession = { readonly id: string; readonly startedAt: number };
 
 /**
- * A new session: a random id (`crypto.randomUUID`) and the time it began (`performance.now()`). Made
- * once by the app's entry point — when the page loads, when the process starts — and handed to every
- * sweep it runs ({@link GemvSweepOptions.session}).
+ * A new session: a random id — a version 4 UUID built from `getRandomValues`, which every context
+ * has, where `crypto.randomUUID` exists only in a secure one (a page served over plain HTTP from a
+ * LAN address has none) — and the time it began (`performance.now()`). Made once by the app's entry
+ * point — when the page loads, when the process starts — and handed to every sweep it runs
+ * ({@link GemvSweepOptions.session}). `random` and `now` are the global `crypto` and
+ * `performance.now` unless given (tests).
  */
-export const gemvSweepSession = (): GemvSweepSession => ({
-  id: crypto.randomUUID(),
-  startedAt: performance.now(),
-});
+export const gemvSweepSession = (
+  random: Pick<Crypto, "getRandomValues"> = crypto,
+  now: () => number = () => performance.now(),
+): GemvSweepSession => {
+  const bytes = random.getRandomValues(new Uint8Array(16));
+  // The version (4) and the variant (10xx) of RFC 9562
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return {
+    id: `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`,
+    startedAt: now(),
+  };
+};
 
 /** Options of {@link runGemvSweep} (all optional). */
 export type GemvSweepOptions = {
