@@ -476,7 +476,10 @@ measures nothing and changes no default value.
     evidence it is not slower than the default's choice in the same group: a gain of at least 1, no margin either way.
     That bar passes 3 of 1,299 rows that other records read slower than ×1/1.02 and refuses 3 of 10,684 they read at
     least ×1.02 faster; 1 ÷ (margin × gaps) would pass 37 to 51 % of the slower rows, margin × gaps refuse 5.5 to 7.6 %
-    of the faster ones.
+    of the faster ones. The one place the margin touches M = 4 and 8 is the re-timing of the reference (above): a
+    reading there whose reference's re-timing departs beyond margin × the two gaps is no evidence, so in that record
+    the row has no time at that row count — which refuses it, never lets it pass. How often that happens has no
+    measured rate yet: no record before 2026-11-28 re-times a reference.
   - *The row block* of a candidate's row (or of a kept row: below) replaces its reference row's — the candidate without
     one, or the kept row with its own — when, at the other row counts where the two run different kernels, each has a
     reading that is evidence, every such ratio of the two kernels in the same group is at least 1, and at one row count
