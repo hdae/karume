@@ -169,8 +169,15 @@ maintainer's ruling of 2026-11-06).
        maintainer's ruling of 2026-11-16): commits that touch the runtime touch kernels, tuning tables, strategy
        selection and fusion, rarely the executor alone, so it barely moves their re-run time (measured in commit
        `feaed7b6`), and a wrong classification would reuse a stale result.
-     - Kernel changes re-running only the files that compile them: the one lever for commits that touch the runtime.
-       It needs the WGSL a file compiles derived without running it (an open point of ADR 0152).
+     - Comment and whitespace changes no longer re-run a file: the code layer identifies a module by its syntax tree
+       ([spec](spec/verification.md#a-modules-identity); built 2026-11-28, 3,037 → 2,293 s per commit over the last
+       100 commits that touched the runtime — [research 2026-11-28](research/2026-11-28-verification-cache-ast-identity.md)).
+     - Kernel changes re-running only the files that compile them is not built as written (the maintainer's ruling of
+       2026-11-28): narrowing by the recorded kernels and the modules that write them saves 56 s per commit on the same
+       commits, and it is unsound while kernel modules also hold selection predicates (`linear-gemv.ts`,
+       `expert-linear.ts`). The lever left for commits that change selection, deriving each Session's dispatch
+       programs without a device (an open point of ADR 0152; ceiling 1,458 s per commit), waits for the per-op
+       dispatch programs of item 3 and is measured again with the same replay then.
      - What the key does not see ([spec](spec/verification.md#what-the-key-does-not-see)); a file whose every case is
        skipped writes no record, so it runs each time.
   6. **The workbench** (ADR 0152 calls it the harness; [spec/workbench.md](spec/workbench.md)). It stays a local
