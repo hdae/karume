@@ -100,7 +100,8 @@ class R (only the order of the additions differs):
   computes in f32 (`linearCompute: "f32"`, or `"a8"` for a float-stored weight, which a8 leaves in f32), neither the
   i8a8 path, a packed pairing nor the GEMV family takes it, and the slice rule cuts its K: the largest of 16, 8, 4 and
   2 slices whose shortest slice holds at least 16 K tiles (256 terms; the reduction's last tile may be partial).
-- Its partial sums are a temporary of `slices × m × n` f32 values between its two passes.
+- Its partial sums are a temporary of `slices × m × n` f32 values between its two passes. The memory estimate takes the
+  same private key and counts them.
 
 ## Named approximations
 

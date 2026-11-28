@@ -140,12 +140,12 @@ maintainer's ruling of 2026-11-06).
      - The fused attention was not reshaped: `attentionRoute`, `fusedAttentionViolation` and `attentionHeadMajorCopies`
        are already the single decisions its consumers call. Its kernels are not selected by level; its levels are
        recorded when item 4 selects by them.
-     - The linear→static_quantize rule keeps its own conditions and its own builder; the memory estimate and the
-       verification cache do not read dispatch programs yet.
-     - The split-K linear (the split of the GEMM skeleton since 2026-11-28 —
-       [research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md), every storage under f32 compute): not counted by the memory
-       estimate; no level selects it (perf-ledger K-115:
-       a per-profile thread target, the per-device evidence, and the sha rows of the `reorder` presets it would move).
+     - The linear→static_quantize rule keeps its own conditions and its own builder; the verification cache does not
+       read dispatch programs yet (the memory estimate counts a linear's node temporaries from its program).
+     - The split-K linear (the split of the GEMM skeleton since 2026-11-28, every storage under f32 compute —
+       [research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md)): left are its selection by level with a
+       per-profile thread target, the per-device evidence for that target, and the sha rows of the `reorder` presets it
+       would move (perf-ledger K-115).
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
   4. **Requirement levels** ([spec/numerics.md](spec/numerics.md)):
      - The regression corpus ([spec/verification.md](spec/verification.md#the-regression-corpus)): entries for the f16

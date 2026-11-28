@@ -30,6 +30,7 @@ import {
   FUSED_WINDOW_CASES,
   type FusedWindowCase,
   geluMulGraph,
+  splitKLinearCase,
 } from "./helpers/fused-window-graphs.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 
@@ -163,6 +164,24 @@ describe("the estimate counts the i8a8 linear's two node temporaries", () => {
       model.estimate({ ...LIMITS, ...linear.options }).scenarios[0].workspaceBytes,
       8192 + 256 + 16 + 4,
     );
+  });
+});
+
+describe("the estimate counts the split-K linear's partial sums", () => {
+  // x [4, 512] → linear with w [16, 512] stored as f32 under the private key LINEAR_SPLIT_K: 512 is
+  // 32 K tiles, so 2 slices. The partial pass reads x (an input) and w (resident) and writes the
+  // partial sums [2, 4, 16] = 512 B; the combine reads them and b and writes y [4, 16] = 256 B. y is
+  // alive throughout and conflicts with the partial sums (the combine reads them, writes y), so they
+  // take two regions: 256 + 512.
+  const linear = splitKLinearCase();
+  it("counts the partial sums beside the output only under the key", () => {
+    const model = openGraph(linear.graph, linear.tensors);
+    assertEquals(
+      model.estimate({ ...LIMITS, ...linear.options }).scenarios[0].workspaceBytes,
+      256 + 2 * 4 * 16 * 4,
+    );
+    // Without the key the linear is the reference GEMM: y alone.
+    assertEquals(model.estimate({ ...LIMITS }).scenarios[0].workspaceBytes, 256);
   });
 });
 

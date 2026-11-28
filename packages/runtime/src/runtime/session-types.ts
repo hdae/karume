@@ -284,9 +284,8 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
  * from the reference kernel. The level `reorder` does not select it: its gain depends on how full the
  * reference GEMM's grid is on the adapter, and no adapter has a measurement that would let a level
  * choose it, so the strategy is admitted only here — by the kernel's own tests and by measurements
- * (SPEC: docs/spec/numerics.md#strategies-admitted-only-by-a-private-key). The memory estimate does
- * not read this option: it counts such a linear as a plain one and misses the temporary of the
- * partial sums.
+ * (SPEC: docs/spec/numerics.md#strategies-admitted-only-by-a-private-key). The memory estimate
+ * takes the same key (`EstimateOptions`) and counts the partial sums of a linear that takes it.
  */
 export const LINEAR_SPLIT_K: unique symbol = Symbol("karume.linearSplitK");
 

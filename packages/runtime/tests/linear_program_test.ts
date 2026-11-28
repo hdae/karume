@@ -442,6 +442,36 @@ describe("linearProgramFor: one representative linear per strategy", () => {
     }
   });
 
+  it("writes each temporary in the first dispatch that binds it and only reads it after, as the WGSL declares (the order the memory estimate reads)", () => {
+    let programsWithTemporaries = 0;
+    for (const testCase of CASES) {
+      const program = programOf(testCase);
+      if (program.temps.length > 0) programsWithTemporaries += 1;
+      const written = new Set<number>();
+      for (const dispatch of program.dispatches) {
+        const wgsl = dispatch.wgsl();
+        for (const { binding, operand } of dispatch.bindings) {
+          if (typeof operand !== "object") continue;
+          const access = new RegExp(
+            `@group\\(0\\)\\s*@binding\\(${binding}\\)\\s*var<storage,\\s*(read_write|read)>`,
+          ).exec(wgsl)?.[1];
+          const first = !written.has(operand.temp);
+          written.add(operand.temp);
+          assertEquals(
+            access,
+            first ? "read_write" : "read",
+            `${testCase.name}: ${dispatch.key} binding ${binding} (temporary ${operand.temp})`,
+          );
+        }
+      }
+    }
+    // Exactly the i8a8 path's cases and the split-K GEMM's hold temporaries.
+    assertEquals(
+      programsWithTemporaries,
+      CASES.filter(({ id }) => id === "i8a8" || id === "gemm-splitk").length,
+    );
+  });
+
   it("names each dispatch by the key its kernel module gives for the linear's facts, and generates the same WGSL each time", () => {
     for (const testCase of CASES) {
       const { dispatches } = programOf(testCase);

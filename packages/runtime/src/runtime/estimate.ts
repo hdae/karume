@@ -63,7 +63,7 @@ import {
 } from "../ops.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
 import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
-import { linearI8a8TempBytes } from "../kernels/linear-i8a8.ts";
+import { type LinearProgram, linearProgramFor } from "./linear-program.ts";
 import { linearKnobsOf, resolveLinearStrategy } from "./linear-strategies.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
@@ -123,6 +123,7 @@ import {
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   DISABLED_FUSION_RULES,
   type GenerationContextSpec,
+  LINEAR_SPLIT_K,
   REORDER_STRATEGIES,
   type ROW_BLOCK_SPLIT,
   type SessionOptions,
@@ -367,6 +368,12 @@ export type EstimateOptions = {
   /** Private: the same adapter-dependent strategies as the Session ({@link REORDER_STRATEGIES}). */
   readonly [REORDER_STRATEGIES]?: SessionOptions[typeof REORDER_STRATEGIES];
   /**
+   * Private: the split-K GEMM, which the Session takes under the same key ({@link LINEAR_SPLIT_K}).
+   * A linear that takes it counts its partial sums (`slices × m × n` f32) as a node temporary
+   * between its two dispatches.
+   */
+  readonly [LINEAR_SPLIT_K]?: SessionOptions[typeof LINEAR_SPLIT_K];
+  /**
    * Values of symbolic dimensions (the graph-input side — the same bindings passed to a run).
    * States-only symbols (capacity) and the symbols of the physical chunk rows `M` are both decided
    * on the {@link EstimateOptions.generation} side, so they are not accepted here (the former from
@@ -532,8 +539,8 @@ export type EstimateOptions = {
    * the same `planFusions`, on the weights' storage from the residency plan): an elementwise producer
    * folded into an i8a8 linear's step ① has no output, so its bytes are not counted; and an i8a8
    * linear counts its two node temporaries (the quantized activations and their per-token scales —
-   * `linearI8a8TempBytes`, the function execution allocates them with) over its quantize and GEMM
-   * dispatches. A borrowed weight's storage (`seat: "shared"`) is the lender's and unknown here, so
+   * the temporaries of the dispatch program execution builds, `linearProgramFor`) over its quantize
+   * and GEMM dispatches. A borrowed weight's storage (`seat: "shared"`) is the lender's and unknown here, so
    * its linear is counted as a plain one, without the fold and without the temporaries
    * ({@link AdmissionReport.unaccounted}).
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
@@ -1210,6 +1217,8 @@ type TransientKnobs = {
    * the values Session construction fills in, read from this one place).
    */
   readonly fusion: EstimateFusionFacts;
+  /** Whether a linear may take the split-K GEMM (`EstimateOptions[LINEAR_SPLIT_K]`). */
+  readonly linearSplitK: boolean;
 };
 
 /** The attention seats of the fusion facts' knobs (the defaults Session construction fills in). */
@@ -1519,36 +1528,97 @@ const fusedAttentionProgram = (
 type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
 
 /**
- * Whether a linear takes execution's i8a8 path: the answer of the one selection `buildLinear` builds
- * from (`resolveLinearStrategy` in linear-strategies.ts), asked with the Session's linear seat (the
- * fusion facts' knobs) and the storage of the weight slot from the residency plan
- * (`plannedResidentWeights`). The pairing and the folded producer are not passed: the strategies
- * they select need linearCompute `"f32"`, and a folded producer is declared only for a linear that is
- * on the i8a8 path already, so neither changes this answer. An `i4f16` weight is
- * `expert_linear`'s alone (the planner admits it nowhere else), so it is read as not integer here.
- * A linear the selection refuses (i2 residency under `"a8"` or `"f16"`, i8 and i4 residency under
- * `"f16"` — w8a16 / w4a16) is counted as a plain one, and so is, on the i8a8 path, a per-channel
- * weight's `k` above `LINEAR_I8A8_MAX_K`: the estimate returns a number, and the Session fails at its
- * first run.
+ * The dispatch program execution builds for a linear (`linearProgramFor` in linear-program.ts — the
+ * one `buildLinear` emits), from the one selection it builds from (`resolveLinearStrategy` in
+ * linear-strategies.ts), asked with the Session's linear seat (the fusion facts' knobs, and the
+ * private split-K key) and the storage and i4 group length of the weight slot from the residency
+ * plan (`plannedResidentWeights`). Its temporaries are the linear's node temporaries: the i8a8
+ * path's quantized activations and scales, the split-K GEMM's partial sums.
+ *
+ * The pairing and the folded producer are not passed: the strategies they select need linearCompute
+ * `"f32"` (and no temporaries), and a folded producer is declared only for a linear that is on the
+ * i8a8 path already, where it changes the quantize step's kernel and not its temporaries. The
+ * program's kernels are built for the default profile (an estimate has no adapter); no temporary's
+ * size depends on the geometry. An `i4f16` weight is `expert_linear`'s alone (the planner admits it
+ * nowhere else), so it is read as not integer here. A linear the selection refuses (i2 residency
+ * under `"a8"` or `"f16"`, i8 and i4 residency under `"f16"` — w8a16 / w4a16) has no program here
+ * and is counted as a plain one: the estimate returns a number, and the Session fails at its first
+ * run. A program execution refuses to build (an i8a8 per-channel weight whose `k` passes the i32
+ * reduction guard) fails here with execution's message.
  * NOTE: a borrowed weight (`seat: "shared"`) is absent from the plan — its storage is the lender's —
  * so its linear is counted as a plain one ({@link AdmissionReport.unaccounted}).
  */
-const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean => {
-  if (node.contract.kind !== "linear") return false;
+const linearNodeProgram = (node: NodePlan, knobs: TransientKnobs): LinearProgram | undefined => {
+  if (node.contract.kind !== "linear") return undefined;
   const slot = WEIGHT_SLOTS.get(node.node.op);
   const resident =
     slot === undefined ? undefined : knobs.fusion.residentWeights.get(node.node.ins[slot]);
-  const storage = resident === undefined || resident.storage === "i4f16" ? "f32" : resident.storage;
+  const weightStorage =
+    resident === undefined || resident.storage === "i4f16" ? "f32" : resident.storage;
+  const groupSize = resident?.storage === "i4" ? resident.groupSize : undefined;
   const resolution = resolveLinearStrategy({
     plan: node,
-    weightStorage: storage,
-    groupSize: undefined,
-    knobs: linearKnobsOf(knobs.fusion.knobs),
+    weightStorage,
+    groupSize,
+    knobs: { ...linearKnobsOf(knobs.fusion.knobs), linearSplitK: knobs.linearSplitK },
     linearGemv: knobs.fusion.linearGemv,
     packed: undefined,
     prologue: undefined,
   });
-  return "choice" in resolution && resolution.choice.id === "i8a8";
+  if ("refusal" in resolution) return undefined;
+  const [x, weight] = node.inputShapes;
+  return linearProgramFor(resolution.choice, {
+    x,
+    weight,
+    m: numel(x.slice(0, -1)),
+    n: weight[0],
+    k: weight[1],
+    weightStorage,
+    groupSize,
+    packedScale: undefined,
+    prologue: undefined,
+    geometryProfile: DEFAULT_GEOMETRY_PROFILE,
+    linearI8a8Dot: "emu",
+  });
+};
+
+/**
+ * The node temporaries and dispatches of a linear's program for the transient plan: each temporary
+ * alive from the program's first dispatch to its last; a dispatch reads the linear's operands it
+ * binds and the temporaries an earlier dispatch wrote, and writes the output and the temporaries it
+ * binds first (the order rule of `LinearProgram.temps`). The weight's scale is resident and has no
+ * slot.
+ */
+const linearProgramSteps = (
+  program: LinearProgram,
+  reads: readonly TransientRef[],
+  outputRefs: readonly TransientRef[],
+  temps: TransientTempSpec[],
+  dispatches: TransientDispatchSpec[],
+): void => {
+  const last = program.dispatches.length - 1;
+  const tempRefs = program.temps.map((byteLength): TransientRef => {
+    temps.push({ byteLength, allocBefore: 0, releaseAfter: last });
+    return { kind: "temp", id: temps.length - 1 };
+  });
+  const written = new Set<number>();
+  for (const dispatch of program.dispatches) {
+    const read: TransientRef[] = [];
+    const write: TransientRef[] = [];
+    for (const { operand } of dispatch.bindings) {
+      if (operand === "weightScale") continue;
+      if (operand === "out") write.push(...outputRefs);
+      else if (operand === "x") read.push(reads[0]);
+      else if (operand === "weight") read.push(reads[1]);
+      else if (operand === "bias") read.push(reads[2]);
+      else if (written.has(operand.temp)) read.push(tempRefs[operand.temp]);
+      else {
+        written.add(operand.temp);
+        write.push(tempRefs[operand.temp]);
+      }
+    }
+    dispatches.push({ reads: read, writes: write });
+  }
 };
 
 /**
@@ -1579,6 +1649,7 @@ const nodeStepProgram = (
     kind: "value",
     name: out.name,
   }));
+  const linearProgram = linearNodeProgram(node, knobs);
   const temps: TransientTempSpec[] = [];
   const dispatches: TransientDispatchSpec[] = [];
   if (isStateAttention(node)) {
@@ -1653,20 +1724,14 @@ const nodeStepProgram = (
       dispatches.push({ reads: [partials], writes: [stats] });
     }
     dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
-  } else if (linearTakesI8a8Route(node, knobs)) {
-    // The i8a8 linear's two node temporaries over its two dispatches, with the lifetimes
-    // `linearI8a8Program` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize reads
-    // the input (a folded producer's input with a prologue — the re-pointed plan) and writes `xq`
-    // and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the output; both are
-    // released after ②.
-    const [x, weight] = node.inputShapes;
-    const bytes = linearI8a8TempBytes(numel(x.slice(0, -1)), weight[1]);
-    const xq: TransientRef = { kind: "temp", id: temps.length };
-    const xs: TransientRef = { kind: "temp", id: temps.length + 1 };
-    temps.push({ byteLength: bytes.xq, allocBefore: 0, releaseAfter: 1 });
-    temps.push({ byteLength: bytes.xs, allocBefore: 0, releaseAfter: 1 });
-    dispatches.push({ reads: [reads[0]], writes: [xq, xs] });
-    dispatches.push({ reads: [xq, ...reads.slice(1), xs], writes: outputRefs });
+  } else if (linearProgram !== undefined && linearProgram.temps.length > 0) {
+    // A linear whose program holds node temporaries, as execution emits it. The i8a8 path:
+    // ① quantize reads the input (a folded producer's input with a prologue — the re-pointed plan)
+    // and writes `xq` and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the
+    // output. The split-K GEMM: the partial pass reads the input and the weight and writes the
+    // partial sums; the combine reads them and the bias and writes the output. The temporaries are
+    // released after the last dispatch.
+    linearProgramSteps(linearProgram, reads, outputRefs, temps, dispatches);
   } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
     // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
     // bits of the original input.
@@ -2085,6 +2150,7 @@ export const estimateGraphMemory = (
           attentionRowBlockMaxBytes,
           attentionDevice,
           fusion,
+          linearSplitK: options[LINEAR_SPLIT_K] === true,
         },
         roles,
       ),

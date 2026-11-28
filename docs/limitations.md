@@ -751,9 +751,11 @@ model: ④ and ⑤ are outside it, and the checks that compare it with a device 
 MOSS-Image and Anima stage checks, gemma's `fitCapacity`; unchanged on 2026-11-11, when the numbers of
 several stages went down — ADR 0093 addendum).
 The estimate does not repeat every refusal of execution: a linear that execution rejects for its
-weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`,
-`k` over the i8a8 reduction guard) is counted and gets a number, and an external rule's dispatch is
-not checked for its workgroup counts or params. Such a Session fails at its first run.
+weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`)
+is counted and gets a number, and an external rule's dispatch is not checked for its workgroup counts
+or params. Such a Session fails at its first run. A linear's node temporaries come from the dispatch
+program execution builds, so a per-channel i8a8 linear whose `k` passes the reduction guard fails the
+estimate with execution's message.
 **The in-node temporaries of attention are counted** — the score S and the row statistics of the
 states form (the row statistics only for plans whose resolved attention form requires them; 0 bytes
 for plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization

@@ -8,9 +8,10 @@
  * builder turns a program into dispatches with one generic routine (`emitLinearProgram` in
  * recipe-builders/linear.ts): it fetches each pipeline from the Session's cache, writes the uniforms,
  * binds the weight's scale buffer where its storage has one and checks the grids against the device
- * limit. Anything that needs to know a strategy's WGSL or temporaries before running — the memory
- * estimate, the verification cache — can read the same value (ADR 0152 decisions 6 and 8); neither
- * reads it yet.
+ * limit. Anything that needs to know a strategy's WGSL or temporaries before running can read the
+ * same value (ADR 0152 decisions 6 and 8): the memory estimate counts a linear's node temporaries and
+ * their dispatches from it (`linearNodeProgram` in estimate.ts); the verification cache does not read
+ * it yet.
  *
  * NOTE: device-free (kernel modules only). Not part of the public surface of mod.ts (ADR 0008).
  */
@@ -143,6 +144,9 @@ export type LinearProgram = {
   /**
    * The byte length of each temporary. A temporary lives from the first dispatch to the last:
    * allocated in this order before the first, released in the reverse order after the last.
+   * MUST: the first dispatch that binds a temporary writes it, and every later one that binds it only
+   * reads it — the memory estimate derives each dispatch's reads and writes from that order (the
+   * WGSL declares the first binding `read_write` and the later ones `read`).
    */
   readonly temps: readonly number[];
   readonly dispatches: readonly ProgramDispatch[];
