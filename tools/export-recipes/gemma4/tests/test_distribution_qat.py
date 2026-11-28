@@ -51,7 +51,12 @@ from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, Hub
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import MAX_QUANT_DESCRIPTION_CHARS, DistError, assemble_family
-from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link, upstream_cards
+from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    MEASUREMENTS_LEAD,
+    hf_link,
+    upstream_cards,
+)
 from karume.ple import PLE_INDEX_ROLE, PLE_ROLES
 
 #: The per-layer embedding width of the stand-in: two groups of the line's grid per layer (the
@@ -372,11 +377,12 @@ class TestQatParallelSeats:
             # The order too: the manifest serialises the table as it is.
             assert list(quants[name]["session"].items()) == list(session.items()), name
             assert quants[name]["weights"] == {}, name  # filled with the one storage per role
-            # The speed sentence is the model's measured one, never another model's.
+            # What the seat measured is a note on the card, never part of its description.
             assert quants[name]["description"].endswith(
-                gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE[model]
+                " Tokens can differ; use i4 for the reference order."
             ), name
-            assert model.upper() in quants[name]["description"], name
+            for word in ("faster", "slower", "tested", "device"):
+                assert word not in quants[name]["description"].lower(), (name, word)
 
     def test_12b_assembles_both_seats(self, tmp_path: Path) -> None:
         _, manifest = _assemble(tmp_path, ("12b",))
@@ -389,11 +395,45 @@ class TestQatParallelSeats:
             for name in PARALLEL_SESSIONS:
                 assert ("output head" in quants[name]["description"]) is excluded, (model, name)
 
-    def test_every_model_of_the_line_carries_a_measured_speed_note(self) -> None:
-        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) == {"e2b", "e4b", "12b", "26b"}
-        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) <= set(
-            GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM
+    def test_every_model_of_the_line_carries_a_dated_measurement_of_its_parallel_seat(self) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — the seat enters only with
+        a measurement behind it (`gemma4.card.GEMMA4_QAT_Q4_0_MEASUREMENTS`)."""
+        measured = gemma4_card.GEMMA4_QAT_Q4_0_MEASUREMENTS
+
+        assert (
+            set(measured) == {"e2b", "e4b", "12b", "26b"} == set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM)
         )
+        for model, notes in measured.items():
+            assert [note.preset for note in notes] == ["i4-fast"], model
+            assert notes[0].device == "NVIDIA GeForce RTX 3080 Ti, Node with Dawn", model
+        assert {model: notes[0].date for model, notes in measured.items()} == {
+            "e2b": "2026-11-04",
+            "e4b": "2026-11-04",
+            "12b": "2026-11-06",
+            "26b": "2026-11-10",
+        }
+        # 12B's decode with the drafter was slower under `i4-fast`, which its note says.
+        assert "with the drafter it was slower than `i4`" in measured["12b"][0].statement
+
+    def test_a_model_without_a_measurement_gets_no_parallel_seat(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        measured = dict(gemma4_card.GEMMA4_QAT_Q4_0_MEASUREMENTS)
+        del measured["12b"]
+        monkeypatch.setattr(gemma4_distribution, "GEMMA4_QAT_Q4_0_MEASUREMENTS", measured)
+
+        assert list(gemma4_distribution.gemma4_qat_q4_0_quants("12b")) == ["i4"]
+        assert list(gemma4_distribution.gemma4_qat_q4_0_quants("e2b")) == ["i4", "i4-fast"]
+
+    def test_the_card_writes_each_model_s_note_under_its_own_table(self, tmp_path: Path) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        e2b, twelve = card.split("## Model: e2b")[1].split("## Model: 12b")
+        measured = gemma4_card.GEMMA4_QAT_Q4_0_MEASUREMENTS
+
+        assert e2b.count(MEASUREMENTS_LEAD) == twelve.count(MEASUREMENTS_LEAD) == 1
+        assert measured["e2b"][0].statement in e2b and measured["12b"][0].statement not in e2b
+        assert measured["12b"][0].statement in twelve and measured["e2b"][0].statement not in twelve
 
     def test_the_seats_do_not_share_session_tables_with_the_declaration(self) -> None:
         """A manifest built for one model cannot alter the line's declaration (each table is a
@@ -1291,21 +1331,22 @@ class TestQat26B:
         self, tmp_path: Path
     ) -> None:
         """The seats' text is the line's own: the head is on the parallel GEMV (no exclusion note)
-        and the speed sentence is 26B's measured one, which was of the decode without the drafter
-        (the maintainer's ruling of 2026-11-27)."""
-        _, manifest = _assemble(tmp_path, ("26b",))
+        and 26B's measurement, of the decode without the drafter under the expert cache, is the
+        card's note (the maintainer's rulings of 2026-11-27)."""
+        out_dir, manifest = _assemble(tmp_path, ("26b",))
         quants = manifest["models"]["26b"]["quants"]
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
 
-        note = gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE["26b"]
-        assert note == " Faster than i4 on the tested 26B device without the drafter."
+        (note,) = gemma4_card.GEMMA4_QAT_Q4_0_MEASUREMENTS["26b"]
+        assert note.statement.startswith("without the drafter, under the expert cache ")
+        assert f"- `i4-fast` — {note.statement} ({note.device}, {note.date})." in card
         assert gemma4_distribution.GEMMA4_QAT_Q4_0_HEAD_NOTE["26b"] == ""
         for name, session in PARALLEL_SESSIONS.items():
             assert quants[name]["session"] == dict(session), name
             assert quants[name]["description"].startswith("Same weights as i4;"), name
-            assert quants[name]["description"].endswith(note), name
             assert "output head" not in quants[name]["description"], name
             assert "drafter" not in quants[name]["label"], name
-            assert "without the drafter" in quants[name]["description"], name
+            assert "drafter" not in quants[name]["description"], name
             assert "speculative" not in quants[name]["description"], name
             assert len(quants[name]["description"]) <= MAX_QUANT_DESCRIPTION_CHARS, name
 

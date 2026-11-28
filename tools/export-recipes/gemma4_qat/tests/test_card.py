@@ -23,7 +23,7 @@ from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
 from gemma4_qat.distribution import NOTICE, render_card
 from karume.migrate import card_format_statement
-from karume.modelcard import RUNTIME_SENTENCE
+from karume.modelcard import MEASUREMENTS_LEAD, RUNTIME_SENTENCE
 
 #: The repository ID spelled in the usage snippet (dist passes it from the pipeline's
 #: declaration).
@@ -176,6 +176,20 @@ class TestQatCardSections:
         assert '// model: "e2b", // default — available: e2b / e4b' in usage
         assert "temperature 0.25, top-k 11, top-p 0.5" in usage
         assert "speculative" not in usage
+
+    def test_e4b_s_measurement_is_a_note_under_its_own_quant_table(self) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — the note of a preset the
+        model ships, under that model's table alone."""
+        manifest = _two_model_manifest()
+        for model in ("e2b", "e4b"):
+            quants = manifest["models"][model]["quants"]
+            quants["i4-fast"] = copy.deepcopy(quants["i4"])
+        card = render_card(manifest, REPO)
+        e2b, e4b = card.split("## Model: e2b")[1].split("## Model: e4b")
+        (note,) = distribution.QAT_MEASUREMENTS["e4b"]
+
+        assert f"- `i4-fast` — {note.statement} ({note.device}, {note.date})." in e4b
+        assert MEASUREMENTS_LEAD not in e2b
 
     def test_the_tags_begin_with_the_pipeline_tag(self) -> None:
         front_matter = render_card(_qat_manifest(), REPO).split("---")[1]

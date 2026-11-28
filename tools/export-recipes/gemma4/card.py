@@ -27,7 +27,7 @@ are facts that **do not exist in the manifest**.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +38,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     UpstreamQuote,
     changes_made_here,
     default_model,
@@ -178,6 +179,56 @@ GEMMA4_MODEL_ROLE = "model"
 GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it-assistant",
     "e4b": "google/gemma-4-E4B-it-assistant",
+}
+
+#: The devices of the Gemma 4 measurements behind the cards' notes, with the runtime the records
+#: name (the bench runs under Node 24 with Dawn on Vulkan, and Chrome on Windows (D3D12) and macOS
+#: (Metal) — research 2026-11-19 §1, research 2026-11-06 and 2026-11-10 §2 for the RTX 3080 Ti).
+_GEMMA4_RTX_3080_TI = "NVIDIA GeForce RTX 3080 Ti, Node with Dawn"
+_GEMMA4_RTX_5070_TI = "NVIDIA GeForce RTX 5070 Ti, Chrome"
+_GEMMA4_APPLE_M2 = "Apple M2, Chrome"
+_GEMMA4_APPLE_M5 = "Apple M5, Chrome"
+
+
+def _bf16_fast_decode(device: str, fast: str, reference: str, runs: str = "") -> Measurement:
+    """What `bf16-fast` measured against `bf16` on one device on 2026-11-19 (`fast` and
+    `reference` are the decode ms per token of the two presets)."""
+    return Measurement(
+        "bf16-fast",
+        f"without the drafter, the median decode took {fast} ms per token against {reference} ms"
+        f" with `bf16`{runs}, over 96 greedy tokens with the two presets interleaved and the same"
+        " tokens from both",
+        device,
+        "2026-11-19",
+    )
+
+
+#: Model → what its presets measured, written under its quant table (the maintainer's ruling of
+#: 2026-11-27: a measurement is a note naming its device and date, never a preset's description).
+#: Source: research 2026-11-19 §2 (perf-ledger K-110 — the workbench's `gemma4-bench` entry:
+#: greedy, a 21-token prompt and 96 new tokens, the two presets interleaved over four rounds in one
+#: process, the median decode ms/token of the eight warm chats; each device ran its own geometry
+#: table, the Apple M5 the default profile). Neither model's decode with its drafter was measured
+#: against `bf16-fast` then, so each note names the decode measured: "without the drafter" (the
+#: maintainer's ruling of 2026-11-27). E2B's first record with the drafter (2026-11-26, one run on
+#: the RTX 3080 Ti) is not evidence for a card (perf-ledger K-110).
+GEMMA4_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "e2b": (
+        _bf16_fast_decode(
+            _GEMMA4_RTX_3080_TI, "12.97 and 12.07", "16.70 and 16.47", " in two runs"
+        ),
+        _bf16_fast_decode(_GEMMA4_RTX_5070_TI, "9.96", "19.12"),
+        _bf16_fast_decode(_GEMMA4_APPLE_M2, "60.77", "65.36"),
+        _bf16_fast_decode(_GEMMA4_APPLE_M5, "44.77", "48.49"),
+    ),
+    "e4b": (
+        _bf16_fast_decode(
+            _GEMMA4_RTX_3080_TI, "18.28 and 21.35", "32.23 and 29.68", " in two runs"
+        ),
+        _bf16_fast_decode(_GEMMA4_RTX_5070_TI, "16.57", "32.71"),
+        _bf16_fast_decode(_GEMMA4_APPLE_M2, "113.89", "119.90"),
+        _bf16_fast_decode(_GEMMA4_APPLE_M5, "90.93", "98.61"),
+    ),
 }
 
 #: License (checked first-hand on 2026-09-01 — the README frontmatter of the checkpoint snapshot
@@ -651,6 +702,33 @@ def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+# SPEC: docs/spec/distribution-cards.md#presets-and-the-quant-tables
+def gemma4_model_sections(
+    manifest: Mapping[str, Any],
+    host_assets: Mapping[FileRefKey, int],
+    measured: Mapping[str, Sequence[Measurement]],
+    extra: Sequence[Callable[[Mapping[str, Any]], list[str]]] = (),
+) -> list[Sequence[str]]:
+    """One `## Model: <name>` section per model (`karume.modelcard.model_sections`): its quant
+    table with the measurement notes of that model in `measured` (model name → what its presets
+    measured), then the line's own sections `extra`.
+
+    A Gemma 4 repository holds several models, so each model's notes are given to its own table
+    alone (the reason `karume.modelcard.model_measurements` refuses a manifest of several models).
+    """
+    return [
+        section
+        for name, model in manifest["models"].items()
+        for section in model_sections(
+            {"models": {name: model}},
+            (
+                partial(quants, host_assets=host_assets, measured=measured.get(name, ())),
+                *extra,
+            ),
+        )
+    ]
+
+
 def render_gemma4_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
@@ -669,8 +747,8 @@ def render_gemma4_model_card(
             models(manifest),
             [""],
             gemma4_usage(manifest, repo),
-            *model_sections(
-                manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
+            *gemma4_model_sections(
+                manifest, host_assets, GEMMA4_MEASUREMENTS, (_gemma4_generation,)
             ),
         )
     )
@@ -723,6 +801,57 @@ UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (
     GEMMA4_QAT_CHECKPOINTS_QUOTE,
     GEMMA4_QAT_ASSISTANT_QUOTE,
 )
+
+
+#: Model → what its presets measured, written under its quant table (the ruling of
+#: {@link GEMMA4_MEASUREMENTS}). MUST: a model gets the parallel and fused preset `i4-fast` only
+#: with a measurement of it here (`gemma4.distribution.gemma4_qat_q4_0_quants`). Sources, each
+#: `i4` and `i4-fast` interleaved in one process, the tokens the same in both: E2B / E4B on
+#: 2026-11-04 with and without the drafter (`outputs/diag/gemma4-lines-2026-11-04/legA/`, two runs
+#: of greedy decoding of up to 128 new tokens on two prompts, 8 measured turns per arm and prompt),
+#: 12B on 2026-11-06 (research 2026-11-06 §3, the same harness), 26B on 2026-11-10 (research
+#: 2026-11-10 §2 and §5: 12 GB cannot hold it resident, so it decoded under the exact expert cache,
+#: without a drafter, which it did not ship then).
+GEMMA4_QAT_Q4_0_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "e2b": (
+        Measurement(
+            "i4-fast",
+            "decode was 2.1 to 2.5 times as fast as with `i4` without the drafter and 1.2 to 1.5"
+            " times as fast with it, over two prompts of up to 128 greedy tokens in two runs",
+            _GEMMA4_RTX_3080_TI,
+            "2026-11-04",
+        ),
+    ),
+    "e4b": (
+        Measurement(
+            "i4-fast",
+            "decode was 2.1 to 2.9 times as fast as with `i4` without the drafter and 1.2 to 1.5"
+            " times as fast with it, over two prompts of up to 128 greedy tokens in two runs",
+            _GEMMA4_RTX_3080_TI,
+            "2026-11-04",
+        ),
+    ),
+    "12b": (
+        Measurement(
+            "i4-fast",
+            "without the drafter, decode took 27.4 and 26.1 ms per token on two prompts of 128"
+            " tokens against 54.5 and 55.0 ms with `i4`; with the drafter it was slower than `i4`"
+            " with the drafter, 38.2 and 25.9 ms against 32.6 and 19.1 ms",
+            _GEMMA4_RTX_3080_TI,
+            "2026-11-06",
+        ),
+    ),
+    "26b": (
+        Measurement(
+            "i4-fast",
+            "without the drafter, under the expert cache with 64 slots per layer and every expert"
+            " in the host tier, a decode forward without a miss took 17.6 and 17.5 ms against 24.6"
+            " and 25.7 ms with `i4` in two rounds of three prompts of 96 greedy tokens",
+            _GEMMA4_RTX_3080_TI,
+            "2026-11-10",
+        ),
+    ),
+}
 
 
 #: The models the long-context section reports on ({@link _qat_q4_0_long_context}).
@@ -1002,8 +1131,8 @@ def render_gemma4_qat_q4_0_model_card(
             [""],
             gemma4_usage(manifest, repo, speculative),
             _qat_q4_0_long_context(manifest),
-            *model_sections(
-                manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
+            *gemma4_model_sections(
+                manifest, host_assets, GEMMA4_QAT_Q4_0_MEASUREMENTS, (_gemma4_generation,)
             ),
         )
     )

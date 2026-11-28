@@ -206,16 +206,19 @@ The level-2 sections come in this order:
   (`Measurement`) names the preset and the result, then in parentheses what was measured when it was not this
   model, the device (with the runtime where it was recorded) and the date. A note on a preset the model does not
   ship is left out. `model_measurements` picks the notes of a one-model manifest's model from a recipe table, and
-  fails on a manifest of several models that the table names.
+  fails on a manifest of several models that the table names; the Gemma 4 repositories hold several models, so their
+  cards give each model's notes to its own table (`gemma4.card.gemma4_model_sections`).
 
   | Recipe table | Repositories | What it holds |
   | --- | --- | --- |
   | `irodori.card.IRODORI_MEASUREMENTS` | `karume-irodori-v4-small`, `karume-irodori-v4.1-small`, `karume-irodori-v4.1-small-mf` | v4 Small's listening check of `f16` and wall time of `i8-a8`, which v4.1-small carries naming v4 Small as what was measured; the MeanFlow student's listening of `i8` and `i8-a8`. None for v4-Large |
   | `sbv2.card.SBV2_MEASUREMENTS` | `karume-sbv2-jvnv`, under every voice | the simulated audio difference of `f16+bert8`, the text encoder stage of `i8-a8`, the listening checks of `i8+bert4` and `i4` and the warm synthesis of `i4`, each but the text encoder's naming another voice as what was measured |
   | `WanCard.measurements` (`wan.card`) | `karume-wan2.2` | the transformer pass of the online preset and the VAE decode of the conv8 preset |
+  | `gemma4.card.GEMMA4_MEASUREMENTS` | `karume-gemma4` | the decode of `bf16-fast` against `bf16` without the drafter, per model on four devices |
+  | `gemma4.card.GEMMA4_QAT_Q4_0_MEASUREMENTS` | `karume-gemma4-qat` | the decode of `i4-fast` against `i4` per model, with and without the drafter (26B without, under the expert cache); a model gets `i4-fast` only with a note here |
+  | `gemma4_qat.distribution.QAT_MEASUREMENTS` | `karume-gemma4-qat-mobile` | E4B's decode step of `i4-fast` against `i4`. None for E2B |
 
-  The other cards write no measurement notes. The Gemma 4 repositories' descriptions keep their measured words
-  until their stage.
+  The other cards write no measurement notes.
 
 ### Usage
 

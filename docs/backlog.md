@@ -89,8 +89,8 @@ maintainer's ruling of 2026-11-06).
   - **E2B's speculative decode under `bf16-fast` against `bf16`** (perf-ledger K-110): the workbench's `gemma4-bench`
     entry has a drafter arm (built 2026-11-26), and the numbers of its first record (one run, RTX 3080 Ti) are in
     perf-ledger K-110. Left: the Playground's gemma4-bench page still fixes `speculative` off, and whether E2B's
-    sentence on speed ("without the drafter" — `GEMMA4_SPEED_NOTE` in `tools/export-recipes/gemma4/distribution.py`)
-    changes is the maintainer's decision.
+    measurement notes on the card ("without the drafter" — `GEMMA4_MEASUREMENTS` in
+    `tools/export-recipes/gemma4/card.py`) gain a measurement with the drafter is the maintainer's decision.
   - **Small checks found while preparing 0.23.0 (filed 2026-11-19; none approved yet)**:
     - The Wan recipe has no build from published containers pinned by digest, which Anima's and Irodori's have: a
       rebuild needs the series, or series folders laid out from a mirror by hand (0.23.0 did the latter). Filed

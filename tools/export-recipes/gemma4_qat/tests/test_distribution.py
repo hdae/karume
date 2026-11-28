@@ -5,7 +5,13 @@ from copy import deepcopy
 import pytest
 
 from gemma4_qat.config import CHECKPOINTS, checkpoint_name, series_name
-from gemma4_qat.distribution import QAT_DEFAULT_QUANT, assert_qat_graph, qat_quants, repo_name
+from gemma4_qat.distribution import (
+    QAT_DEFAULT_QUANT,
+    QAT_MEASUREMENTS,
+    assert_qat_graph,
+    qat_quants,
+    repo_name,
+)
 from karume.dist import DistError, assert_quant_presentation
 
 #: The tensor key of the only linear allowed to stay unquantized (the one the structural check
@@ -140,15 +146,21 @@ class TestQatQuants:
             "packedStaticQuantize": True,
         }
 
-    def test_only_the_e4b_fast_mode_names_its_measurement(self):
-        """The measured sentence goes only on E4B's `i4-fast`; E2B's descriptions and the other
-        presets keep the same wording."""
+    def test_the_descriptions_state_no_measurement_and_only_e4b_has_a_note(self):
+        """E2B and E4B have the same descriptions: E4B's measurement of `i4-fast` is a dated note
+        on the card (`QAT_MEASUREMENTS` — docs/spec/distribution-cards.md#presets-and-the-quant-
+        tables), E2B has none."""
         e2b, e4b = qat_quants("e2b"), qat_quants("e4b")
-        for name in ("i4", "i4-gemvpar"):
-            assert e4b[name] == e2b[name]
-        assert e4b["i4-fast"]["description"] == e2b["i4-fast"]["description"] + (
-            " E4B decode time -42% (B570)."
+        assert e4b == e2b
+        assert "B570" not in e4b["i4-fast"]["description"]
+        assert set(QAT_MEASUREMENTS) == {"e4b"}
+        (note,) = QAT_MEASUREMENTS["e4b"]
+        assert (note.preset, note.device, note.date) == (
+            "i4-fast",
+            "Intel Arc B570, Deno",
+            "2026-09-26",
         )
+        assert "41.7% shorter than with `i4`" in note.statement
 
     def test_unknown_model_is_rejected(self):
         with pytest.raises(ValueError, match="unsupported"):

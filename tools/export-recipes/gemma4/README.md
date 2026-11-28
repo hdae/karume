@@ -896,12 +896,12 @@ table as the checkpoint's bf16 bits, PLE index schema 5:
   the states-form attention runs its parallel reductions with the row statistics folded into PV.
   On the default profile's 17 bf16 rows that is 207 of E2B's 277 linears and 216 of E4B's 344, and
   2 of the 68 linears of E2B's int8 drafter; the others keep the sequential GEMV
-  (`GEMMA4_PARALLEL_QUANTS` in `distribution.py` lists them). Tokens can differ from `bf16`. Its
-  description ends with one sentence on speed per model, each with a measurement behind it
-  (`GEMMA4_SPEED_NOTE`, which records the protocol and the numbers of the three devices): a decode
-  token of `bf16-fast` took less time than one of `bf16` on an RTX 3080 Ti, an RTX 5070 Ti and an
-  Apple M2 for both models. Neither model's speculative decode (with the drafter) is measured for
-  the card, so each model's sentence says "without the drafter".
+  (`GEMMA4_PARALLEL_QUANTS` in `distribution.py` lists them). Tokens can differ from `bf16`. What
+  it measured is a dated note under each model's quant table on the card, not part of its
+  description (`GEMMA4_MEASUREMENTS` in `card.py`, which records the protocol): a decode token of
+  `bf16-fast` took less time than one of `bf16` on an RTX 3080 Ti, an RTX 5070 Ti, an Apple M2 and
+  an Apple M5 for both models on 2026-11-19. Neither model's speculative decode (with the drafter)
+  was measured for the card, so each note says "without the drafter".
 
 Both models' presets also name their int8 drafter, which borrows the bf16 target's
 `model.lm_head.weight`.

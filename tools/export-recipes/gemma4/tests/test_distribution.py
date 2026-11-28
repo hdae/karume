@@ -68,7 +68,12 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link, upstream_cards
+from karume.modelcard import (
+    APACHE_LICENSE_REFERENCE,
+    MEASUREMENTS_LEAD,
+    hf_link,
+    upstream_cards,
+)
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 #: Role name → part count (the PLE assets take parts of their own, so only `model` has more).
@@ -1736,15 +1741,15 @@ class TestGemma4ParallelPreset:
         reference = gemma4_distribution.GEMMA4_QUANTS["bf16"]["description"]
         declared = gemma4_distribution.GEMMA4_PARALLEL_QUANTS["bf16-fast"]["description"]
         note = gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE
-        speed = gemma4_distribution.GEMMA4_SPEED_NOTE
         e2b = gemma4_distribution.gemma4_quants("e2b")
         e4b = gemma4_distribution.gemma4_quants("e4b")
 
-        # The drafter sentence follows the preset's own text; the speed sentence comes last.
+        # The drafter sentence follows the preset's own text and ends it (what a preset measured
+        # is a note on the card, never part of its description).
         assert e2b["bf16"]["description"] == reference + note
-        assert e2b["bf16-fast"]["description"] == declared + note + speed["e2b"]
+        assert e2b["bf16-fast"]["description"] == declared + note
         assert e4b["bf16"]["description"] == reference + note
-        assert e4b["bf16-fast"]["description"] == declared + note + speed["e4b"]
+        assert e4b["bf16-fast"]["description"] == declared + note
 
     def test_a_model_without_a_drafter_gets_no_drafter_sentence(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1755,45 +1760,56 @@ class TestGemma4ParallelPreset:
         for name, quant in quants.items():
             assert gemma4_distribution.GEMMA4_DRAFTER_QUANT_NOTE not in quant["description"], name
 
-    def test_the_e2b_speed_sentence_names_the_decode_it_measured(self) -> None:
-        """E2B's speculative decode is not measured, so its sentence says its decode ran without
-        the drafter (`GEMMA4_SPEED_NOTE`)."""
-        assert gemma4_distribution.gemma4_has_drafter("e2b")
-        assert gemma4_distribution.GEMMA4_SPEED_NOTE["e2b"].endswith(" without the drafter.")
+    @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
+    def test_each_measurement_note_names_the_decode_it_measured(self, model: str) -> None:
+        """Both models ship a drafter and neither's speculative decode was measured against
+        `bf16-fast`, so every note on it says the decode ran without the drafter
+        (`gemma4.card.GEMMA4_MEASUREMENTS` — the maintainer's ruling of 2026-11-27)."""
+        assert gemma4_distribution.gemma4_has_drafter(model)
+        notes = gemma4_card.GEMMA4_MEASUREMENTS[model]
 
-    def test_the_e4b_speed_sentence_names_the_decode_it_measured(self) -> None:
-        """E4B ships a drafter too and its speculative decode is not measured, so its sentence is
-        the maintainer's wording that names the decode without the drafter (`GEMMA4_SPEED_NOTE`)."""
-        assert gemma4_distribution.gemma4_has_drafter("e4b")
-        assert (
-            gemma4_distribution.GEMMA4_SPEED_NOTE["e4b"]
-            == " Faster than bf16 on tested E4B devices without the drafter."
-        )
+        assert [note.preset for note in notes] == ["bf16-fast"] * 4
+        assert all(note.statement.startswith("without the drafter, ") for note in notes)
+        assert {note.date for note in notes} == {"2026-11-19"}
 
     @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
     def test_every_description_fits_the_manifest_limit(self, model: str) -> None:
         for name, quant in gemma4_distribution.gemma4_quants(model).items():
             assert len(quant["description"]) <= 200, name
 
-    def test_no_preset_states_a_speed_without_a_measurement(self) -> None:
-        """The speed sentence enters per model with its measurement (`GEMMA4_SPEED_NOTE`): the
-        parallel preset of a measured model ends with that model's sentence, and no other
-        description says anything about speed."""
-        notes = gemma4_distribution.GEMMA4_SPEED_NOTE
-        assert set(notes) == {"e2b", "e4b"}
-        assert set(notes) <= set(GEMMA4_REGULAR_MODELS)
+    def test_no_description_states_a_measurement_and_every_note_is_of_a_preset_shipped(
+        self,
+    ) -> None:
+        """docs/spec/distribution-cards.md#presets-and-the-quant-tables — a description says what
+        the preset is; what it measured is a note, naming a preset the model ships."""
+        assert set(gemma4_card.GEMMA4_MEASUREMENTS) == set(GEMMA4_REGULAR_MODELS)
         for model in GEMMA4_REGULAR_MODELS:
             quants = gemma4_distribution.gemma4_quants(model)
-            description = quants["bf16-fast"]["description"]
-            if model in notes:
-                assert description.endswith(notes[model]), model
-                # The model's measured sentence, never another model's.
-                assert model.upper() in notes[model], model
-            else:
-                assert "faster" not in description.lower(), model
-                assert "slower" not in description.lower(), model
-            assert "faster" not in quants["bf16"]["description"].lower(), model
-            assert "slower" not in quants["bf16"]["description"].lower(), model
+            for name, quant in quants.items():
+                for word in ("faster", "slower", "tested", "device"):
+                    assert word not in quant["description"].lower(), (model, name)
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[model]:
+                assert note.preset in quants, (model, note)
+
+    def test_each_model_s_notes_stand_under_its_own_quant_table(self, tmp_path: Path) -> None:
+        e4b = _build_e4b(tmp_path)
+        e2b = _build(tmp_path)
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            tmp_path / "models" / "both",
+            "e2b",
+            root_files=gemma4_root_files(["e2b", "e4b"]),
+        )
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        e2b_section, e4b_section = card.split("## Model: e2b")[1].split("## Model: e4b")
+
+        for section, model, other in ((e2b_section, "e2b", "e4b"), (e4b_section, "e4b", "e2b")):
+            assert section.count(MEASUREMENTS_LEAD) == 1
+            notes = section.split(MEASUREMENTS_LEAD)[1].split("\n\n### ")[0]
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[model]:
+                assert note.statement in notes and f"{note.device}, {note.date})." in notes
+            for note in gemma4_card.GEMMA4_MEASUREMENTS[other]:
+                assert note.statement not in notes
 
     def test_the_presets_do_not_share_session_tables_with_the_declaration(self) -> None:
         """A manifest built for one model cannot alter the line's declaration (each table is a

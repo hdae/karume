@@ -5,14 +5,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
-from gemma4.card import gemma4_usage
+from gemma4.card import gemma4_model_sections, gemma4_usage
 from gemma4.distribution import (
     GEMMA4_ASSETS,
     GEMMA4_NOT_DISTRIBUTED,
@@ -46,14 +45,13 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    Measurement,
     frontmatter,
     hf_link,
     introduction,
-    model_sections,
     models,
     notice_closing,
     pinned,
-    quants,
     render,
     require_pipeline,
     upstream_cards,
@@ -156,11 +154,25 @@ def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -
 #: down → all of them — ADR 0104 addendum 2026-09-26).
 QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4-fast"}
 
-#: The one measured sentence added to the description of `i4-fast` (GPU decode ms/step relative
-#: to `i4`). E2B, as before, puts no measurement in its description. E4B has the preset for the
-#: first time, so a single number backing the default is added (within the 200-character limit
-#: of the display field).
-QAT_FAST_MEASURED_NOTE: Mapping[str, str] = {"e2b": "", "e4b": " E4B decode time -42% (B570)."}
+#: Model → what its presets measured, written under its quant table on the card (the
+#: maintainer's ruling of 2026-11-27: a measurement is a note naming its device and date, never a
+#: preset's description). Source: research 2026-09-26-gemma-flag-bench (Intel Arc B570 under Deno
+#: 2.9.6, `tools/flag-bench`: two fixed prompts, one warm-up and two measured runs each, two ABBA
+#: rounds against `i4`; GPU time per decode step by timestamp queries, wall time per decode token
+#: with them off) — the measurement that made `i4-fast` the default (ADR 0104 addendum
+#: 2026-09-26). E4B's note is the one its description carried ("E4B decode time -42% (B570)");
+#: E2B's description carried none, so it has no note.
+QAT_MEASUREMENTS: Mapping[str, tuple[Measurement, ...]] = {
+    "e4b": (
+        Measurement(
+            "i4-fast",
+            "the GPU time of a decode step was 41.7% shorter than with `i4`, and the wall time of a"
+            " decode token 29.5% shorter, over two fixed prompts",
+            "Intel Arc B570, Deno",
+            "2026-09-26",
+        ),
+    ),
+}
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
@@ -199,7 +211,7 @@ def qat_quants(model: str) -> Mapping[str, Any]:
             "session": {"numerics": {"level": "reorder"}, "packedStaticQuantize": True},
             "label": "Fixed mixed QAT with parallel GEMV and packed int8",
             "description": "Same QAT weights; parallel GEMV and attention, packed int8 "
-            "activations. Use i4 for reference sums." + QAT_FAST_MEASURED_NOTE[model],
+            "activations. Use i4 for reference sums.",
         },
     }
 
@@ -484,7 +496,7 @@ def render_card(
             models(manifest),
             [""],
             gemma4_usage(manifest, repo, module=QAT_MODULE),
-            *model_sections(manifest, (partial(quants, host_assets=host_assets),)),
+            *gemma4_model_sections(manifest, host_assets, QAT_MEASUREMENTS),
         )
     )
 

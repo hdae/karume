@@ -145,6 +145,7 @@ from .card import (
     GEMMA4_MOE_MODELS,
     GEMMA4_PLE_MODELS,
     GEMMA4_QAT_DRAFTER_UPSTREAM,
+    GEMMA4_QAT_Q4_0_MEASUREMENTS,
     GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM,
     GEMMA4_UPSTREAM,
     GEMMA4_VISION_ROLE,
@@ -466,43 +467,19 @@ GEMMA4_PARALLEL_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Model → the one sentence on speed its parallel and fused preset carries, after the drafter
-#: sentence. MUST: a model enters only with a measurement behind the sentence (the rule of
-#: {@link GEMMA4_QAT_Q4_0_SPEED_NOTE}: decode ms/token of `bf16` / `bf16-fast` interleaved in one
-#: process, the protocol recorded beside the entry). Measured 2026-11-19 with the workbench's
-#: `gemma4-bench` entry (greedy, one prompt, 96 new tokens, four rounds of the two presets
-#: interleaved, three chats per visit with the cold first one left out; the median decode ms/token
-#: of the eight warm chats; the same tokens in both presets and on every device), `bf16` →
-#: `bf16-fast`: RTX 3080 Ti (Node + Dawn, Vulkan; two runs) E2B 16.70 / 16.47 → 12.97 / 12.07 and
-#: E4B 32.23 / 29.68 → 18.28 / 21.35; RTX 5070 Ti (Chrome, D3D12) E2B 19.12 → 9.96 and E4B
-#: 32.71 → 16.57; Apple M2 (Chrome, Metal) E2B 65.36 → 60.77 and E4B 119.90 → 113.89 — the browser
-#: records with each adapter's own geometry table. Neither model's speculative decode (with the
-#: drafter) is measured, and both models ship a drafter (E4B's since 2026-11-26), so each sentence
-#: names the decode that is measured: "without the drafter" (E4B's by the maintainer's ruling of
-#: 2026-11-27). With the drafter sentence before it, each description is exactly at the manifest's
-#: limit of 200 characters.
-GEMMA4_SPEED_NOTE: Mapping[str, str] = {
-    "e2b": " Faster than bf16 on tested E2B devices without the drafter.",
-    "e4b": " Faster than bf16 on tested E4B devices without the drafter.",
-}
-
 
 def gemma4_quants(model: str) -> dict[str, Any]:
     """The model's quant table: the reference preset `bf16` ({@link GEMMA4_QUANTS}) and the parallel
     and fused preset over the same weights ({@link GEMMA4_PARALLEL_QUANTS}). A model that ships a
     drafter has the drafter sentence ({@link GEMMA4_DRAFTER_QUANT_NOTE}) added to every
-    description, and a model with a measured speed note ({@link GEMMA4_SPEED_NOTE}) has it added
-    to the parallel preset's last."""
+    description. What the parallel preset measured is a note on the card
+    (`gemma4.card.GEMMA4_MEASUREMENTS`), never part of a description."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
     for name, quant in GEMMA4_PARALLEL_QUANTS.items():
         quants[name] = {**quant, "session": copy.deepcopy(quant["session"])}
     if gemma4_has_drafter(model):
         for quant in quants.values():
             quant["description"] += GEMMA4_DRAFTER_QUANT_NOTE
-    note = GEMMA4_SPEED_NOTE.get(model)
-    if note is not None:
-        for name in GEMMA4_PARALLEL_QUANTS:
-            quants[name]["description"] += note
     return quants
 
 
@@ -2377,28 +2354,6 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Model → the one sentence on speed its parallel and fused seat carries; the models with that seat.
-#: MUST: a model enters only with a measurement behind the sentence — decode ms/token of `i4` /
-#: `i4-fast`, with and without the drafter, interleaved in one process (2026-11-04, RTX 3080 Ti,
-#: Node + Dawn — `outputs/diag/gemma4-lines-2026-11-04/legA/`): `i4-fast` was faster than `i4` on
-#: every prompt and arm measured (two runs) — without the drafter E2B by 2.1–2.5× and E4B by
-#: 2.1–2.9×, with it both by 1.2–1.5×. 12B (2026-11-06, `outputs/diag/gemma4-12b-fast-2026-11-06/`,
-#: the same protocol): without the drafter by 1.9–2.1×; with it slower than `i4` with it, so its
-#: sentence says so. 26B (2026-11-10, `outputs/diag/forward-cost-2026-11-10/`; 12 GB cannot hold it
-#: resident, so decode ran under the exact expert cache — 64 slots per layer, every expert in the
-#: host tier, re-run after a miss — one process per arm, greedy, three prompts of 96 tokens with the
-#: same tokens in every arm, two rounds): one decode forward without a miss (median wall) took
-#: 24.6 / 25.7 ms with `i4` and 17.6 / 17.5 ms with `i4-fast`. It had no drafter then, so there
-#: was no speculative arm; its drafter (pinned 2026-11-27) runs only with every expert resident,
-#: which this machine cannot hold, so its sentence names the decode that was measured: "without
-#: the drafter" (the maintainer's ruling of 2026-11-27, E4B's wording in the regular line).
-GEMMA4_QAT_Q4_0_SPEED_NOTE: Mapping[str, str] = {
-    "e2b": " Faster than i4 on the tested E2B device.",
-    "e4b": " Faster than i4 on the tested E4B device.",
-    "12b": " Faster than i4 on the tested 12B device, except when speculative.",
-    "26b": " Faster than i4 on the tested 26B device without the drafter.",
-}
-
 #: How the seat's description spells the output head: the int4 head's parallel GEMV row exists for
 #: 12B and 26B only ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}).
 GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
@@ -2411,22 +2366,23 @@ GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
 
 def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
     """The line's quant table for `model`: the reference seat `i4` ({@link GEMMA4_QAT_Q4_0_QUANTS})
-    and, for a model with a measured speed note ({@link GEMMA4_QAT_Q4_0_SPEED_NOTE}), the parallel
-    and fused seat ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}) with that note."""
+    and, for a model whose `i4-fast` was measured (`gemma4.card.GEMMA4_QAT_Q4_0_MEASUREMENTS`, the
+    card's notes — MUST: a model gets the preset only with a measurement behind it), the parallel
+    and fused seat ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS})."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QAT_Q4_0_QUANTS.items()}
     if model in GEMMA4_MOE_MODELS:
         quants[GEMMA4_QAT_Q4_0_DTYPE].update(GEMMA4_QAT_Q4_0_MOE_QUANT)
     if gemma4_qat_q4_0_has_vision(model):
         quants[GEMMA4_QAT_Q4_0_DTYPE]["description"] += GEMMA4_QAT_Q4_0_VISION_NOTE
-    note = GEMMA4_QAT_Q4_0_SPEED_NOTE.get(model)
-    if note is not None:
-        for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
-            quants[name] = {
-                **quant,
-                "session": copy.deepcopy(quant["session"]),
-                "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model])
-                + note,
-            }
+    measured = {measurement.preset for measurement in GEMMA4_QAT_Q4_0_MEASUREMENTS.get(model, ())}
+    for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
+        if name not in measured:
+            continue
+        quants[name] = {
+            **quant,
+            "session": copy.deepcopy(quant["session"]),
+            "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model]),
+        }
     return quants
 
 
