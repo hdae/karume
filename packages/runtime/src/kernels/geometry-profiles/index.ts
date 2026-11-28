@@ -34,8 +34,10 @@ import { APPLE_METAL_3_SHARED } from "./apple-metal-3-shared.ts";
  * numbers only, so a one-level copy is already deep. `provenance` nests `adapter` (or a shared
  * table's `adapters`, a list of flat objects), `families` (one
  * entry per op family, each with its `userAgent` — an array of strings) and `attentionBench`,
- * `attentionOnline` is one flat object, and `linearGemv` nests its variants and its rows of flat
- * objects, so those are copied and frozen too. The families are walked
+ * `attentionOnline` is one flat object, `linearGemv` nests its variants and its rows of flat
+ * objects, and `gemmGrid` nests its ladder of geometries and `keepLargest`, so those are copied and
+ * frozen too. MUST: every optional field of the profile's type is copied here — a field left out is
+ * silently absent from the list, and Sessions on that table's adapter run without it. The families are walked
  * by the entries the table has (not by `GEOMETRY_PROFILE_FAMILIES`, which this module must not read
  * at evaluation — see that constant).
  */
@@ -87,6 +89,16 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
             parallelShapes: Object.freeze(
               profile.linearGemv.parallelShapes.map((row) => Object.freeze({ ...row })),
             ),
+          }),
+        }),
+    ...(profile.gemmGrid === undefined
+      ? {}
+      : {
+          gemmGrid: Object.freeze({
+            ladder: Object.freeze(profile.gemmGrid.ladder.map(geometry)),
+            keepLargest: Object.freeze({ ...profile.gemmGrid.keepLargest }),
+            minWorkgroups: profile.gemmGrid.minWorkgroups,
+            maxPadding: profile.gemmGrid.maxPadding,
           }),
         }),
     ...(profile.provenance === undefined
