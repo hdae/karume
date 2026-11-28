@@ -1,7 +1,9 @@
 # 0157: The GEMM tile of linear, matmul and bmm may be chosen from the dispatch grid's workgroup count by a rule a table carries
 
-- Status: proposed (2026-11-28 — the maintainer asked for the item and took the recon's recommended options; the
-  maintainer accepts ADRs)
+- Status: accepted (2026-11-28 — the maintainer accepted it and confirmed decision 8 for `nvidia-ampere`: the table
+  takes the field from two grid records of the RTX 3080 Ti, and this machine's corpus census rows are rewritten,
+  gated by the full `vp test` with every output row unchanged; proposed the same day, when the maintainer asked for
+  the item and took the recon's recommended options)
 - Date: 2026-11-28
 - Related: [0022](0022-gemm-register-blocking.md) (the tile geometry changes the work split only) /
   [0115](0115-geometry-profiles.md) (geometry profiles, a static table per adapter, no run-time autotuning) /

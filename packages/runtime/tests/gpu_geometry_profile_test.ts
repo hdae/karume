@@ -42,8 +42,9 @@ import { describe, it } from "vite-plus/test";
 import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
 import {
   DEFAULT_GEOMETRY_PROFILE,
-  gemmRowsGeometry,
   type GemmRowsRule,
+  type GemmShape,
+  gemmShapeGeometry,
   type GeometryProfile,
   i8a8LinearGeometry,
   type I8a8RowsRule,
@@ -124,18 +125,27 @@ const gemmParts = (geometry: GemmGeometry): readonly string[] => [
   ...fieldParts(geometry),
 ];
 
-const rowsKey = (prefix: string, rows: number) => (profile: GeometryProfile) => [
-  { prefix, parts: gemmParts(gemmRowsGeometry(profile, rows)) },
+/**
+ * The key a GEMM of linear / matmul / bmm of `shape` runs with under a table: the geometry of the
+ * call sites' one lookup, `gemmShapeGeometry` — the `gemmRows` rule of M for a table without the
+ * grid-fill rule (the same object), the rule's tile for a table that carries it (the walk itself is
+ * checked against the recon's own fitting script in gemm_grid_test.ts).
+ */
+const shapeKey = (prefix: string, shape: GemmShape) => (profile: GeometryProfile) => [
+  { prefix, parts: gemmParts(gemmShapeGeometry(profile, shape)) },
 ];
 
+const LINEAR_K = 64;
+const LINEAR_N = 96;
+
 const linearCase = (m: number): ProfileCase => {
-  const [k, n] = [64, 96];
+  const [k, n] = [LINEAR_K, LINEAR_N];
   return {
     name: `linear M=${m}`,
     model: async () =>
       await openGraphModel(singleOpDeclaration("linear", [[m, k], [n, k], [n]], [[m, n]])),
     inputs: { x0: fill([m, k], SIGNED), x1: fill([n, k], WEIGHT), x2: fill([n], BIAS) },
-    expected: rowsKey("linear:", m),
+    expected: shapeKey("linear:", { m, n, k, batch: 1 }),
   };
 };
 
@@ -158,7 +168,8 @@ const representativeRows = (rules: readonly { readonly maxRows: number }[]): rea
  * — a derivation error that lets the representative M fall into a neighbouring rule also turns red
  * through a key mismatch. For a rule with the same geometry as the default, it checks that the
  * discriminator is the default geometry's (the flip side of "a different geometry gives a
- * different key").
+ * different key"). A table that carries the grid-fill rule does not read its `gemmRows` for linear:
+ * there the case expects the rule's tile for the case's shape.
  */
 const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =>
   representativeRows(rules).map((m, index) => {
@@ -168,7 +179,10 @@ const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =
     return {
       ...linearCase(m),
       name: `linear M=${m}（gemmRows ${range}）`,
-      expected: () => [{ prefix: "linear:", parts: gemmParts(geometry) }],
+      expected: (profile) =>
+        profile.gemmGrid === undefined
+          ? [{ prefix: "linear:", parts: gemmParts(geometry) }]
+          : shapeKey("linear:", { m, n: LINEAR_N, k: LINEAR_K, batch: 1 })(profile),
     };
   });
 
@@ -451,7 +465,7 @@ const OTHER_CASES: readonly ProfileCase[] = [
         ),
       ),
     inputs: { x0: fill([700, 64], SIGNED), x1: fill([64, 80], WEIGHT) },
-    expected: rowsKey("matmul:", 700),
+    expected: shapeKey("matmul:", { m: 700, n: 80, k: 64, batch: 1 }),
   },
   {
     name: "bmm M=600",
@@ -467,7 +481,7 @@ const OTHER_CASES: readonly ProfileCase[] = [
         ),
       ),
     inputs: { x0: fill([2, 600, 64], SIGNED), x1: fill([2, 64, 80], WEIGHT) },
-    expected: rowsKey("bmm:", 600),
+    expected: shapeKey("bmm:", { m: 600, n: 80, k: 64, batch: 2 }),
   },
   attentionCase("f32"),
   attentionCase("a8"),
