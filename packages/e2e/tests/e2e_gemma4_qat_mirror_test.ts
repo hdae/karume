@@ -1,4 +1,4 @@
-// Real-weight Gemma 4 E2B / E4B / 12B of the q4_0 QAT line through its distribution mirror
+// Real-weight Gemma 4 E2B / E4B / 12B / 26B A4B of the q4_0 QAT line through its distribution mirror
 // (`models/karume-gemma4-qat/` — `dist.py --pipeline gemma4-qat`): the regular gemma pipeline opens
 // it with the QAT MTP drafters (ADR 0096) borrowing the int4 embedding table of their target.
 //
@@ -44,7 +44,9 @@
 // ## GPU memory
 //
 // One pipeline (or one target + drafter pair) at a time; 12B with its drafter is about 7.2 GiB of
-// weights + 0.8 GiB of slots at the default capacity 4096 — within a 12 GB GPU.
+// weights + 0.8 GiB of slots at the default capacity 4096 — within a 12 GB GPU. 26B A4B (13.4 GiB of
+// weights) is not held resident on a 12 GB GPU, so it takes ① and ② only: its drafter's GPU checks
+// run on the model cut after 12 layers (`e2e_gemma4_26b_cut_drafter_test.ts`).
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
@@ -95,12 +97,14 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
 const MIRROR = mirrorRoot("karume-gemma4-qat");
 const ASSEMBLE =
   "cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat" +
-  " --model e2b --model e4b --model 12b";
+  " --model e2b --model e4b --model 12b --model 26b";
 /** The command that restores the goldens (ADR 0139 decision 2). */
 const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
-const MODELS = ["e2b", "e4b", "12b"] as const;
+const MODELS = ["e2b", "e4b", "12b", "26b"] as const;
 type Model = (typeof MODELS)[number];
+/** The models of the GPU cases (③ – ⑤): the ones a 12 GB GPU holds resident with their drafter. */
+const RESIDENT_MODELS: readonly Model[] = ["e2b", "e4b", "12b"];
 
 /** The roles of the manifest (`gemma4/distribution.py`). */
 const MODEL = "model";
@@ -117,6 +121,7 @@ const SEATS: Record<Model, readonly string[]> = {
   e2b: [QUANT, "i4-fast"],
   e4b: [QUANT, "i4-fast"],
   "12b": [QUANT, "i4-fast"],
+  "26b": [QUANT, "i4-fast"],
 };
 /** The session each seat declares (`GEMMA4_QAT_Q4_0_PARALLEL_QUANTS`). */
 const SEAT_SESSIONS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
@@ -173,6 +178,17 @@ const SHAPES: Record<
       "l46.v": [1, 8, 1032, 256],
       "l47.k": [1, 1, CAPACITY_SYMBOL, 512],
       "l47.v": [1, 1, CAPACITY_SYMBOL, 512],
+    },
+  },
+  "26b": {
+    hidden: 2816,
+    ple: false,
+    product: "gemma4-26b-product",
+    slots: {
+      "l28.k": [1, 8, 1032, 256],
+      "l28.v": [1, 8, 1032, 256],
+      "l29.k": [1, 2, CAPACITY_SYMBOL, 512],
+      "l29.v": [1, 2, CAPACITY_SYMBOL, 512],
     },
   },
 };
@@ -243,6 +259,7 @@ const PRESENT: Record<Model, boolean> = {
   e2b: mirrorHasModel(MIRROR, "e2b"),
   e4b: mirrorHasModel(MIRROR, "e4b"),
   "12b": mirrorHasModel(MIRROR, "12b"),
+  "26b": mirrorHasModel(MIRROR, "26b"),
 };
 if (MODELS.some((model) => !PRESENT[model])) {
   console.warn(
@@ -312,6 +329,10 @@ for (const model of MODELS) {
       if (model === "12b") {
         assertEquals(config.chatDialect, "gemma4-unified", "12B's chat dialect");
         assertEquals(config.suppressTokens, [258882, 258883], "12B's suppressed ids");
+      } else if (model === "26b") {
+        // 12B's chat template (ADR 0145 decision 5); 26B's generation defaults suppress no id.
+        assertEquals(config.chatDialect, "gemma4-unified", "26B's chat dialect");
+        assertEquals(config.suppressTokens, undefined, "26B's suppressed ids");
       } else {
         assertEquals(config.chatDialect, undefined, `${model}: chat dialect`);
         assertEquals(config.suppressTokens, undefined, `${model}: suppressed ids`);
@@ -391,7 +412,7 @@ const assertSpeculativeTurn = async (opened: Pipeline, label: string): Promise<v
   );
 };
 
-for (const model of MODELS) {
+for (const model of RESIDENT_MODELS) {
   describe.skipIf(!PRESENT[model] || !GPU_AVAILABLE)(
     `gemma4-qat ${model}: a speculative greedy chat turn equals the plain one (real GPU)`,
     () => {
@@ -536,7 +557,7 @@ const greedyChain = async (
   return ids;
 };
 
-for (const model of MODELS) {
+for (const model of RESIDENT_MODELS) {
   const root = goldenDir(SHAPES[model].product);
   const record = new URL(REFERENCE_FILE, root);
   const cases = isFile(record) ? boundCases(root) : [];
@@ -627,7 +648,7 @@ const f32Of = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   return tensor.data;
 };
 
-for (const model of MODELS) {
+for (const model of RESIDENT_MODELS) {
   const root = goldenDir(`gemma4-${model}-qat-drafter`);
   const files = DRAFTER_CASES.map(
     (name) => new URL(`${DRAFTER_GOLDEN_PREFIX}${name}${SUFFIX}`, root),

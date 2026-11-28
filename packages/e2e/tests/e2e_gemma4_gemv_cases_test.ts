@@ -187,6 +187,7 @@ const INTEGER_LINEARS: Readonly<Record<string, number>> = {
   "karume-gemma4-qat 12b drafter i4": 68,
   // 26B's 60 routed experts are `expert_linear`, not `linear`.
   "karume-gemma4-qat 26b model i4": 236,
+  "karume-gemma4-qat 26b drafter i4": 68,
   // One more linear per token is the f32 per_layer_model_projection.
   "karume-gemma4-qat-mobile e2b model i4": 276,
   "karume-gemma4-qat-mobile e4b model i4": 343,
@@ -215,13 +216,6 @@ const CASES_WITHOUT_A_GRAPH: Readonly<Record<string, string>> = {
     "profile still holds this shape's parallel row, and every row of the profile has a case",
   "i8-n262144-k2560":
     "the regular E4B's int8 output head: as E2B's — the default profile still holds its parallel row",
-  // The two entries below go when the mirror holds 26b/drafter (the case then has a graph, and this
-  // list fails until they are removed).
-  "i4g32-n1024-k5632":
-    "26B A4B's QAT MTP drafter's pre_projection: the recipe ships the drafter, and the published " +
-    "karume-gemma4-qat holds 26B without it until its next upload",
-  "i4g32-n2816-k1024":
-    "26B A4B's QAT MTP drafter's post_projection: as its pre_projection, not in the published mirror yet",
 };
 
 /**
@@ -359,6 +353,13 @@ const SEQUENTIAL_AT_REORDER: Readonly<Record<string, readonly string[]>> = {
     "i4 g32 4096×1024 ×9",
     "i4 g32 8192×1024 ×27",
     "i4 g32 3840×1024 ×2",
+    "i4 g32 262144×1024 ×3",
+  ],
+  "karume-gemma4-qat 26b drafter i4": [
+    "i4 g32 1024×5632 ×3",
+    "i4 g32 4096×1024 ×9",
+    "i4 g32 8192×1024 ×27",
+    "i4 g32 2816×1024 ×2",
     "i4 g32 262144×1024 ×3",
   ],
   "karume-gemma4-qat-mobile e2b model i4": ["i2 262144×1536 ×1"],

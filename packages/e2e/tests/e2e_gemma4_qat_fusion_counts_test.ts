@@ -1,6 +1,6 @@
 /**
- * Fusion hit counts of the q4_0 QAT Gemma 4 distribution graphs — E2B, E4B and 12B with their
- * drafters, 12B's image embedder and 26B A4B (no GPU — `planFusions` on part 0 only; the shared
+ * Fusion hit counts of the q4_0 QAT Gemma 4 distribution graphs — E2B, E4B, 12B and 26B A4B with
+ * their drafters and 12B's image embedder (no GPU — `planFusions` on part 0 only; the shared
  * planning side and the rationale live in `./helpers/fusion-counts.ts`). The regular Gemma 4 graphs
  * have their own gate in `e2e_gemma4_fusion_counts_test.ts`, the mobile QAT line its own in
  * `e2e_gemma4_qat_mobile_fusion_counts_test.ts`.
@@ -43,8 +43,8 @@ const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
  * - **RoPE**: q of every layer and k of every layer that owns its cache — E2B 35 + 15, E4B 42 + 24,
  *   12B 48 + 48, 26B 30 + 30; each drafter graph 12.
  * - **RMS→add**: the rule accepts only the measured last dimensions (256, 1,536, 2,560, 2,816 and
- *   3,840). 12B's drafter has 24 `rms_norm → add` pairs, at the width 1,024 of its blocks, so it
- *   takes none (E2B's and E4B's drafters have theirs at 256: 24).
+ *   3,840). 12B's and 26B's drafters have 24 `rms_norm → add` pairs each, at the width 1,024 of
+ *   their blocks, so they take none (E2B's and E4B's drafters have theirs at 256: 24).
  * - The q4_0 QAT graphs carry no static-quantize node, so the linear→SRQ fusion and the gelu_tanh →
  *   mul → SRQ fold find nothing, the parallel GEMV of `i4-fast` included.
  * - 12B's image embedder (10 nodes: three `layer_norm`, two `linear`, two `embedding`, two `add`
@@ -59,10 +59,11 @@ const DECODE_FUSIONS = [
   ["12b", "model", "i4", { rope: 96, rmsNormAdd: 96 }],
   ["12b", "drafter", "i4", { rope: 12 }],
   ["26b", "model", "i4", { rope: 60, rmsNormAdd: 90 }],
+  ["26b", "drafter", "i4", { rope: 12 }],
 ] as const satisfies readonly (readonly [string, string, string, Partial<FusionCounts>])[];
 
 test.skipIf(!AVAILABLE)(
-  "the real q4_0 QAT graphs plan the same fusions at i4 and i4-fast (E2B, E4B and 12B with their drafters, 26B; nothing in 12B's image embedder)",
+  "the real q4_0 QAT graphs plan the same fusions at i4 and i4-fast (E2B, E4B, 12B and 26B with their drafters; nothing in 12B's image embedder)",
   async () => {
     const text = await readTextFile(new URL("karume.json", GEMMA4_QAT_MIRROR));
     const manifest: ContainerManifest = JSON.parse(text);
@@ -74,7 +75,7 @@ test.skipIf(!AVAILABLE)(
         ["e2b", ["model", "drafter"]],
         ["e4b", ["model", "drafter"]],
         ["12b", ["model", "drafter", "vision"]],
-        ["26b", ["model"]],
+        ["26b", ["model", "drafter"]],
       ],
       "the graphs planned",
     );
