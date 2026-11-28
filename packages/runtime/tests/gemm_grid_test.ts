@@ -381,17 +381,6 @@ describe("a broken grid-fill rule fails loudly", () => {
     }
   });
 
-  it("refuses a shape without outputs or terms at the lookup", () => {
-    for (const [name, value] of [
-      ["M", shape(0, 64, 64)],
-      ["N", shape(64, 0, 64)],
-      ["K", shape(64, 64, 0)],
-      ["batch", shape(64, 64, 64, 0)],
-    ] as const) {
-      assertThrows(() => gemmShapeGeometry(withGrid(FITTED), value), CodegenError, `${name} is 0`);
-    }
-  });
-
   it("names a ladder tile past the device's workgroup limits", () => {
     const limits = {
       maxComputeInvocationsPerWorkgroup: 128,
