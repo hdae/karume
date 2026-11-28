@@ -504,4 +504,74 @@ describe("the plan of what the records lack (planGemvMeasurements)", () => {
       [1, 4, 8],
     );
   });
+
+  /** A steady record that times PLE at M = 1 alone, staged-l8 ×1.3 the default's choice there. */
+  const steadyAtOne = () =>
+    record("s.json", [{ caseId: PLE, times: { 1: { "staged-l8": faster(1.3) } } }]);
+  /** A record of a few groups, no padding: no class (a batch step's record). */
+  const small = (path: string, specs: readonly GemvCaseSpec[]) =>
+    record(path, specs, { groups: 0 });
+  const ofCase = <Entry extends { readonly caseId: string }>(
+    entries: readonly Entry[],
+    id: string,
+  ) => entries.filter(({ caseId }) => caseId === id);
+
+  it("does not count records of no class toward a decision of the rule of one steady record, and says only a steady record fills it (fault: two classless records of PLE at M = 4 and 8 counted as enough)", () => {
+    const inputs = [
+      steadyAtOne(),
+      small("u1.json", [{ caseId: PLE, rows: [1, 4, 8] }]),
+      small("u22.json", [{ caseId: PLE, rows: [1, 4, 8] }]),
+    ];
+    const planning = planGemvMeasurements(inputs, { table: TABLE });
+    assertEquals(ofCase(planning.missing, PLE), []);
+    assertEquals(
+      ofCase(planning.missingSteady, PLE).map(({ m }) => m),
+      [4, 8],
+    );
+    // The derivation agrees: a steady record timed PLE at M = 1, so the steady records decide
+    const parallel = parallelOf(derive(inputs));
+    assertEquals([parallel.path, parallel.outcome], ["one-record", "kept"]);
+    assertStringIncludes(parallel.reason ?? "", "staged-l8 has no time at M=4 in s.json");
+  });
+
+  it("leaves after its batch has run exactly what it said only a steady record fills", () => {
+    // A case beside the steady record's own (PLE and its padding), of another sequential key
+    const other = GEMV_CASES.at(-1);
+    assert(other !== undefined);
+    const steady = steadyAtOne();
+    const before = [steady, small("u1.json", [{ caseId: other.id }])];
+    const steadyCases = new Set(
+      planGemvMeasurements([steady], { table: TABLE }).missingSteady.map(({ caseId }) => caseId),
+    );
+    assert(!steadyCases.has(other.id));
+    const planned = planGemvMeasurements(before, { table: TABLE });
+    const rows = ofCase(planned.missing, other.id).map(({ m }) => m);
+    assert(rows.includes(1), `the plan lists ${other.id} at M=${rows.join(", ")}`);
+    assertEquals(
+      ofCase(planned.missingSteady, PLE).map(({ m }) => m),
+      [4, 8],
+    );
+    // The batch runs: its steps' records, twice (the steps measure more candidates than they name)
+    const after = [
+      ...before,
+      small("p333.json", [{ caseId: other.id, rows }]),
+      small("p4444.json", [{ caseId: other.id, rows }]),
+    ];
+    const replanned = planGemvMeasurements(after, { table: TABLE });
+    assertEquals(ofCase(replanned.missing, other.id), []);
+    assertEquals(replanned.missingSteady, planned.missingSteady);
+    const derivation = derive(after);
+    for (const field of ["sequential.shapes", "parallelShapes"] as const) {
+      const decision = decisionOf(derivation, field, other.id);
+      assertEquals(decision.path, "two-record");
+      assert(
+        !(decision.reason ?? "").includes("so the table's choice stays"),
+        `${field}: ${decision.reason ?? ""}`,
+      );
+    }
+    assertStringIncludes(
+      parallelOf(derivation).reason ?? "",
+      "staged-l8 has no time at M=4 in s.json",
+    );
+  });
 });

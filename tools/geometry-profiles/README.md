@@ -68,12 +68,14 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   the GEMV decisions shape by shape (the default's choice, the derived one, the gains per record, or why it was kept)
   and a line that says whether the table would carry the field; `linearGemv` is compared as each table runs with it.
 - `--gemv-plan` derives nothing. From the GEMV records given (none: nothing at hand) it prints, per case and row
-  count of the `full` set, how many candidates the derivation would still miss — those fewer than two records could be
-  evidence for ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)) — and
+  count of the `full` set, how many candidates the derivation would still miss by the rule it takes for each decision
+  ([the spec](../../docs/spec/geometry-profiles.md#planning-the-gemv-measurements)), and
   writes `inputs/workbench/batches/gemv-plan-<profile id>.json` (outside git; the workbench lists it as an untracked
-  batch): `gemv-sweep` steps of the `full` set narrowed to the cases, row counts and candidates that miss the same,
-  run twice. With no record at hand the batch is the whole `full` set, twice; with nothing missing no batch is
-  written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
+  batch) for those of the rule of two records: `gemv-sweep` steps of the `full` set narrowed to the cases, row
+  counts and candidates that miss the same, run twice. What only a steady record fills (a decision of the rule of one
+  steady record: a steady record timed the case at M = 1) is listed apart and is in no step — a step's record of a few
+  groups has no class —: a steady run of the `full` or the `explore` set fills it. With no record at hand the batch
+  is the whole `full` set, twice; with nothing for the batch no batch is written. `--dry-run` prints the batch instead. The derivation's other options beside it are usage errors.
 - Exit code 0 on success, 2 for a command line it cannot act on, 1 for anything else (the derivation's message on
   stderr, unchanged).
 

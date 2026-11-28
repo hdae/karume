@@ -122,6 +122,46 @@ describe("the plan of what the GEMV records lack", () => {
     assertEquals(planSteps(plan.missing), steps.slice(0, pass));
   });
 
+  it("keeps out of the batch what only a steady record fills, and lists it apart (fault: PLE at M = 4 and 8 counted as filled by the two records of no class)", () => {
+    // A steady record of PLE and 19 more cases at M = 1 (passes of 100 ms): PLE's decisions are the
+    // rule of one steady record's, which reads no record of no class
+    const STEADY = "outputs/workbench/node-test-gpu/gemv-sweep_steady.json";
+    const padding = gemvSweepCases()
+      .filter(({ id }) => id !== PLE)
+      .slice(0, 19)
+      .map(({ id }) => ({ caseId: id }));
+    writeFileSync(
+      join(root, STEADY),
+      bytesOf(
+        workbenchRecord(
+          "gemv-sweep",
+          gemvRecord("2026-11-17T10:00:00.000Z", [{ caseId: PLE }, ...padding], {
+            passes: { reps: 100_000 },
+          }),
+        ),
+      ),
+    );
+    const plan = gemvPlan({
+      profileId: "test-gpu",
+      records: [loaded(STEADY), loaded(GEMV_A), loaded(GEMV_B)],
+    });
+    assertEquals(
+      plan.missing.filter(({ caseId }) => caseId === PLE),
+      [],
+    );
+    assertEquals(
+      plan.missingSteady.filter(({ caseId }) => caseId === PLE).map(({ m }) => m),
+      [4, 8],
+    );
+    assertEquals(
+      plan.batch?.steps.some(({ parameters }) => parameters.cases?.includes(PLE)),
+      false,
+    );
+    const text = plan.lines.join("\n");
+    assertStringIncludes(text, "Only a steady record fills");
+    assertStringIncludes(text, `  - ${PLE} M=4: `);
+  });
+
   it("is written by the command as a batch the workbench's batch reader accepts, each step measuring the cases, row counts and candidates it names", async () => {
     const code = await main(
       ["test-gpu", "--gemv-plan", `--gemv-records=${GEMV_A},${GEMV_B}`],

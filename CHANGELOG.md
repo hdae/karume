@@ -96,7 +96,9 @@ measurements in `docs/research/`.
   gaps, check and break-even margin, and its row's kernels under each row block), and
   `redecideLinearGemvChoices(derivation, margin)` decides it again under another margin from the output alone and
   lists what changes; `decideOneRecord` is the rule itself. The result's `rule` names every number of both rules, and
-  a record's provenance its class. `planGemvMeasurements` takes one steady record as enough. The generator's header
+  a record's provenance its class. `planGemvMeasurements` counts by the rule the derivation
+  takes for each decision: where a steady record timed the case at M = 1 only a steady record fills a gap
+  (`missingSteady`, which the generator's `--gemv-plan` lists apart and puts in no batch step), elsewhere two records. The generator's header
   states both rules. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
   and, under the new rule, `tableChoice` and `evidence`.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record

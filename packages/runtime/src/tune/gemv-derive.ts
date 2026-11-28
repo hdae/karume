@@ -1825,9 +1825,12 @@ type DerivationContext = {
   readonly margin: number;
 };
 
-/** Whether a steady record measured a case at M = 1 with a usable reference for the class. */
+/**
+ * Whether a steady record measured a case at M = 1 with a usable reference for the class: then the
+ * case's decision of that class is the rule of one steady record's, in the derivation and in the plan.
+ */
 const measuredBySteady = (
-  context: DerivationContext,
+  context: Pick<DerivationContext, "steady">,
   gemvCase: GemvCase,
   candidateClass: GemvCandidateClass,
 ): boolean =>
@@ -2921,8 +2924,19 @@ export type GemvMeasurementPlanning = {
   readonly gates: GemvGates;
   /** The (case, row count) pairs of the `full` set the plan read. */
   readonly groups: number;
-  /** In the case table's order, then by row count. */
+  /**
+   * What records of any class fill (the decisions of the rule of two records: two records needed),
+   * in the case table's order, then by row count — what a batch of narrowed steps measures.
+   */
   readonly missing: readonly GemvMissingMeasurement[];
+  /**
+   * What only a steady record fills, in the same order: the candidates of decisions that the rule of
+   * one steady record takes (a steady record timed the case at M = 1) and that no steady record is
+   * evidence for. A narrowed step's record of a few groups has no class, so no batch step fills
+   * these: a steady record that times the named kernels does (a run of the `full` or the `explore`
+   * set on the device).
+   */
+  readonly missingSteady: readonly GemvMissingMeasurement[];
   /** The groups of the records that are not current. */
   readonly stale: readonly LinearGemvStaleGroup[];
 };
@@ -2937,9 +2951,14 @@ export type PlanGemvMeasurementsOptions = {
  * What the records lack for {@link deriveLinearGemvChoices} to be complete under the current
  * runtime: per case and row count of the `full` set, the candidates the derivation reads there (the
  * `winner` and `no-regression` roles of gemv-candidates.ts's `gemvGroupRole`, on the records' gates)
- * that no steady record (the rule of one steady record: a usable reference in its group) and fewer
- * than two records (the rule of two records: a current group whose reference for the candidate's
- * class is usable and whose time is repeated) could be evidence for, with a current
+ * that the records could not be evidence for by the rule the derivation will take for the
+ * candidate's decision. Where a steady record timed the case at M = 1 with a usable reference for
+ * the class (the identical class: a case of its sequential key), the decision is the rule of one
+ * steady record's, which reads the steady records alone: a candidate no steady record could be
+ * evidence for (a usable reference in its group) is in `missingSteady`, and records of no class
+ * cannot fill it. Elsewhere the rule of two records decides: a candidate fewer than two records
+ * could be evidence for (a current group whose reference for the candidate's class is usable and
+ * whose time is repeated) is in `missing`. Either way it is a current
  * row of the candidate — timed, screened out by the quick look (a screened row is a current look
  * that the candidate did not come near enough to matter; measuring it again would screen it again),
  * or skipped because the record's M = 1 group of the case already left it unadoptable
@@ -2976,7 +2995,23 @@ export const planGemvMeasurements = (
   const table = options.table ?? selectGeometryProfile(first.adapter);
   const kernelsOf = currentKernels(table);
   const records = labelled(sources, kernelsOf, table.id);
+  const steady = { steady: records.filter(({ source }) => readsSteady(source)) };
+  /**
+   * Whether the derivation decides a case's class by the rule of one steady record: the identical
+   * class by its sequential key (a steady record measured one of the key's cases at M = 1), the
+   * reorder class by its parallel row (the case itself) — as {@link deriveLinearGemvChoices} does.
+   */
+  const oneRecordPath = (gemvCase: GemvCase, candidateClass: GemvCandidateClass): boolean =>
+    candidateClass === "identical"
+      ? GEMV_CASES.some(
+          (other) =>
+            sequentialKey(other) === sequentialKey(gemvCase) &&
+            measuredBySteady(steady, other, "identical"),
+        )
+      : measuredBySteady(steady, gemvCase, "reorder");
+  const nameOf = ({ name }: { readonly name: string }): string => name;
   const missing: GemvMissingMeasurement[] = [];
+  const missingSteady: GemvMissingMeasurement[] = [];
   let groups = 0;
   for (const gemvCase of GEMV_CASES) {
     for (const m of gemvRowCountsIn(gemvCase, "full")) {
@@ -3022,15 +3057,25 @@ export const planGemvMeasurements = (
             rowStaleness(row, state.kernels) === undefined
           );
         }).length;
-      // One steady record is enough; otherwise two records
-      const lacking = read
-        .filter(
-          (candidate) =>
-            covering(candidate, true) === 0 && covering(candidate, false) < MIN_RECORDS,
-        )
-        .map(({ name }) => name);
-      if (lacking.length > 0) missing.push({ caseId: gemvCase.id, m, candidates: lacking });
+      // By the rule the derivation will take for the candidate's decision: where a steady record
+      // timed the case at M = 1 only steady records count, and only one fills the gap
+      const lacking = read.filter((candidate) =>
+        oneRecordPath(gemvCase, candidate.class)
+          ? covering(candidate, true) === 0
+          : covering(candidate, false) < MIN_RECORDS,
+      );
+      const add = (to: GemvMissingMeasurement[], names: readonly string[]): void => {
+        if (names.length > 0) to.push({ caseId: gemvCase.id, m, candidates: names });
+      };
+      add(
+        missing,
+        lacking.filter((candidate) => !oneRecordPath(gemvCase, candidate.class)).map(nameOf),
+      );
+      add(
+        missingSteady,
+        lacking.filter((candidate) => oneRecordPath(gemvCase, candidate.class)).map(nameOf),
+      );
     }
   }
-  return { gates, groups, missing, stale: staleGroups(records) };
+  return { gates, groups, missing, missingSteady, stale: staleGroups(records) };
 };

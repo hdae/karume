@@ -600,10 +600,14 @@ measures nothing and changes no default value.
 for the derivation to be complete under the current runtime (the GEMM baselines read against the table given, or,
 without one, against the embedded table the records' adapter selects): per case and row count of the `full` set, the
 candidates the derivation reads there — at M = 1 every candidate, at M = 4 and 8 the reorder class, on the records'
-gates (subgroups, grid limit; records whose gates differ are refused) — that no steady record and fewer than two
-records could be evidence for: a current group, usable for the candidate's class — in a steady record (the rule of one
-steady record) by its own reference row, otherwise whose reference's time is repeated —, with a current row of the
-candidate. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
+gates (subgroups, grid limit; records whose gates differ are refused) — that the records could not be evidence for
+by the rule the derivation will take for the candidate's decision. Where a steady record measured the case at M = 1
+with a usable reference for the class (the identical class: a case of its sequential key), the decision is the rule
+of one steady record's, which reads the steady records alone: a candidate no steady record could be evidence for — a
+current group of a steady record, usable for its class by its own reference row, with a current row of the
+candidate — is listed in `missingSteady`, and records of no class do not fill it. Elsewhere the rule of two records
+decides, and a candidate fewer than two records could be evidence for — a current group whose reference's time is
+repeated, with a current row of the candidate — is listed in `missing`. A row the quick look screened out counts as looked at (measured again, it would be screened again), and so
 does a row the sweep skipped at M = 4 or 8 (a run that measures the case's M = 1 again would skip it again); a row
 that failed does not. Of an `explore` record only the rows it timed count: that set carries fewer candidates from
 M = 1 than a run of the `full` set, which would measure a row it skipped, and screens at ×1.10 where the `full` set
@@ -616,13 +620,16 @@ reference's fastest time is not repeated, every candidate read against it at tha
 the step that measures them measures the reference again. A candidate whose reference is a choice the sweep does not
 measure (a row with packed activations) is not listed: no measurement makes it evidence.
 
-The generator writes the plan as a workbench batch ([workbench.md](workbench.md#batches)),
+The generator writes the plan of `missing` as a workbench batch ([workbench.md](workbench.md#batches)),
 `inputs/workbench/batches/gemv-plan-<profile id>.json`: per list of missing candidates one `gemv-sweep` step of the
 `full` set, its `cases` the cases that miss that list at the same row counts, `rows` those row counts, `candidates`
 the list; the steps run twice: a step narrowed to a few cases makes a record of a few groups, and one of fewer than
-20 has no class, so it is evidence only beside a second, even on a steady device. With no record at hand the batch
-is the whole measurement: the `full` set, twice (one such record of a steady device would be enough). With nothing
-missing no batch is written.
+20 has no class, so it is evidence only beside a second, even on a steady device. For the same reason no step fills
+`missingSteady`: the generator lists it apart, per case and row count, as what a steady record that times the named
+kernels fills (a run of the `full` or the `explore` set on the device). So after the batch has run, what the
+derivation still lacks is what `missingSteady` named. With no record at hand the batch is the whole measurement: the
+`full` set, twice (one such record of a steady device would be enough). With nothing in `missing` no batch is
+written.
 
 ## The command
 
