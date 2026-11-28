@@ -177,6 +177,7 @@ The level-2 sections come in this order:
   | `karume-lucida` | `egeorcun/lucida` | what the model is ("What is this"), its training data, what the variant left out is for |
   | `karume-depth-anything-v2` | `depth-anything/Depth-Anything-V2-Small-hf` | how Depth Anything V2 was trained |
   | `karume-embeddinggemma-2` | `google/embeddinggemma-2` | the numerical precision to run it in, the use policy |
+  | `karume-gemma4-qat` | `google/gemma-4-E2B-it-qat-q4_0-unquantized` (the default model's; the same note opens every QAT card of the line) | what the unquantized QAT checkpoints are, and that a QAT target's assistant is a QAT checkpoint of the same precision |
   | `karume-irodori-v4-small`, `karume-irodori-v4.1-small` | `Aratako/Semantic-DACVAE-Japanese-32dim` | where the codec comes from |
   | `karume-irodori-v4.1-small-mf` | `Aratako/Irodori-TTS-v4.1-Small-MF`, the codec's card | how it was distilled, where the codec comes from |
   | `karume-irodori-v4-large` | `Aratako/Irodori-TTS-v4-Large`, the codec's card | the Gemma terms and the ethical restrictions, where the codec comes from |

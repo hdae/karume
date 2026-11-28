@@ -24,6 +24,7 @@ from container_series import write_component
 from _shared.container_read import read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from _shared.upstream import GEMMA_LICENSE_PAGE
+from gemma4 import card as gemma4_card
 from gemma4 import distribution as gemma4_distribution
 from gemma4.card import (
     GEMMA4_QAT_DRAFTER_UPSTREAM,
@@ -1081,6 +1082,61 @@ class TestQatCard:
 
         with pytest.raises(ValueError, match="'unlisted'"):
             render_gemma4_qat_q4_0_model_card(renamed, "hdae/karume-gemma4-qat")
+
+
+class TestQatQuotations:
+    """docs/spec/distribution-cards.md#what-the-upstream-says — what the QAT checkpoints and their
+    drafters are, in the words of Google's QAT cards."""
+
+    def test_the_card_quotes_what_the_checkpoints_and_the_drafters_are(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        attribution = card.split("## Base weights and attribution")[1].split("\n## ")[0]
+
+        for quote in gemma4_card.UPSTREAM_QUOTES:
+            assert f"({quote.source}) states:\n\n  > {quote.paragraphs[0]}\n" in attribution
+        # Each statement stands after what it is about: the model bullets, then the drafters'.
+        assert attribution.index("**The QAT checkpoints**") < attribution.index("drafter**:")
+        assert attribution.rindex("drafter**:") < attribution.index("**The QAT drafters**")
+
+    def test_every_card_of_the_line_carries_the_quoted_note_at_its_pin(self) -> None:
+        """The card quotes the default model's QAT card for every model it carries, so the note
+        stands in every QAT card of the line, weights' and drafters', at the commit pinned (read
+        from the hub cache where the snapshot is on the machine)."""
+        constants = pytest.importorskip("huggingface_hub.constants")
+        pins = [
+            *(pins.weights for pins in QAT_LINE_PINS.values()),
+            *QAT_DRAFTER_PINS.values(),
+        ]
+        read = 0
+        for pin in pins:
+            readme = (
+                Path(constants.HF_HUB_CACHE)
+                / f"models--{pin.repo.replace('/', '--')}"
+                / "snapshots"
+                / pin.revision
+                / "README.md"
+            )
+            if not readme.is_file():
+                continue
+            text = " ".join(readme.read_text(encoding="utf-8").split())
+            for quote in gemma4_card.UPSTREAM_QUOTES:
+                assert quote.paragraphs[0] in text, pin.repo
+            read += 1
+        if read == 0:
+            pytest.skip("no Gemma 4 QAT card is in the hub cache on this machine")
+
+    def test_a_quotation_of_another_commit_than_the_pin_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, manifest = _assemble(tmp_path, ("e2b",))
+        moved = tuple(replace(quote, revision="0" * 40) for quote in gemma4_card.UPSTREAM_QUOTES)
+        monkeypatch.setattr(gemma4_card, "UPSTREAM_QUOTES", moved)
+
+        with pytest.raises(ValueError, match="not at its pin"):
+            render_gemma4_qat_q4_0_model_card(manifest, "hdae/karume-gemma4-qat")
 
 
 class TestQatLegalText:

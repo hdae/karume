@@ -77,6 +77,18 @@ the regular line (`hdae/karume-gemma4`), and `models/karume-gemma4-qat`, the q4_
 verbatim Apache 2.0 text is vendored once for every family that
 needs it as `../_shared/licenses/apache_license_2_0.txt` and shipped as each distribution's
 `LICENSE.md`, alongside a `NOTICE.md` that lists the modifications required by Apache 2.0 §4(b).
+- **Quoted model-card text** — `card.py` (`UPSTREAM_QUOTES`) quotes these statements of the
+  upstream cards verbatim on the model card of `karume-gemma4-qat`, each linked to the quoted
+  `README.md` at its commit: they are the upstream's own and cannot be measured from the weights
+  (the maintainer's ruling of 2026-11-27). `tests/test_dist_driver.py` checks each against a local
+  copy of that card where one is present. Read on 2026-11-28. `karume-gemma4` quotes no card.
+  - `google/gemma-4-E2B-it-qat-q4_0-unquantized` at `6befbaca7398925921802abd1f277b495b78b738` —
+    from the note that opens the card, before its first heading: what the unquantized QAT
+    checkpoints are ("Unquantized QAT checkpoints (Q4_0)"), and that a QAT target's assistant must
+    also be a QAT checkpoint of the same precision ("Assistant Compatibility"). The same note opens
+    the card of every QAT checkpoint and QAT drafter `sources.py` pins, at its pin (checked in the
+    HF cache on 2026-11-28; `tests/test_distribution_qat.py` repeats it), so the one quotation
+    stands for every model of the line. `NOTICE.md` repeats neither.
 
 ## Upstream inventory
 

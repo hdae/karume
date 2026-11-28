@@ -486,13 +486,16 @@ FRONT_MATTER_KEYS = (
     "tags",
 )
 
-#: The three Gemma 4 repositories, whose recipes change in a stage of their own: where a rule is not
-#: built for them yet, the spec names them as the exception.
-GEMMA4_REPOSITORIES = frozenset({"karume-gemma4", "karume-gemma4-qat", "karume-gemma4-qat-mobile"})
-
 #: The repositories whose `license_link` stands beside an SPDX `license`: the Gemma license page,
 #: as their upstream cards link it (docs/spec/distribution-cards.md#front-matter).
-GEMMA_LICENSE_LINK_REPOSITORIES = GEMMA4_REPOSITORIES | {"karume-embeddinggemma-2"}
+GEMMA_LICENSE_LINK_REPOSITORIES = frozenset(
+    {
+        "karume-gemma4",
+        "karume-gemma4-qat",
+        "karume-gemma4-qat-mobile",
+        "karume-embeddinggemma-2",
+    }
+)
 
 
 class TestTheFrontMatterOfEveryPublishedCard:
@@ -612,6 +615,7 @@ UPSTREAM_QUOTES: list[UpstreamQuote] = [
         "birefnet",
         "depth_anything",
         "embeddinggemma2",
+        "gemma4",
         "irodori",
         "moss",
         "sbv2",
@@ -711,8 +715,6 @@ class TestTheQuotationsOfUpstreamCards:
     def test_every_blockquote_of_a_card_is_a_registered_quotation(
         self, pipeline: str, models: list[str], directory: str
     ) -> None:
-        if directory in GEMMA4_REPOSITORIES:
-            pytest.skip("the Gemma 4 cards keep their wording until their stage")
         _, card = _published_card(pipeline, directory)
         registered = {paragraph for quote in UPSTREAM_QUOTES for paragraph in quote.paragraphs}
         quoted = [line.strip()[2:] for line in card.split("\n") if line.strip().startswith("> ")]
@@ -723,7 +725,6 @@ class TestTheQuotationsOfUpstreamCards:
         cards = [
             _published_card(pipeline, directory)[1]
             for pipeline, _, _, directory in RELEASE_REPOSITORIES
-            if directory not in GEMMA4_REPOSITORIES
         ]
         unwritten = [
             (quote.repo, quote.sections)

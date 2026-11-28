@@ -38,6 +38,7 @@ from karume.modelcard import (
     RUNTIME_SENTENCE,
     CardMetadata,
     FileRefKey,
+    UpstreamQuote,
     changes_made_here,
     default_model,
     from_pretrained,
@@ -49,6 +50,7 @@ from karume.modelcard import (
     models,
     pinned,
     quants,
+    quotation,
     render,
     require_pipeline,
     upstream_cards,
@@ -682,6 +684,47 @@ def render_gemma4_model_card(
 GEMMA4_QAT_Q4_0_TITLE = "Gemma 4 q4_0 QAT Text Decoder — Karume"
 
 
+#: The model whose QAT checkpoint's card the line's card quotes on what the QAT checkpoints and
+#: their drafters are ({@link UPSTREAM_QUOTES}): the line's default model. Every Gemma 4 QAT card
+#: of the line, the drafters' included, opens with the same note at its pin (read 2026-11-28), so
+#: the quotation holds for every model the card carries.
+GEMMA4_QAT_QUOTED_MODEL = "e2b"
+
+#: What the QAT checkpoints are, in the words of the note that opens their card (before its first
+#: heading): the source of the line's weights.
+GEMMA4_QAT_CHECKPOINTS_QUOTE = UpstreamQuote(
+    repo=GEMMA4_QAT_WEIGHTS_UPSTREAM[GEMMA4_QAT_QUOTED_MODEL],
+    revision="6befbaca7398925921802abd1f277b495b78b738",
+    sections=(),
+    paragraphs=(
+        "**Unquantized QAT checkpoints** (Q4_0): Half-precision weights extracted from the QAT"
+        " pipeline, ideal for custom downstream compilation and research. Available for Gemma 4"
+        " E2B, E4B, 12B, 26B A4B, and 31B, and their drafter models.",
+    ),
+)
+
+#: Why the line ships Google's QAT drafters and not the regular ones (the same note):
+#: {@link GEMMA4_QAT_DRAFTER_UPSTREAM}.
+GEMMA4_QAT_ASSISTANT_QUOTE = UpstreamQuote(
+    repo=GEMMA4_QAT_CHECKPOINTS_QUOTE.repo,
+    revision=GEMMA4_QAT_CHECKPOINTS_QUOTE.revision,
+    sections=(),
+    paragraphs=(
+        "**Assistant Compatibility**: When using multi-token prediction (speculative decoding)"
+        " with an assistant model alongside a QAT target model, the assistant model must also be"
+        " a QAT checkpoint with the same precision to ensure compatibility.",
+    ),
+)
+
+#: Every quotation of an upstream card the Gemma 4 cards write (checked against the cached card by
+#: `tests/test_dist_driver.py`). The regular and mobile cards quote none: what they state of their
+#: upstreams is the recipe's own measurement or the card's machine-read front matter.
+UPSTREAM_QUOTES: tuple[UpstreamQuote, ...] = (
+    GEMMA4_QAT_CHECKPOINTS_QUOTE,
+    GEMMA4_QAT_ASSISTANT_QUOTE,
+)
+
+
 #: The models the long-context section reports on ({@link _qat_q4_0_long_context}).
 GEMMA4_QAT_Q4_0_LONG_CONTEXT_MODELS: frozenset[str] = frozenset({"e2b", "12b"})
 
@@ -791,6 +834,12 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
     weights_pins = {model: pins.weights for model, pins in QAT_LINE_PINS.items()}
     base_pins = {model: pins.tokenizer for model, pins in QAT_LINE_PINS.items()}
+    # MUST: the quoted card is the pinned one — a quotation of another commit would cite words the
+    # checkpoint the card pins may not carry.
+    quoted = weights_pins[GEMMA4_QAT_QUOTED_MODEL]
+    for quote in UPSTREAM_QUOTES:
+        if (quote.repo, quote.revision) != (quoted.repo, quoted.revision):
+            raise ValueError(f"{quote.repo} is quoted at {quote.revision}, not at its pin {quoted}")
     lines = [
         "## Base weights and attribution",
         "",
@@ -807,6 +856,12 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" generation defaults; both are licensed **{GEMMA4_LICENSE}**"
             f" {APACHE_LICENSE_REFERENCE}."
         )
+    lines += quotation(
+        GEMMA4_QAT_CHECKPOINTS_QUOTE,
+        f"- **The QAT checkpoints**: the upstream model card of the `{GEMMA4_QAT_QUOTED_MODEL}`"
+        " weights",
+        indent="  ",
+    )
     drafters = _qat_q4_0_drafters(manifest)
     for name, drafter in drafters:
         lines.append(
@@ -816,6 +871,12 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " It reads the key/value states and the embedding table of the main model rather than"
             " carrying its own, and runs its output head over the full vocabulary (a clustered"
             " sparse head an assistant checkpoint carries is not used)."
+        )
+    if drafters:
+        lines += quotation(
+            GEMMA4_QAT_ASSISTANT_QUOTE,
+            "- **The QAT drafters**: the same upstream model card",
+            indent="  ",
         )
     carriers = [name for name in manifest["models"] if name in GEMMA4_PLE_MODELS]
     ple = (
