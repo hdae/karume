@@ -63,7 +63,7 @@ import {
 } from "../ops.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
 import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
-import { type LinearProgram, linearProgramFor } from "./linear-program.ts";
+import { type LinearProgram, linearChoiceHoldsTemps, linearProgramFor } from "./linear-program.ts";
 import { linearKnobsOf, resolveLinearStrategy } from "./linear-strategies.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
@@ -1534,6 +1534,9 @@ type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
  * private split-K key) and the storage and i4 group length of the weight slot from the residency
  * plan (`plannedResidentWeights`). Its temporaries are the linear's node temporaries: the i8a8
  * path's quantized activations and scales, the split-K GEMM's partial sums.
+ * MUST: built only for a strategy whose program holds temporaries (`linearChoiceHoldsTemps`) — the
+ * estimate reads nothing else of it, so a single-dispatch linear is counted as a plain one without
+ * its program, and the estimate does not take on that program's refusals.
  *
  * The pairing and the folded producer are not passed: the strategies they select need linearCompute
  * `"f32"` (and no temporaries), and a folded producer is declared only for a linear that is on the
@@ -1543,8 +1546,10 @@ type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
  * nowhere else), so it is read as not integer here. A linear the selection refuses (i2 residency
  * under `"a8"` or `"f16"`, i8 and i4 residency under `"f16"` — w8a16 / w4a16) has no program here
  * and is counted as a plain one: the estimate returns a number, and the Session fails at its first
- * run. A program execution refuses to build (an i8a8 per-channel weight whose `k` passes the i32
- * reduction guard) fails here with execution's message.
+ * run. A program with temporaries that execution refuses to build fails here with execution's class
+ * and message: an i8a8 per-channel weight whose `k` passes the i32 reduction guard
+ * (`ExecutionError`), a split-K linear whose `m · k`, `n · k` or partial sums pass u32
+ * (`CodegenError`).
  * NOTE: a borrowed weight (`seat: "shared"`) is absent from the plan — its storage is the lender's —
  * so its linear is counted as a plain one ({@link AdmissionReport.unaccounted}).
  */
@@ -1565,7 +1570,7 @@ const linearNodeProgram = (node: NodePlan, knobs: TransientKnobs): LinearProgram
     packed: undefined,
     prologue: undefined,
   });
-  if ("refusal" in resolution) return undefined;
+  if ("refusal" in resolution || !linearChoiceHoldsTemps(resolution.choice)) return undefined;
   const [x, weight] = node.inputShapes;
   return linearProgramFor(resolution.choice, {
     x,

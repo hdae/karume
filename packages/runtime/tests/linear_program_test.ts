@@ -39,6 +39,7 @@ import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import type { LinearPrologue } from "../src/runtime/fusion-rule.ts";
 import {
   type LinearProgram,
+  linearChoiceHoldsTemps,
   linearI8a8Geometry,
   linearProgramFor,
 } from "../src/runtime/linear-program.ts";
@@ -470,6 +471,17 @@ describe("linearProgramFor: one representative linear per strategy", () => {
       programsWithTemporaries,
       CASES.filter(({ id }) => id === "i8a8" || id === "gemm-splitk").length,
     );
+  });
+
+  it("says of each strategy whether its program holds temporaries, as the program it builds does (what the memory estimate builds a program for)", () => {
+    for (const testCase of CASES) {
+      const { choice } = choiceOf(testCase);
+      assertEquals(
+        linearChoiceHoldsTemps(choice),
+        programOf(testCase).temps.length > 0,
+        testCase.name,
+      );
+    }
   });
 
   it("names each dispatch by the key its kernel module gives for the linear's facts, and generates the same WGSL each time", () => {

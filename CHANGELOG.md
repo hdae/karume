@@ -96,8 +96,9 @@ measurements in `docs/research/`.
   the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change. The workbench's
   `kernel-check` entry runs a fifteenth check, `linear-splitk`.
 - `@karume/runtime`: the memory estimate counts a linear's node temporaries from the dispatch program execution
-  builds — the a8 linear's quantized activations and scales (the same numbers as before) and, under the private key,
-  the split-K linear's partial sums. An a8 linear on a per-channel int8 weight whose `k` passes the i32 reduction
+  builds, which it builds only for a linear that has such temporaries — the a8 linear's quantized activations and
+  scales (the same numbers as before) and, under the private key, the split-K linear's partial sums; every other
+  linear is counted as before. An a8 linear on a per-channel int8 weight whose `k` passes the i32 reduction
   guard now fails the estimate with execution's message, where the estimate returned a number and the Session failed
   at its first run.
 

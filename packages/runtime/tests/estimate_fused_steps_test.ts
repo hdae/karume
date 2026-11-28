@@ -22,7 +22,8 @@ import { planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { sessionFusionContext } from "../src/runtime/session-fusion-context.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
-import { openGraph } from "./helpers/estimate-graphs.ts";
+import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";
+import { openGraph, weight } from "./helpers/estimate-graphs.ts";
 import { fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
 import {
   a8LinearAfterDeadRegion,
@@ -32,7 +33,14 @@ import {
   geluMulGraph,
   splitKLinearCase,
 } from "./helpers/fused-window-graphs.ts";
-import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
+import { quantizeI8 } from "./helpers/i8.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 
 /** Desktop-class limits (no binding limit decides anything at these sizes). */
 const LIMITS = {
@@ -182,6 +190,83 @@ describe("the estimate counts the split-K linear's partial sums", () => {
     );
     // Without the key the linear is the reference GEMM: y alone.
     assertEquals(model.estimate({ ...LIMITS }).scenarios[0].workspaceBytes, 256);
+  });
+});
+
+describe("the estimate builds a linear's dispatch program only where it holds temporaries", () => {
+  /** One `linear(x, w, b)` with `x [m, k]`, `w [n, k]` (stored as `w`'s tensor says) and `b [n]`. */
+  const linearGraph = (m: number, n: number, k: number): DeclarationJson => ({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype: "f32", shape: [n, k] },
+      b: { dtype: "f32", shape: [n] },
+      y: { dtype: "f32", shape: [m, n] },
+    },
+    nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+  });
+  const bias = (n: number) => weight("b", f32Bytes(new Array(n).fill(0.5)));
+
+  it("a plain linear whose m · k passes u32: counted as the one GEMM dispatch, without the refusal of a program it does not read", () => {
+    // x [1,100,000, 4096] → w [64, 4096] f32: m · k = 4,505,600,000 passes u32, so building the
+    // GEMM's program would throw (`linearParams`); its program holds no temporary, so the estimate
+    // never builds it. y [1,100,000, 64] = 281,600,000 B is the workspace.
+    const [m, n, k] = [1_100_000, 64, 4096];
+    const model = openGraph(linearGraph(m, n, k), [
+      weight("w", f32Bytes(new Array(n * k).fill(0.1))),
+      bias(n),
+    ]);
+    assertEquals(
+      model.estimate({
+        ...LIMITS,
+        maxStorageBufferBindingSize: 2 ** 32 - 4,
+        maxBufferSize: 2 ** 36,
+      }).scenarios[0].workspaceBytes,
+      m * n * 4,
+    );
+  });
+
+  it("an a8 linear on a per-channel int8 weight whose k passes the i32 reduction guard: refused with execution's class and message", async () => {
+    // Its program holds the quantized activations and scales, so the estimate builds it and meets the
+    // refusal execution meets building the same program (on a fake GPU: the run fails there).
+    const [m, n, k] = [4, 4, LINEAR_I8A8_MAX_K + 4];
+    const graph = linearGraph(m, n, k);
+    const quantized = quantizeI8(fill([n, k], (i) => Math.sin(i * 0.61)).data, [n, k], 0);
+    const tensors = [
+      weight("w", quantized.bytes, {
+        codec: "int8-sym",
+        groupSize: k,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+      }),
+      bias(n),
+    ];
+    const message =
+      `linear i8a8 [${m},${k}] × [${n},${k}]: k=${k} exceeds the i32 reduction guard` +
+      ` ${LINEAR_I8A8_MAX_K} of the i8a8 path`;
+    const session = await createSessionFromContainer(
+      fakeRecipeGpuContext({
+        maxBufferSize: LIMITS.maxBufferSize,
+        maxStorageBufferBindingSize: LIMITS.maxStorageBufferBindingSize,
+      }),
+      await openModelBytes(graph, tensors),
+      GRAPH_NAME,
+      { linearCompute: "a8" },
+    );
+    await assertRejects(
+      async () => await session.run({ x: fill([m, k], (i) => Math.sin(i)) }),
+      ExecutionError,
+      message,
+    );
+    assertThrows(
+      () => openGraph(graph, tensors).estimate({ ...LIMITS, linearCompute: "a8" }),
+      ExecutionError,
+      message,
+    );
   });
 });
 

@@ -267,6 +267,35 @@ export const linearProgramFor = (
 };
 
 /**
+ * Whether each strategy's program holds temporaries ({@link LinearProgram.temps}): the i8a8 path's
+ * quantized activations and scales, the split-K GEMM's partial sums. Every other strategy is one
+ * dispatch into the output. Keyed by every id, so a new strategy is classified where it is added
+ * (tests/linear_program_test.ts holds each entry against the program it builds).
+ */
+const HOLDS_TEMPS: Readonly<Record<LinearChoice["id"], boolean>> = {
+  "integer-gemv": false,
+  i8a8: true,
+  "planes-gemv": false,
+  "gemm-splitk": true,
+  "gemm-f32": false,
+  "gemm-f16": false,
+  "gemv-m1": false,
+  "gemv-rows": false,
+  "gemv-parallel": false,
+  "gemv-parallel-packed": false,
+  "gemv-parallel-staged": false,
+  "gemv-parallel-subgroup32": false,
+};
+
+/**
+ * Whether the program {@link linearProgramFor} builds for `choice` holds temporaries. The memory
+ * estimate reads a program only for its temporaries, so it builds one only where this holds: it
+ * never builds a single-dispatch strategy's program, and so repeats none of that program's refusals
+ * (a plain linear whose `m · k` passes u32 gets a number).
+ */
+export const linearChoiceHoldsTemps = (choice: LinearChoice): boolean => HOLDS_TEMPS[choice.id];
+
+/**
  * The producer SRQ's scale of a strategy that reads packed activations. The selection takes such a
  * strategy only for a linear the pairing was declared for, so a missing pairing is a broken plan.
  */
