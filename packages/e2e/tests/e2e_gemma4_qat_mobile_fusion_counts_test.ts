@@ -1,6 +1,7 @@
 /**
- * Fusion hit counts of the Gemma 4 E2B QAT distribution graph (no GPU — `planFusions` on part 0
- * only; the shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`).
+ * Fusion hit counts of the Gemma 4 E2B and E4B mobile QAT distribution graphs (no GPU —
+ * `planFusions` on part 0 only; the shared planning side and the rationale live in
+ * `./helpers/fusion-counts.ts`).
  * The non-QAT Gemma 4 graphs have their own gate in `e2e_gemma4_fusion_counts_test.ts`.
  *
  * MUST: the asset is `models/karume-gemma4-qat-mobile/` (untracked local asset); where it is missing the
@@ -10,6 +11,8 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { parseManifest } from "@karume/hub";
+import { resolveGemmaSessionOptions } from "../../models/src/gemma/session-options.ts";
 import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/executor.ts";
 import {
   type ContainerManifest,
@@ -106,6 +109,58 @@ test.skipIf(!available)(
           `${family} packed SRQ M=${rows} fuse=${fuseSrq}`,
         );
       }
+    }
+  },
+);
+
+/**
+ * E4B, planned with the Session options each of its three presets resolves to (`i4` — the
+ * defaults; `i4-gemvpar` — the level `reorder`, which takes the parallel GEMV; `i4-fast` — the same
+ * with packed activations). The same folds as E2B's case above at E4B's sizes: RoPE 66 and RMS→add
+ * 127 at every M; one gelu_tanh → mul → SRQ fold per layer (42) and, on the parallel GEMV, 342
+ * linear→SRQ fusions and 84 packed SRQs, each in a decode or verification plan only (M ≤ 8). The
+ * packed count does not move with the linear→SRQ fusion (as on E2B).
+ */
+test.skipIf(!available)(
+  `the real ${family} E4B distribution plans RoPE 66 and RMS→add 127 on every preset, and the SRQ folds of its decode plans`,
+  async () => {
+    const text = await readTextFile(manifestUrl);
+    const manifest: ContainerManifest = JSON.parse(text);
+    const quants = parseManifest(text).models.e4b.quants;
+    const head = containerPart0(manifest, "e4b", "model", "i4");
+    if (head.repo !== undefined) {
+      throw new Error("the Gemma real-asset fusion test requires a self-contained distribution");
+    }
+    const graph = await readContainerGraph(new URL(head.path, root), "model");
+    assertEquals(Object.keys(quants), ["i4", "i4-gemvpar", "i4-fast"], "the presets planned");
+    for (const rows of [1, 4, 8, 32, 40, 64]) {
+      const decode = rows <= 8;
+      const always = { rope: 66, rmsNormAdd: 127, geluMulStaticQuantize: decode ? 42 : 0 };
+      const parallel = { ...always, linearStaticQuantize: decode ? 342 : 0 };
+      const expected = {
+        i4: always,
+        "i4-gemvpar": parallel,
+        "i4-fast": { ...parallel, packedStaticQuantize: decode ? 84 : 0 },
+      } as const;
+      for (const [preset, counts] of Object.entries(expected)) {
+        assertEquals(quants[preset].weights.model, "i4", `${preset}: the storage`);
+        const options = resolveGemmaSessionOptions(quants[preset].session, {}, `e4b ${preset}`);
+        assertEquals(
+          decodeFusionCounts(graph, rows, options),
+          { ...NONE, ...counts },
+          `${family} e4b ${preset} M=${rows}`,
+        );
+      }
+      assertEquals(
+        decodeFusionCounts(graph, rows, without({}, "rmsNormAdd", "geluMulStaticQuantize")),
+        { ...NONE, rope: 66 },
+        `${family} e4b without the two folds M=${rows}`,
+      );
+      assertEquals(
+        decodeFusionCounts(graph, rows, without(PACKED, "linearStaticQuantize")),
+        { ...NONE, ...always, packedStaticQuantize: decode ? 84 : 0 },
+        `${family} e4b packed SRQ without the linear→SRQ fusion M=${rows}`,
+      );
     }
   },
 );
