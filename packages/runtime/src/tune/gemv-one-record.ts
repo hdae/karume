@@ -133,6 +133,14 @@ export type GemvOneRecordOutcome = {
 
 const ratio = (value: number): string => `×${value.toFixed(3)}`;
 
+/**
+ * Why the default's choice is written over a table's choice that a record ruled out (it failed, or its
+ * check failed, in a current group), ahead of why no candidate replaced it: the rule of one steady
+ * record and the rule of two records say it alike.
+ */
+export const gemvTableNotHeld = (tableChoice: string, ruledOut: string, why: string): string =>
+  `the table's choice ${tableChoice} is not held (${ruledOut}); ${why}`;
+
 /** Whether a reading is evidence at `margin`: its reference's re-timing departs within the bar. */
 export const gemvReadingIsEvidence = (reading: GemvPairReading, margin: number): boolean => {
   if (reading.retime === undefined) return true;
@@ -335,11 +343,9 @@ export const decideOneRecord = (
       nearest === undefined
         ? "no candidate was timed at M=1 by a steady record"
         : `no candidate qualifies (nearest ${nearest.evidence.candidate}: ${nearest.failure ?? "?"})`;
-    const prefix = held
-      ? ""
-      : `the table's choice ${table} is not held (${evidence.tableRuledOut ?? "?"}); `;
     const choice = evidence.defaultChoice;
-    return result(choice, keptRowBlock(evidence, choice, margin), `${prefix}${why}`);
+    const reason = held ? why : gemvTableNotHeld(table, evidence.tableRuledOut ?? "?", why);
+    return result(choice, keptRowBlock(evidence, choice, margin), reason);
   }
   // The table holds another choice: it stays unless beaten in the same group
   if (!evidence.tableTimed) {

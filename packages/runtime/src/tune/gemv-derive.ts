@@ -71,7 +71,9 @@
  * another margin by the same code. Where the table the records derive for holds another choice than
  * the default's, that choice is the one to beat; the field is the table's choices with every
  * decision's derived choice in place, so a shape no record measured keeps the table's choice — and so
- * does a decision of the rule of two records that fewer than two records are evidence for.
+ * does a decision of the rule of two records that fewer than two records are evidence for, unless a
+ * record rules that choice out (then the default's is written back, as the rule of one steady record
+ * does).
  *
  * ## The rule of two records (the maintainer, 2026-11-17)
  *
@@ -154,6 +156,7 @@ import { GEMV_CASES, type GemvCase, gemvCaseOf, type GemvSweepStorage } from "./
 import { gemvCaseFingerprint, gemvCaseTableId, gemvKernelId } from "./gemv-fingerprint.ts";
 import {
   decideOneRecord,
+  gemvTableNotHeld,
   type GemvCandidateEvidence,
   type GemvKeptRow,
   type GemvOneRecordEvidence,
@@ -1028,7 +1031,8 @@ export type LinearGemvDecision = {
   readonly path: "one-record" | "two-record";
   /**
    * `one-record`, and a `two-record` decision that fewer than two records are evidence for (no
-   * candidate at M = 1, no other row block of the default's row): the choice the table the records
+   * candidate at M = 1, no other row block of the default's row) and whose table's choice no record
+   * rules out (failed, or its check failed, at M = 1): the choice the table the records
    * derive for holds for the shape (the default's where the table holds it; `no row (…)` for a
    * parallel decision without a row there).
    */
@@ -1037,13 +1041,14 @@ export type LinearGemvDecision = {
   readonly tableRowBlock?: LinearGemvParallelRows;
   /**
    * The derived choice: under `one-record` the table's when kept, under `two-record` the default's
-   * when kept — the table's where fewer than two records are evidence ({@link tableChoice}).
+   * when kept — the table's where fewer than two records are evidence and no record rules it out
+   * ({@link tableChoice}).
    */
   readonly derivedChoice: string;
   /**
    * `kept`: the choice to beat stays — under `one-record` the table's choice with its row block,
    * under `two-record` the default's (its row block may still move: then `adopted`), or the table's
-   * where fewer than two records are evidence (no evidence moves nothing).
+   * where fewer than two records are evidence (no evidence moves nothing) and no record rules it out.
    */
   readonly outcome: "adopted" | "kept";
   /** Why the choice to beat stays (`outcome` kept), or under `one-record` why the derived choice won. */
@@ -1931,23 +1936,38 @@ const parallelNameOf = (
 const classOfKernel = (gemvCase: GemvCase, name: string): GemvCandidateClass | undefined =>
   gemvKernelsAt(gemvCase, 1).find((candidate) => candidate.name === name)?.class;
 
+/**
+ * The table's choice for a judgement's case at M = 1 (by kernel name) beside the default's, and why
+ * it is not held: where it is another kernel than the default's choice, it failed or its check failed
+ * in a current group of a record. Both rules read it here, so a table's choice that a record rules
+ * out stays under neither — not even where no record is evidence for any candidate.
+ */
+const tableAtM1 = (
+  context: Pick<DerivationContext, "records" | "table">,
+  judgement: CaseJudgement,
+): { readonly defaultChoice: string; readonly tableChoice: string; readonly ruledOut?: string } => {
+  const { gemvCase } = judgement;
+  const defaultChoice = judgement.reference(1);
+  const tableChoice = gemvProfileChoice(gemvCase, 1, levelOf(judgement.class), context.table).name;
+  const tableClass = classOfKernel(gemvCase, tableChoice) ?? judgement.class;
+  const ruledOut =
+    tableChoice === defaultChoice
+      ? undefined
+      : ruledOutIn(context.records, gemvCase.id, 1, tableChoice, tableClass);
+  return { defaultChoice, tableChoice, ...(ruledOut === undefined ? {} : { ruledOut }) };
+};
+
 /** What the rule of one steady record reads for one case and class (gemv-one-record.ts). */
 const oneRecordEvidence = (
   context: DerivationContext,
   judgement: CaseJudgement,
 ): GemvOneRecordEvidence => {
   const { gemvCase } = judgement;
-  const level = levelOf(judgement.class);
-  const defaultChoice = judgement.reference(1);
-  const tableChoice = gemvProfileChoice(gemvCase, 1, level, context.table).name;
+  const { defaultChoice, tableChoice, ruledOut: tableRuledOut } = tableAtM1(context, judgement);
   const parallel = judgement.class === "reorder";
   const defaultRow = parallel ? parallelRowOf(context.defaults, gemvCase) : undefined;
   const tableRow = parallel ? parallelRowOf(context.table, gemvCase) : undefined;
   const differs = tableChoice !== defaultChoice;
-  const tableClass = classOfKernel(gemvCase, tableChoice) ?? judgement.class;
-  const tableRuledOut = differs
-    ? ruledOutIn(context.records, gemvCase.id, 1, tableChoice, tableClass)
-    : undefined;
   const tableTimed =
     !differs ||
     context.steady.some(
@@ -2358,6 +2378,23 @@ const sequentialDecision = (
   // (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
   if (outcomes.every(({ outcome }) => outcome.kind === "kept" && !outcome.judged)) {
     const tableChoice = gemvProfileChoice(first, 1, "exact", context.table).name;
+    // MUST: unless a record rules that choice out, as under the rule of one steady record
+    const ruled = cases
+      .map((gemvCase) => ({
+        gemvCase,
+        ruledOut: tableAtM1(context, identicalJudgement(gemvCase)).ruledOut,
+      }))
+      .find(({ ruledOut }) => ruledOut !== undefined);
+    if (ruled?.ruledOut !== undefined) {
+      const where = cases.length === 1 ? ruled.ruledOut : `${ruled.gemvCase.id}: ${ruled.ruledOut}`;
+      return {
+        ...twoRecord,
+        derivedChoice: defaultChoice,
+        outcome: "kept",
+        reason: gemvTableNotHeld(tableChoice, where, reason),
+        ...shownFields,
+      };
+    }
     return {
       ...twoRecord,
       tableChoice,
@@ -2501,12 +2538,15 @@ const parallelDecision = (context: DerivationContext, gemvCase: GemvCase): Linea
     // MUST: records that are evidence for no candidate at M = 1, and for no other row block of the
     // default's row, do not move the table's row (SPEC: docs/spec/geometry-profiles.md#deriving-the-gemv-choices)
     const rowBlockJudged = tried.some(({ at }) => at.some(({ records }) => records >= MIN_RECORDS));
-    if (!outcome.judged && !rowBlockJudged) {
-      const tableRow = parallelRowOf(context.table, gemvCase);
-      const tableChoice =
-        tableRow === undefined
-          ? `no row (${gemvBaseline(gemvCase, 1).name})`
-          : parallelName(tableRow);
+    const unjudged = !outcome.judged && !rowBlockJudged;
+    const tableRow = parallelRowOf(context.table, gemvCase);
+    const tableChoice =
+      tableRow === undefined
+        ? `no row (${gemvBaseline(gemvCase, 1).name})`
+        : parallelName(tableRow);
+    // MUST: unless a record rules that choice out, as under the rule of one steady record
+    const tableRuledOut = unjudged ? tableAtM1(context, judgement).ruledOut : undefined;
+    if (unjudged && tableRuledOut === undefined) {
       const rowBlock = tableRow?.rowBlock;
       return {
         ...twoRecord,
@@ -2525,7 +2565,10 @@ const parallelDecision = (context: DerivationContext, gemvCase: GemvCase): Linea
       notes: [...notes, ...rowBlockNote],
       derivedChoice: defaultChoice,
       outcome: "kept",
-      reason: outcome.reason,
+      reason:
+        tableRuledOut === undefined
+          ? outcome.reason
+          : gemvTableNotHeld(tableChoice, tableRuledOut, outcome.reason),
       ...nearestFields,
       ...sameRowBlock,
     };

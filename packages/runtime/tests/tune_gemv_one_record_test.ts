@@ -18,7 +18,8 @@
 // 1.01); a kernel ×0.99 the default's choice at M = 4; a record without M = 8; a row block ×1.05 the
 // candidate's own kernel; a challenger ×1.04 over the table's choice; the table's choice screened out;
 // the table's choice slower than the default's; one record of an unsteady device; one unsteady or
-// classless record against a table that moved PLE's choices (the default's written back); a pass of 10 ms; a
+// classless record against a table that moved PLE's choices (the default's written back), and the same
+// record where those choices failed their checks (kept for lack of evidence); a pass of 10 ms; a
 // second steady record at ×1.05; a re-timed reference ×0.9 its rounds' minimum.
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
@@ -399,6 +400,42 @@ describe("⑦ an unsteady record", () => {
       assertStringIncludes(parallel.reason ?? "", "so the table's choice stays");
       assertEquals(derivation.linearGemv, MOVED.linearGemv);
       assertStringIncludes(derivation.verdicts.join("\n"), "keeps c64u8 (the default's: c32u4)");
+    }
+  });
+
+  it("writes the default's choices back where a record rules the table's out, though none is evidence, and says where (fault: the table's choices kept for lack of evidence)", () => {
+    const faults: readonly Readonly<Record<string, Partial<GemvSweepRow>>>[] = [
+      { c64u8: { identicalToBaseline: false }, "staged-l8": { withinBand: false } },
+      { c64u8: { error: "Error: lost" }, "staged-l8": { error: "Error: lost" } },
+    ];
+    for (const fields of faults) {
+      const spec = { ...ple1({ c64u8: faster(1.2) }), fields: { 1: fields } };
+      for (const lone of [
+        record("a.json", [spec], { unsteady: 10 }),
+        record("a.json", [spec], { groups: 19 }),
+      ]) {
+        const derivation = derive([lone], MOVED);
+        const sequential = sequentialOf(derivation);
+        assertEquals(
+          [sequential.path, sequential.outcome, sequential.derivedChoice, sequential.tableChoice],
+          ["two-record", "kept", "c32u4", undefined],
+        );
+        assertStringIncludes(sequential.reason ?? "", "the table's choice c64u8 is not held (");
+        assertStringIncludes(sequential.reason ?? "", "at M=1");
+        const parallel = parallelOf(derivation);
+        assertEquals(
+          [
+            parallel.outcome,
+            parallel.derivedChoice,
+            parallel.derivedRowBlock,
+            parallel.tableChoice,
+          ],
+          ["kept", "parallel-l4", 4, undefined],
+        );
+        assertStringIncludes(parallel.reason ?? "", "the table's choice staged-l8 is not held (");
+        assertEquals(pleException(derivation), undefined);
+        assertEquals([pleRow(derivation)?.lanes, pleRow(derivation)?.rowBlock], [4, 4]);
+      }
     }
   });
 
