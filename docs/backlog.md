@@ -238,8 +238,19 @@ maintainer's ruling of 2026-11-06).
          `outputs/misc/gemv-rule-2026-11-28/impl/table-diff-<device>.md` (outside git) for the maintainer to rule on —
          the margin among it (×1.065 by default; ×1.03 is the alternative). Until `apple-m5` is regenerated, its
          regeneration case (`tools/geometry-profiles/tests/regeneration_test.ts`) is red on a machine that has its two
-         GEMV records: they now derive other choices than the table holds. A table derived at another margin needs that
-         margin on the generator's command line, which it does not take yet;
+         GEMV records: they now derive other choices than the table holds. A table derived at another margin takes it
+         on the generator's command line (`--gemv-margin`, 2026-11-28), whose verdict lines also list what ×1.03 would
+         change;
+       - left as they are after the implementation's reviews (2026-11-28), each open:
+         - a reference whose re-timing pass throws makes its row a failure row, as a failed round does, so the group
+           loses its candidates' gains and its class count (the conservative choice; leaving the re-timing absent would
+           read the group untested);
+         - the planner's batch runs its two passes in one workbench session, which the adjudication's same-session
+           versus cross-session reading of the rule of two records cares about; the derivation does not read
+           `session` yet;
+         - a reading of the rule of one steady record names its record by path; the kernel fingerprint and the
+           record's sha256 are reached through the row and the provenance, and a held check shows only as no
+           `ruledOut`;
        - a device between steady and unsteady has no record: the class's 20 % is a point inside an empty band (the
          steady devices' records read at most 15.2 %, the RTX 3080 Ti's at least 31.8 %), no integrated GPU, no thermally
          limited laptop and no unsteady device in a browser was measured, and the six RTX 3080 Ti records of 12 or 13
