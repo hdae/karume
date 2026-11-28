@@ -670,7 +670,7 @@ class TestGemma4Tokenizer:
         self, tmp_path: Path, model: str
     ) -> None:
         """A model's own series is held to its current upstream `tokenizer.json` too: a series
-        compiled before the file was replaced (Google's glitch-token fixes of 2026-11-03 changed
+        compiled before the file was replaced (the glitch-token fixes of 2026-11-03 changed
         E2B's and E4B's) has the right vocabulary and tokenizes some inputs differently."""
         sources = _build(tmp_path) if model == "e2b" else _build_e4b(tmp_path)
         gemma4_plan(sources, model)  # the series as compiled from its upstream passes

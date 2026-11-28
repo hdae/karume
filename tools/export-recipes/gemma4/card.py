@@ -513,6 +513,28 @@ def _pinned(repo: str, pins: Mapping[str, HubPin], name: str) -> str:
     return pinned(repo, pin.revision)
 
 
+def tokenizer_fix_clause(tokenizer: HubPin, weights_repository: str) -> str:
+    """How a card names the glitch-token fix a tokenizer pin sits at, after the pinned base model:
+    `the commit "<title>" ([pull request #<n>](…), <date>), which changed that file alone; the
+    <weights_repository> repository's own `tokenizer.json` at the commit above is the file from
+    before that change` — the commit's own record, attributed to no one and true at the pins.
+
+    MUST: a pin without a {@link TokenizerFix} fails the render — the clause would describe a
+    change its commit is not.
+
+    SPEC: docs/spec/distribution-cards.md#what-the-upstream-says
+    """
+    fix = tokenizer.tokenizer_fix
+    if fix is None:
+        raise ValueError(f"{tokenizer.label} is not a glitch-token fix of `tokenizer.json`")
+    discussion = f"https://huggingface.co/{tokenizer.repo}/discussions/{fix.pull_request}"
+    return (
+        f'the commit "{fix.title}" ([pull request #{fix.pull_request}]({discussion}), {fix.date}),'
+        f" which changed that file alone; the {weights_repository} repository's own"
+        " `tokenizer.json` at the commit above is the file from before that change"
+    )
+
+
 def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     """The attribution section. Use (capabilities, limitations, safety, evaluation) is **left to
     the upstream card**."""
@@ -979,10 +1001,18 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     for name in manifest["models"]:
         weights = _pinned(_qat_q4_0_weights(name), weights_pins, name)
         base = _pinned(GEMMA4_UPSTREAM[name], base_pins, name)
+        # A base model pinned at its glitch-token fix says so: the QAT repository's own
+        # `tokenizer.json` is the earlier file, and the card names the change that tells them apart.
+        fix = (
+            "; the tokenizer is `tokenizer.json` at that commit,"
+            f" {tokenizer_fix_clause(base_pins[name], 'QAT')}. Both"
+            if base_pins[name].tokenizer_fix is not None
+            else "; both"
+        )
         lines.append(
             f"- **`{name}`**: the weights are {weights}, Google's QAT (Q4_0) checkpoint of the base"
             f" model {base}, which is also the source of the tokenizer, the chat template and the"
-            f" generation defaults; both are licensed **{GEMMA4_LICENSE}**"
+            f" generation defaults{fix} are licensed **{GEMMA4_LICENSE}**"
             f" {APACHE_LICENSE_REFERENCE}."
         )
     lines += quotation(

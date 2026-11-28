@@ -35,11 +35,11 @@ class QatSource:
 #: - weights: the revisions the local inputs were fetched at on 2026-09-11
 #:   (`inputs/gemma4-qat/<checkpoint>/.cache/huggingface/download/*.metadata`), still `main` of
 #:   both repositories on 2026-11-01 (HF API; last modified 2026-07-20; not gated).
-#: - tokenizer: the regular `-it` repository at Google's glitch-token fixes of 2026-11-03
-#:   (`gemma4.sources.REGULAR_TOKENIZER_PINS` — the q4_0 QAT line's pins, one spelling). The
-#:   mobile repositories still ship the `tokenizer.json` from before those fixes (SHA-256
-#:   `cc8d3a0c…`, the same in both), and the maintainer approved shipping the fixed tokenizer
-#:   (2026-11-04).
+#: - tokenizer: the regular `-it` repository at the glitch-token fixes of 2026-11-03
+#:   (`gemma4.sources.REGULAR_TOKENIZER_PINS` — the q4_0 QAT line's pins, one spelling). At
+#:   their pinned commits the mobile repositories ship the `tokenizer.json` from before those
+#:   fixes (SHA-256 `cc8d3a0c…`, the same in both), and the maintainer approved shipping the fixed
+#:   tokenizer (2026-11-04).
 #:
 #: The licence review is `THIRD_PARTY_NOTICES.md`; moving a pin needs that review again.
 SOURCES: Mapping[str, QatSource] = {

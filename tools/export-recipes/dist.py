@@ -144,8 +144,8 @@ PIPELINES: Mapping[str, Pipeline] = {
     "lucida": birefnet_distribution.LUCIDA_PIPELINE,
     "depth-anything": depth_anything_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
-    # The q4_0 QAT line of the `gemma4/1` contract (`karume-gemma4-qat` — E2B / E4B / 12B with
-    # their QAT drafters) and the mobile QAT family (`karume-gemma4-qat-mobile` — contract
+    # The q4_0 QAT line of the `gemma4/1` contract (`karume-gemma4-qat` — E2B / E4B / 12B / 26B
+    # with their QAT drafters) and the mobile QAT family (`karume-gemma4-qat-mobile` — contract
     # `gemma4-qat/1`).
     "gemma4-qat": gemma4_distribution.QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": gemma4_qat_distribution.PIPELINE,

@@ -73,7 +73,7 @@ SUPPRESSED = (fixture.VOCAB - 1, fixture.VOCAB - 2)
 #: The upstream `tokenizer.json` stand-in (the gate compares SHA-256 only).
 UPSTREAM_TOKENIZER = b'{"model": "regular -it tokenizer stand-in"}'
 
-#: The `tokenizer.json` a QAT weights' repository ships (the file from before Google's glitch-token
+#: The `tokenizer.json` a QAT weights' repository ships (the file from before the glitch-token
 #: fixes — `gemma4.sources`), placed next to the stand-in weights' config so a plan that read the
 #: tokenizer from there would fail.
 QAT_REPOSITORY_TOKENIZER = b'{"model": "pre-fix tokenizer shipped with the QAT weights"}'
@@ -992,6 +992,37 @@ class TestQatCard:
         assert card.count("[full text](") == card.count(APACHE_LICENSE_REFERENCE)
         assert f"license_link: {GEMMA_LICENSE_PAGE}\n" in card
         assert GEMMA_LICENSE_PAGE not in body
+
+    def test_a_base_model_at_its_glitch_token_fix_is_named_by_that_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """E2B's, E4B's and 12B's base models are pinned at their glitch-token fixes, while each QAT
+        repository's own `tokenizer.json` at its pin is the earlier file: the bullet names the
+        commit by its title and pull request. 26B's base model has no such fix, so its bullet
+        names none."""
+        out_dir, _ = _assemble(tmp_path, ("e2b", "e4b", "12b", "26b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        attribution = card.split("## Base weights and attribution")[1].split("\n## ")[0]
+
+        expected = {
+            "e2b": ("fix: Remediate 233 glitch tokens in tokenizer.json", 51, "2026-11-03"),
+            "e4b": ("fix: Remediate 219 glitch tokens in tokenizer.json", 50, "2026-11-03"),
+            "12b": ("fix: Remediate 210 glitch tokens in tokenizer.json", 55, "2026-10-30"),
+        }
+        for model, (title, pull_request, date) in expected.items():
+            bullet = attribution.split(f"- **`{model}`**")[1].split("\n- ")[0]
+            base = QAT_LINE_PINS[model].tokenizer.repo
+            assert (
+                "generation defaults; the tokenizer is `tokenizer.json` at that commit, the"
+                f' commit "{title}" ([pull request #{pull_request}]'
+                f"(https://huggingface.co/{base}/discussions/{pull_request}), {date}), which"
+                " changed that file alone; the QAT repository's own `tokenizer.json` at the"
+                " commit above is the file from before that change. Both are licensed"
+            ) in bullet, model
+        twenty_six_b = attribution.split("- **`26b`**")[1].split("\n- ")[0]
+        assert "glitch" not in twenty_six_b
+        assert "generation defaults; both are licensed" in twenty_six_b
+        assert "Google's glitch" not in card
 
     def test_the_card_pins_every_upstream_at_the_commit_sources_records(
         self, tmp_path: Path

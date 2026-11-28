@@ -13,7 +13,7 @@ PLE size) is derived from the checkpoint's own `config.json`; the model name onl
 input and output directories. Each has its MTP drafter (`export_drafter.py` — E4B's from
 `google/gemma-4-E4B-it-assistant`; the q4_0 QAT line below ships a QAT drafter for every model but
 26B). E4B has a compiled tokenizer
-asset of its own: E4B shared E2B's until Google's glitch-token fixes of 2026-11-03 gave the two
+asset of its own: E4B shared E2B's until the glitch-token fixes of 2026-11-03 gave the two
 upstream `tokenizer.json` files different merges (E2B drops 267 and renames id 249788, E4B drops
 253; the vocabulary is the same). The license notes below were established for E2B; E4B's snapshot
 carries the same Apache 2.0 frontmatter.
@@ -35,8 +35,8 @@ imports that grid as is instead of rounding the weights again (see "What `export
 emits"). **The tokenizer, the chat template and the generation defaults** come from
 `google/gemma-4-12B-it`: the QAT repository's `tokenizer_config.json`, `generation_config.json`
 and `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is the one every
-Gemma 4 repository shipped before Google's glitch-token fixes (the QAT repositories have not
-received the fix). Both snapshots' README front matter
+Gemma 4 repository shipped before the glitch-token fixes (the QAT repository's file at its
+pinned commit is the one from before the fix). Both snapshots' README front matter
 says `license: apache-2.0`. Its drafter is a QAT checkpoint too,
 `google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` (Google's model card: "the assistant model
 must also be a QAT checkpoint with the same precision").
@@ -868,7 +868,7 @@ dtype and manifest all correct, and shows up only as wrong values):
   PLE asset is left that the index does not name
 - the compiled tokenizer names the compile format and has exactly `V` rows, and the asset's
   recorded source sha256 matches the model's own upstream `tokenizer.json` (each model has its own
-  tokenizer series since Google's glitch-token fixes of 2026-11-03)
+  tokenizer series since the glitch-token fixes of 2026-11-03)
 - the checkpoint's recommended sampler is present and inside the range the TypeScript
   `pipelineConfig` parser accepts
 

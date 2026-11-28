@@ -159,7 +159,7 @@ DRAFTER_FILES = ("model.safetensors", "config.json")
 #: The target files whose digests the lender series' record must share with the target the goldens
 #: run ({@link assert_lender_checkpoint}): the weights and the config that shape them. Not the
 #: tokenizer — it decides only the golden prompts' ids, and the hand-placed checkpoints' tokenizer
-#: moved after their product series were exported (Google's glitch-token fixes of 2026-11-03).
+#: moved after their product series were exported (the glitch-token fixes of 2026-11-03).
 LENDER_CHECKPOINT_FILES = provenance.WEIGHTS_FILES
 
 #: Number of draft steps unrolled in one forward (the distributed drafter is baked with these 3

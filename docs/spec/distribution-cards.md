@@ -168,7 +168,13 @@ The level-2 sections come in this order:
   headings the text stands under (the card's title included, without emphasis or a leading emoji; none for a text
   before the first heading); a blank line; then the paragraphs as one blockquote. A text that follows a quotation is
   set apart by a blank line. A statement whose source at the pinned commit is not on the Hub card stays in the
-  recipe's words (docs/backlog.md lists them).
+  recipe's words (docs/backlog.md lists them). A change an upstream commit made is named by that commit's own record
+  instead — its title in quotation marks, a link to the pull request it merged, and its date — attributed to no one,
+  with only what holds at the pins: the Gemma 4 QAT cards (`karume-gemma4-qat`, `karume-gemma4-qat-mobile`) name the
+  glitch-token fix each tokenizer pin sits at (`` the commit "fix: Remediate 233 glitch tokens in tokenizer.json"
+  ([pull request #51](…), 2026-11-03), which changed that file alone; the mobile repository's own `tokenizer.json`
+  at the commit above is the file from before that change ``), from the pin's record in `gemma4.sources`
+  (`gemma4.card.tokenizer_fix_clause`); a tokenizer pin at no such commit (26B A4B's) names none.
 
   | Repository | Card quoted | What it states |
   | --- | --- | --- |

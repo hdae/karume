@@ -11,7 +11,7 @@ from typing import Any
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0, license_markdown
 from _shared.upstream import GEMMA_LICENSE_PAGE, UPSTREAM_AUTHORS, hf_upstreams
-from gemma4.card import gemma4_model_sections, gemma4_usage
+from gemma4.card import gemma4_model_sections, gemma4_usage, tokenizer_fix_clause
 from gemma4.distribution import (
     GEMMA4_ASSETS,
     GEMMA4_NOT_DISTRIBUTED,
@@ -425,9 +425,9 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         weights, tokenizer = pins.weights, pins.tokenizer
         lines.append(
             f"- **`{name}`**: the weights are {pinned(weights.repo, weights.revision)}; the"
-            f" tokenizer is that of its base model {pinned(tokenizer.repo, tokenizer.revision)}"
-            " (Google's glitch-token fixes of 2026-11-03, which the mobile"
-            f" repository has not received); both are licensed **{QAT_LICENSE}**"
+            " tokenizer is `tokenizer.json` of its base model"
+            f" {pinned(tokenizer.repo, tokenizer.revision)},"
+            f" {tokenizer_fix_clause(tokenizer, 'mobile')}. Both are licensed **{QAT_LICENSE}**"
             f" {APACHE_LICENSE_REFERENCE}."
         )
     lines += [

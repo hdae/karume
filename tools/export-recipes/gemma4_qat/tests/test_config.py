@@ -51,7 +51,7 @@ class TestPin:
             assert source.pins.weights.repo == checkpoint_repo(model)
 
     def test_the_tokenizer_is_the_regular_lines_fixed_one(self) -> None:
-        """The mobile repositories ship the `tokenizer.json` from before Google's glitch-token
+        """The mobile repositories ship the `tokenizer.json` from before the glitch-token
         fixes; the line reads the regular `-it` repository at the pins the q4_0 QAT line reads
         (one spelling — `gemma4.sources.REGULAR_TOKENIZER_PINS`)."""
         for model, source in SOURCES.items():

@@ -7,7 +7,7 @@ It does not requantize the checkpoint. The text decoder, tokenizer, and packed p
 (PLE) are exported; vision, audio, and the MTP drafter are not included.
 
 The tokenizer is not the mobile repositories' own: they ship the `tokenizer.json` from before
-Google's glitch-token fixes of 2026-11-03, so the export reads `tokenizer.json` from the regular
+the glitch-token fixes of 2026-11-03, so the export reads `tokenizer.json` from the regular
 `google/gemma-4-E2B-it` / `google/gemma-4-E4B-it` at the fixed commits — the same pins as the q4_0
 QAT line (`gemma4.sources.REGULAR_TOKENIZER_PINS`). The weights, `config.json` and
 `generation_config.json` still come from the mobile repositories.

@@ -33,7 +33,8 @@ const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
  *   attentions, and the class token's) keeps its input's shape and is an alias.
  * - Nothing else. The encoder normalises with `layer_norm` straight into a `linear` (adaLN wants
  *   the modulation chain after the norm); its 12 `linear → gelu → linear` pairs would fold only
- *   into an i8a8 linear (the linear prologue under `linearCompute: "a8"`), which no preset sets;
+ *   into an i8a8 linear (the linear prologue, which needs `linearCompute: "a8"` and i8 storage):
+ *   the distribution stores f32 only, so even `"a8"` folds none, and no preset sets it;
  *   the head resizes with `upsample_bilinear2d`, not the VAE's nearest ×2 chain that upsample2x
  *   takes.
  */

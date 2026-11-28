@@ -1,7 +1,7 @@
 """Compiles a Gemma 4 model's tokenizer asset and takes its parity fixture (ADR 0084 decision 1).
 
 Every model has a series of its own: `--model` picks E2B (the default), E4B, 12B or 26B. Until
-Google's glitch-token fixes the `tokenizer.json` files were the same bytes; each fix drops another
+the glitch-token fixes the `tokenizer.json` files were the same bytes; each fix drops another
 set of BPE merges (E2B 267 and the vocabulary entry 249788 renamed to `<glitch_pruned_249788>`,
 E4B 253, 12B 239 — same vocabulary otherwise), so some inputs tokenize differently on each model.
 26B's is still the file from before the fixes.
@@ -178,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--model", choices=MODELS, default="e2b")
     model = parser.parse_args(argv).model
     # The tokenizer source, not the weights' (12B's QAT weights ship the `tokenizer.json` from
-    # before Google's glitch-token fixes — `gemma4.sources`).
+    # before the glitch-token fixes — `gemma4.sources`).
     directory = sources.tokenizer_dir(model)
     pins = sources.HUB_PINS.get(model)
     if pins is not None:

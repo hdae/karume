@@ -15,8 +15,8 @@ import pytest
 from _shared.paths import INPUTS_ROOT
 from gemma4 import sources
 
-#: The `tokenizer.json` every Gemma 4 repository shipped before Google's glitch-token fixes — what
-#: the QAT repositories still ship (`gemma4.sources`).
+#: The `tokenizer.json` every Gemma 4 repository shipped before the glitch-token fixes — what
+#: the QAT repositories ship at their pinned commits (`gemma4.sources`).
 PRE_FIX_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
 #: The regular `-it` repositories' `tokenizer.json` after the fixes of 2026-11-03 (one per model).
 FIXED_TOKENIZER_SHA256 = {
@@ -364,6 +364,19 @@ class TestQatPins:
         assert pins.tokenizer.repo == f"google/gemma-4-{name}-it"
         assert pins.tokenizer.revision == tokenizer
         assert pins.tokenizer.sha256 == {"tokenizer.json": FIXED_TOKENIZER_SHA256[model]}
+
+    @pytest.mark.parametrize("model", sorted(sources.QAT_LINE_PINS))
+    def test_a_tokenizer_pin_names_a_fix_exactly_when_its_file_is_not_the_pre_fix_one(
+        self, model: str
+    ) -> None:
+        """The cards name a tokenizer pin's glitch-token fix (`gemma4.card.tokenizer_fix_clause`)
+        and say the weights' repository holds the earlier file; a pin whose `tokenizer.json` is
+        the pre-fix file (26B) must carry no fix, and every other one must carry one."""
+        tokenizer = sources.QAT_LINE_PINS[model].tokenizer
+        pre_fix = tokenizer.sha256["tokenizer.json"] == PRE_FIX_TOKENIZER_SHA256
+
+        assert (tokenizer.tokenizer_fix is None) == pre_fix, model
+        assert all(pins.weights.tokenizer_fix is None for pins in sources.QAT_LINE_PINS.values())
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_the_tokenizer_revision_is_the_regular_line_s(self, model: str) -> None:

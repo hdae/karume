@@ -4,7 +4,7 @@
 
 Runs on the same machinery as gemma4 and the first EmbeddingGemma (`_shared/gemma_tokenizer.py`,
 ADR 0084 decision 6). Measured on the pinned snapshot (2026-11-21): `tokenizer.json` is Gemma 4's
-file from before Google's glitch-token fixes (the one `gemma4.sources` pins for 26B A4B, SHA-256
+file from before the glitch-token fixes (the one `gemma4.sources` pins for 26B A4B, SHA-256
 `cc8d3a0c…`) in every field but `post_processor` — the same 262,144 vocabulary rows in the same
 order, the same 514,906 merges, the same 24 added tokens, normalizer, pre-tokenizer and decoder —
 while the post-processor wraps the sequence in `<bos>` … `<eos>` (the pair template wraps each
