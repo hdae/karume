@@ -880,11 +880,6 @@ class TestTheRuntimeSentenceOfEveryPublishedCard:
 #: The bullet that sends the reader to the upstream cards (`karume.modelcard.upstream_cards`).
 _UPSTREAM_CARDS = "- **What the model can and cannot do** — "
 
-#: The cards whose upstream-card bullet does not list every `base_model` yet, or does not end the
-#: attribution section: the Gemma 4 ones, whose recipes change in a stage of their own
-#: (docs/spec/distribution-cards.md#what-the-upstream-says).
-CARDS_WITH_A_PARTIAL_UPSTREAM_CARD_BULLET = GEMMA4_REPOSITORIES
-
 
 class TestTheUpstreamCardsOfEveryPublishedCard:
     """docs/spec/distribution-cards.md#what-the-upstream-says."""
@@ -900,9 +895,7 @@ class TestTheUpstreamCardsOfEveryPublishedCard:
         last = next(line for line in reversed(attribution) if line)
         listed = all(hf_link(repo) in last for repo in _listed(_front_matter(card)["base_model"]))
 
-        assert len(bullets) <= 1
-        complete = bullets == [last] and listed
-        assert complete is (directory not in CARDS_WITH_A_PARTIAL_UPSTREAM_CARD_BULLET), bullets
+        assert bullets == [last] and listed, bullets
 
 
 class TestTheUsageOfEveryPublishedCard:

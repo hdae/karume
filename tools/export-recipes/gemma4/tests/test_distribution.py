@@ -68,7 +68,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link
+from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link, upstream_cards
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 #: Role name → part count (the PLE assets take parts of their own, so only `model` has more).
@@ -976,6 +976,23 @@ class TestGemma4Card:
         for model in ("e2b", "e4b"):
             for pin in (REGULAR_TOKENIZER_PINS[model], REGULAR_DRAFTER_PINS[model]):
                 assert f"{hf_link(pin.repo)} at commit `{pin.revision}`" in card, pin.repo
+
+    def test_the_attribution_ends_by_sending_the_reader_to_every_upstream_card(
+        self, gemma4_assembled
+    ) -> None:
+        """docs/spec/distribution-cards.md#what-the-upstream-says — the shared bullet, last in the
+        attribution, linking the card of every redistributed upstream (the drafter's included)."""
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        attribution = card.split("## Base weights and attribution")[1].split("\n## ")[0]
+        last = attribution.strip().split("\n")[-1]
+
+        assert (
+            last
+            == upstream_cards(
+                [hf_link("google/gemma-4-E2B-it"), hf_link("google/gemma-4-E2B-it-assistant")]
+            )[0]
+        )
 
     def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
         self, gemma4_assembled, tmp_path: Path

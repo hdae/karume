@@ -161,9 +161,7 @@ The level-2 sections come in this order:
 - Every card ends its attribution section with one bullet, `karume.modelcard.upstream_cards`, sending the reader to
   the upstream model cards for what the model can and cannot do (capabilities, limitations, intended use, evaluations,
   safety guidance), which the repository does not restate. It links the card of every redistributed upstream: the
-  `base_model` repositories, preceded on `karume-anima-extra` by the Civitai pages of its fine-tunes. The Gemma 4
-  cards write the bullet in their own words: `karume-gemma4` and `karume-gemma4-qat` link the default model's upstream
-  card only.
+  `base_model` repositories, preceded on `karume-anima-extra` by the Civitai pages of its fine-tunes.
 - What an upstream states and the recipe cannot measure — a statement of license or use policy, the training data,
   what the model is and what it is for — is quoted verbatim, never reworded, by `karume.modelcard.quotation`: a lead
   naming the quoted card, linked to its `README.md` at the commit the recipe pinned (`UpstreamQuote.source`), and the

@@ -52,6 +52,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 from .config import (
@@ -423,11 +424,20 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         "  assets that the host gathers; the exit was narrowed to the selected rows' logits and",
         "  hidden states; rotary cos/sin arrive as host-generated inputs. Vision, audio and MTP",
         "  are not included. No retraining and no fine-tuning.",
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model cards linked",
-        "  above, and this repository does not restate it: read them before using it.",
+        *upstream_cards([hf_link(repo) for repo in _qat_base_models(manifest)]),
     ]
     return lines
+
+
+def _qat_base_models(manifest: Mapping[str, Any]) -> list[str]:
+    """Every redistributed upstream: per model its base model (the regular `-it` repository its
+    tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
+    lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know."""
+    upstream: list[str] = []
+    for model in manifest["models"]:
+        checkpoint = checkpoint_repo(model)
+        upstream += [SOURCES[model].pins.tokenizer.repo, checkpoint]
+    return upstream
 
 
 # SPEC: docs/spec/distribution-cards.md#the-model-card
@@ -437,13 +447,7 @@ def render_card(
     """Draw the numbers, the model list and the quantization table from the manifest. Keeping the
     fixed values is never called requantization."""
     require_pipeline(manifest, QAT_PIPELINE)
-    # Every redistributed upstream: per model its base model (the regular `-it` repository its
-    # tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
-    # lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know.
-    upstream: list[str] = []
-    for model in manifest["models"]:
-        checkpoint = checkpoint_repo(model)
-        upstream += [SOURCES[model].pins.tokenizer.repo, checkpoint]
+    upstream = _qat_base_models(manifest)
     for model in manifest["models"]:
         if SOURCES[model].license != QAT_LICENSE:
             raise ValueError(

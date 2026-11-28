@@ -51,6 +51,7 @@ from karume.modelcard import (
     quants,
     render,
     require_pipeline,
+    upstream_cards,
 )
 
 if TYPE_CHECKING:
@@ -496,10 +497,7 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     lines += [
         *_gemma4_changes(manifest),
         "  No retraining and no fine-tuning.",
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model card, and this",
-        f"  repository does not restate it: read [{GEMMA4_UPSTREAM[manifest['defaultModel']]}]"
-        f"(https://huggingface.co/{GEMMA4_UPSTREAM[manifest['defaultModel']]}) before using it.",
+        *upstream_cards([hf_link(repo) for repo in _gemma4_metadata(manifest).base_model]),
     ]
     return lines
 
@@ -855,10 +853,7 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         *(["  keep their own grid the same way."] if drafters else []),
         *embedder,
         "  No retraining and no fine-tuning.",
-        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
-        "  evaluations and safety guidance — is documented on the upstream model card, and this",
-        f"  repository does not restate it: read [{GEMMA4_UPSTREAM[manifest['defaultModel']]}]"
-        f"(https://huggingface.co/{GEMMA4_UPSTREAM[manifest['defaultModel']]}) before using it.",
+        *upstream_cards([hf_link(repo) for repo in _qat_q4_0_metadata(manifest).base_model]),
     ]
     return lines
 

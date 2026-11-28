@@ -50,7 +50,7 @@ from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, Hub
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import MAX_QUANT_DESCRIPTION_CHARS, DistError, assemble_family
-from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link
+from karume.modelcard import APACHE_LICENSE_REFERENCE, hf_link, upstream_cards
 from karume.ple import PLE_INDEX_ROLE, PLE_ROLES
 
 #: The per-layer embedding width of the stand-in: two groups of the line's grid per layer (the
@@ -964,6 +964,28 @@ class TestQatCard:
             pins = QAT_LINE_PINS[model]
             for pin in (pins.weights, pins.tokenizer, QAT_DRAFTER_PINS[model]):
                 assert f"{hf_link(pin.repo)} at commit `{pin.revision}`" in card, pin.repo
+
+    def test_the_attribution_ends_by_sending_the_reader_to_every_upstream_card(
+        self, tmp_path: Path
+    ) -> None:
+        """docs/spec/distribution-cards.md#what-the-upstream-says — every model's base model, QAT
+        checkpoint and drafter, in the front matter's order."""
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        attribution = card.split("## Base weights and attribution")[1].split("\n## ")[0]
+        upstreams = [
+            "google/gemma-4-E2B-it",
+            "google/gemma-4-E2B-it-qat-q4_0-unquantized",
+            "google/gemma-4-12B-it",
+            "google/gemma-4-12B-it-qat-q4_0-unquantized",
+            "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant",
+            "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant",
+        ]
+
+        assert (
+            attribution.strip().split("\n")[-1]
+            == upstream_cards([hf_link(repo) for repo in upstreams])[0]
+        )
 
     def test_only_a_model_carrying_the_embedder_is_said_to_take_images(
         self, tmp_path: Path
