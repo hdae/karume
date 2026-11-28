@@ -175,7 +175,8 @@ Every other module keeps the sha256 of its bytes, written `bytes:`:
 - A module imported with a query (`?raw`): the test sees its text.
 - Every module of a test file that bundles sources (`SOURCE_TEXT_TESTS` in `verify-cache.ts`: the barrel tests of
   `packages/hub` and `packages/models`). The bundler reads them in native code, outside Node's `fs`, and a comment —
-  a `@__PURE__` annotation — decides what it keeps. `verify_cache_test.ts` fails on a test source that imports a
+  a `@__PURE__` annotation — decides what it keeps. The entries such a test hands the bundler by path (its package's
+  `mod.ts`) join its closure. `verify_cache_test.ts` fails on a test source that imports a
   bundler and is not listed.
 
 A module of the closure that the test also read through `fs` (the language gate, the link checker, the import

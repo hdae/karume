@@ -385,11 +385,17 @@ export default class VerifyCacheReporter implements Reporter {
     return { content, hash: hashOf(content) };
   }
 
-  /** The code layer's content: the import closure of a test file (with the setup file). */
+  /**
+   * The code layer's content: the import closure of a test file (with the setup file and, for a test
+   * that bundles sources, the entries it bundles).
+   */
   #codeOf(moduleId: string): readonly (readonly [string, string])[] {
-    const byBytes = SOURCE_TEXT_TESTS.includes(repoPath(moduleId));
+    const sourceText = Object.hasOwn(SOURCE_TEXT_TESTS, repoPath(moduleId))
+      ? SOURCE_TEXT_TESTS[repoPath(moduleId)]
+      : undefined;
+    const bundles = (sourceText?.bundles ?? []).map((path) => join(REPO_ROOT, path));
     return this.#closures
-      .codeOf([moduleId, SETUP_FILE], byBytes)
+      .codeOf([moduleId, SETUP_FILE, ...bundles], sourceText !== undefined)
       .map(([path, identity]) => [repoPath(path), identity] as const);
   }
 

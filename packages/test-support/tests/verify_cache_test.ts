@@ -529,6 +529,16 @@ describe("SOURCE_TEXT_TESTS", () => {
           (statement.entries.length === 0 || statement.entries.some((entry) => !entry.isType)),
       );
     });
-    assertEquals(bundling.sort(), [...SOURCE_TEXT_TESTS].sort());
+    assertEquals(bundling.sort(), Object.keys(SOURCE_TEXT_TESTS).sort());
+  });
+
+  it("names entries that exist, so a bundled barrel joins its test's closure", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    for (const [test, { bundles }] of Object.entries(SOURCE_TEXT_TESTS)) {
+      assert(bundles.length > 0, test);
+      for (const entry of bundles) {
+        assert(readFileSync(join(root, entry)).byteLength > 0, `${test}: ${entry}`);
+      }
+    }
   });
 });

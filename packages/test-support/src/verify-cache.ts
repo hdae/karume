@@ -189,13 +189,17 @@ export const moduleIdentityOf = (
  * Test files (repository-relative) whose result depends on the text of the sources they bundle, which
  * the bundler (Rolldown, native code) reads outside Node's `fs`, so the data layer never sees the
  * read: a `@__PURE__` annotation, a comment, decides what tree-shaking keeps. Every module of such a
- * file's closure keeps byte identity. `verify_cache_test.ts` fails on a test source that imports a
- * bundler and is not listed here.
+ * file's closure keeps byte identity. `bundles` are the entries the file hands the bundler by path
+ * (`new URL("../mod.ts", import.meta.url)`, not an import): they join its closure.
+ * `verify_cache_test.ts` fails on a test source that imports a bundler and is not listed here.
  */
-export const SOURCE_TEXT_TESTS: readonly string[] = [
-  "packages/hub/tests/hub_barrel_surface_test.ts",
-  "packages/models/tests/models_barrel_tree_shaking_test.ts",
-];
+export const SOURCE_TEXT_TESTS: Readonly<Record<string, { readonly bundles: readonly string[] }>> =
+  {
+    "packages/hub/tests/hub_barrel_surface_test.ts": { bundles: ["packages/hub/mod.ts"] },
+    "packages/models/tests/models_barrel_tree_shaking_test.ts": {
+      bundles: ["packages/models/mod.ts", "packages/models/src/audio/wav.ts"],
+    },
+  };
 
 /** The variable that chooses the mode. */
 export const CACHE_MODE_VARIABLE = "KARUME_VERIFY_CACHE";
