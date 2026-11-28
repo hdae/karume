@@ -257,8 +257,8 @@ export type Report = {
   readonly dp4a: boolean;
   readonly settings: {
     /**
-     * The candidate set (`quick` / `quick+` / `full`, the evaluation set `k88`, or `explore` —
-     * `full`'s candidates class by class). JSON from before this field has only `quick`.
+     * The candidate set (`quick` / `quick+` / `full`, the evaluation set `k88`, the `grid` set, or
+     * `explore` — `full`'s candidates class by class). JSON from before this field has only `quick`.
      */
     readonly candidateSet: SweepSet;
     /** Compatibility field: true only when `candidateSet === "quick"` (false for `quick+`). */
