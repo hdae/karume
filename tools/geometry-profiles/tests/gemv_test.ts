@@ -229,6 +229,68 @@ describe("--gemv-records on a registered table", () => {
     );
   });
 
+  it("takes the rule's margin (--gemv-margin), says loudly when it is below the lowest one, lists what changes at the lowest one, and refuses a margin the API refuses (faults: 0.99, a word, no GEMV records)", async () => {
+    const STEADY = "outputs/workbench/node-test-gpu/gemv-sweep_steady.json";
+    // c64u8 ×1.05 over the baseline: under ×1.065 × the gaps (×1.069), over ×1.03 × the gaps (×1.034)
+    const padding = GEMV_CASES.filter(({ id }) => id !== PLE)
+      .slice(0, 19)
+      .map(({ id }) => ({ caseId: id }));
+    write(
+      STEADY,
+      bytesOf(
+        workbenchRecord(
+          "gemv-sweep",
+          gemvRecord(
+            "2026-11-28T11:00:00.000Z",
+            [{ caseId: PLE, times: { 1: { c64u8: BASE_TIME / 1.05 } } }, ...padding],
+            { passes: { reps: 100_000 } },
+          ),
+        ),
+      ),
+    );
+    const run = async (...options: string[]) => {
+      stdout = [];
+      stderr = [];
+      const code = await main(
+        ["test-gpu", `--gemv-records=${STEADY}`, "--dry-run", ...options],
+        environment(registeredTable()),
+      );
+      return { code, printed: stdout.join("\n"), warned: stderr.join("\n") };
+    };
+    const byDefault = await run();
+    assertEquals(byDefault.code, 0, byDefault.warned);
+    assertStringIncludes(byDefault.printed, "keeps c32u4");
+    assertStringIncludes(
+      byDefault.printed,
+      "- GEMV decisions that change at ×1.030 (GEMV_LOWEST_MARGIN, re-decided from this output): 1",
+    );
+    assertStringIncludes(
+      byDefault.printed,
+      `  - sequential.shapes i4 n8960 k1536 (${PLE}): c32u4 -> c64u8`,
+    );
+    assertEquals(byDefault.warned, "");
+    const lowest = await run("--gemv-margin=1.03");
+    assertEquals(lowest.code, 0, lowest.warned);
+    assertStringIncludes(lowest.printed, "one steady record: c32u4 -> c64u8");
+    assertEquals(lowest.printed.includes("decisions that change at"), false);
+    const below = await run("--gemv-margin=1.02");
+    assertEquals(below.code, 0, below.warned);
+    assertStringIncludes(below.warned, "WARNING: the GEMV margin ×1.020 is below ×1.030");
+    assertStringIncludes(below.printed, "- WARNING: the GEMV margin ×1.020 is below ×1.030");
+    for (const margin of ["0.99", "fast", ""]) {
+      const refused = await run(`--gemv-margin=${margin}`);
+      assertEquals(refused.code, 2, margin);
+      assertStringIncludes(refused.warned, "The GEMV margin must be a finite number of at least 1");
+    }
+    stderr = [];
+    const alone = await main(
+      ["test-gpu", `--records=${SWEEP}`, "--gemv-margin=1.03", "--dry-run"],
+      environment(registeredTable()),
+    );
+    assertEquals(alone, 2);
+    assertStringIncludes(stderr.join("\n"), "--gemv-margin needs --gemv-records");
+  });
+
   it("refuses a first table from GEMV records alone (it needs the tile geometry's records)", async () => {
     const code = await main(
       ["other-gpu", `--gemv-records=${GEMV_A},${GEMV_B}`, `--vendor=${ADAPTER.vendor}`],

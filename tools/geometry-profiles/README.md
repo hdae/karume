@@ -27,7 +27,7 @@ From the repository root:
 
 ```sh
 node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] \
-  [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] \
+  [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…] [--gemv-margin=<x>]] \
   [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
 node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] \
   [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
@@ -40,12 +40,16 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
 - `--attention-bench` adds attention-bench records, which decide the online attention's key axis; without them that
   field is carried over from the base.
 - `--gemv-records` adds GEMV sweep records of the table's adapter, which decide `linearGemv` group by group (one
-  record's case at one row count): a candidate replaces the default profile's choice for a shape only at ×1.10 or more
-  over it in every group that is evidence — current (its rows' and its case's fingerprints are the current runtime's),
-  with the current default's kernel timed whatever default the record was made under, and read against that kernel's
-  fastest time over the records, which a second record repeats within ×1.10 —, from at least two records, its check
-  held; a parallel row also needs that evidence at M = 4 and 8 without a regression (it serves M = 1 to 8: the `full`
-  set) ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)). Groups whose case is not current
+  record's case at one row count, current when its rows' and its case's fingerprints are the current runtime's) by two
+  rules ([the spec](../../docs/spec/geometry-profiles.md#deriving-the-gemv-choices)): a shape a steady record measured
+  at M = 1 by the rule of one steady record — a candidate's gain over the default's choice in the same group clears the
+  margin × the two rows' gaps in every steady record, its row is not slower at M = 4 and 8 in the same record, and the
+  table's choice stays unless beaten so —; any other by the rule of two records — ×1.10 or more over the default's
+  choice in every group that is evidence, read against that kernel's fastest time over the records, which a second
+  record repeats within ×1.10, from at least two records, its check held, and a parallel row the same evidence at
+  M = 4 and 8 without a regression. `--gemv-margin` sets the first rule's margin (default ×1.065; a finite number of
+  at least 1). Below ×1.03 (`GEMV_LOWEST_MARGIN`, the lowest one whose rows the sweep records) the command warns on
+  stderr and in the verdict lines; the verdict lines end with the decisions that change at ×1.03. Groups whose case is not current
   are reported in the verdict lines, not refused, and so are the current groups without a usable reference. The field
   is written only when a choice is adopted. A registered id can take `--gemv-records` without `--records` (its tile geometry stays); a first
   table needs `--records`, and `--attention-bench` needs `--records`.
@@ -61,7 +65,7 @@ node tools/geometry-profiles/generate.ts <profile id> --gemv-plan [--gemv-record
   regenerated onto records of its own adapters. A shared table carries tile geometries only: `--attention-bench`,
   `--gemv-records` and `--gemv-plan` are usage errors beside it. Its verdict lines give each device's ratios.
 - `--min-speedup` is the tile geometry's adoption threshold (default ×1.05, the runtime's default); the GEMV choices
-  keep their own ×1.10.
+  keep their own rules (`--gemv-margin`).
 - Without `--dry-run` it writes the table file and prints what it wrote and the verdict lines. With `--dry-run` it
   writes nothing and prints the derived profile as JSON, the verdict lines and, for a registered id, every field that
   differs from the registered table (the provenance fields listed apart). With GEMV records the verdict lines end with

@@ -300,9 +300,10 @@ export { gemvSweepSession } from "./src/tune/gemv-sweep.ts";
  * {@link GEMV_STEADY_MAX_SHARE} of them beyond {@link GEMV_STEADY_GROUP_SPREAD}); the shortest pass
  * that is evidence ({@link GEMV_MIN_PASS_MS}); a row's gap ({@link gemvRoundsGap}: its second-smallest
  * round ÷ its smallest) and a gain's break-even margin ({@link gemvBreakEven}: gain ÷ the two gaps);
- * how the derivation reads a record by its class and timing ({@link gemvRecordReading}, with
- * {@link gemvTimingRefusal}), which a reader of one record shares so it never says more of a record
- * than the derivation will take.
+ * the margin a derivation takes ({@link gemvMarginOf}: the default, or a finite number of at least
+ * 1 — it throws otherwise); how the derivation reads a record by its class and timing
+ * ({@link gemvRecordReading}, with {@link gemvTimingRefusal}), which a reader of one record shares so
+ * it never says more of a record than the derivation will take.
  */
 export {
   GEMV_LOWEST_MARGIN,
@@ -312,6 +313,7 @@ export {
   GEMV_STEADY_MAX_SHARE,
   GEMV_STEADY_MIN_GROUPS,
   gemvBreakEven,
+  gemvMarginOf,
   gemvRecordReading,
   gemvRoundsGap,
   gemvSteadiness,

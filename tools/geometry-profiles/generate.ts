@@ -3,7 +3,7 @@
  * (`packages/runtime/src/kernels/geometry-profiles/<id>.ts`). From the repository root:
  *
  *   node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]]
- *     [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]]
+ *     [--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…] [--gemv-margin=<x>]]
  *     [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]
  *   node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
  *     [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]
@@ -18,6 +18,11 @@
  * format. GEMV sweep records (`--gemv-records`) derive the table's GEMV choices of linear
  * (`linearGemv`, with `deriveLinearGemvChoices`) onto the table; without them a base's field is
  * carried. A registered table can take GEMV sweep records alone; a first table needs `--records`.
+ * `--gemv-margin` is the margin of the rule of one steady record (default ×1.065, a finite number of
+ * at least 1, as the API takes it); below `GEMV_LOWEST_MARGIN` (×1.03) the records hold no times at
+ * M = 4 and 8 for the candidates between the two, which the command says on stderr and in the
+ * verdict lines. The GEMV verdict lines end with the decisions that change at `GEMV_LOWEST_MARGIN`
+ * (re-decided from the derivation's output).
  *
  * `--shared` derives a shared table: from the sweep records of two or more adapters of one vendor
  * and architecture, matched without a description (`deriveGeometryProfile`'s `shared`). It carries
@@ -42,10 +47,14 @@ import { BUILTIN_GEOMETRY_PROFILES, type GeometryProfile } from "@karume/runtime
 import {
   deriveGeometryProfile,
   deriveLinearGemvChoices,
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
+  gemvMarginOf,
   type GeometryProfileDerivation,
   type GeometryProfileTarget,
   geometryProfileJson,
   type LinearGemvDerivation,
+  redecideLinearGemvChoices,
 } from "@karume/runtime/tune";
 import { differenceLine, profileDifferences } from "./differences.ts";
 import { formatTypeScript, REPOSITORY_ROOT } from "./format.ts";
@@ -74,7 +83,7 @@ export const DEFAULT_MIN_SPEEDUP = 1.05;
 
 const USAGE =
   "usage: node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,<path>…]] " +
-  "[--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…]] " +
+  "[--attention-bench=<path>[,…]] [--gemv-records=<path>[,<path>…] [--gemv-margin=<x>]] " +
   "[--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>] [--dry-run]\n" +
   "       node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…] " +
   "[--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]\n" +
@@ -97,6 +106,8 @@ export type Request = {
   readonly gemvRecords: readonly string[];
   readonly match?: AdapterMatch;
   readonly minSpeedup: number;
+  /** The margin of the GEMV rule of one steady record (`--gemv-margin`; absent: the API's default). */
+  readonly gemvMargin?: number;
   readonly dryRun: boolean;
   /** Write the batch of what the GEMV records lack instead of deriving (`--gemv-plan`). */
   readonly gemvPlan: boolean;
@@ -112,6 +123,7 @@ const VALUE_OPTIONS = [
   "architecture",
   "description",
   "min-speedup",
+  "gemv-margin",
 ] as const;
 type ValueOption = (typeof VALUE_OPTIONS)[number];
 
@@ -166,7 +178,7 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
     // A shared table carries tile geometries only and is matched without a description
     const refused = [
       ...(gemvPlan ? ["--gemv-plan"] : []),
-      ...(["attention-bench", "gemv-records", "description"] as const)
+      ...(["attention-bench", "gemv-records", "gemv-margin", "description"] as const)
         .filter((option) => values.has(option))
         .map((option) => `--${option}`),
     ];
@@ -198,6 +210,20 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
   if (vendor === undefined && (architecture !== undefined || description !== undefined)) {
     throw new UsageError("--architecture and --description need --vendor");
   }
+  const marginText = values.get("gemv-margin");
+  if (marginText !== undefined && gemvRecords.length === 0) {
+    throw new UsageError("--gemv-margin needs --gemv-records (it is the GEMV derivation's margin)");
+  }
+  let gemvMargin: number | undefined;
+  if (marginText !== undefined) {
+    try {
+      gemvMargin = gemvMarginOf(marginText === "" ? Number.NaN : Number(marginText));
+    } catch (cause) {
+      throw new UsageError(
+        `--gemv-margin=${marginText}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
   const speedupText = values.get("min-speedup");
   const minSpeedup = speedupText === undefined ? DEFAULT_MIN_SPEEDUP : Number(speedupText);
   if (speedupText === "" || !Number.isFinite(minSpeedup)) {
@@ -218,6 +244,7 @@ export const parseCommandLine = (argv: readonly string[]): Request => {
           },
         }),
     minSpeedup,
+    ...(gemvMargin === undefined ? {} : { gemvMargin }),
     dryRun,
     gemvPlan,
     shared,
@@ -289,18 +316,51 @@ export const withLinearGemv = (
   };
 };
 
+const formatRatio = (value: number): string => `×${value.toFixed(3)}`;
+
+/**
+ * What the generator says of a GEMV margin below `GEMV_LOWEST_MARGIN` (undefined at or above it):
+ * the sweep carries on to M = 4 and 8 only the reorder candidates at least that much faster than the
+ * default's choice at M = 1, so a candidate between the two margins has no time there, and the rule
+ * refuses it for want of that time, not by its speed.
+ */
+export const gemvMarginWarning = (margin: number): string | undefined =>
+  margin >= GEMV_LOWEST_MARGIN
+    ? undefined
+    : `WARNING: the GEMV margin ${formatRatio(margin)} is below ${formatRatio(GEMV_LOWEST_MARGIN)} (GEMV_LOWEST_MARGIN), the lowest one the sweep records the rows of: at M = 4 and 8 it times only the reorder candidates at least ${formatRatio(GEMV_LOWEST_MARGIN)} faster than the default's choice at M = 1, so a parallel row between ${formatRatio(margin)} and ${formatRatio(GEMV_LOWEST_MARGIN)} is refused for having no time there, not for its speed`;
+
+/**
+ * The verdict lines of the decisions that change at `GEMV_LOWEST_MARGIN`, re-decided from the
+ * derivation's output alone (`redecideLinearGemvChoices`); none when the derivation ran at it.
+ */
+export const lowestMarginLines = (derivation: LinearGemvDerivation): string[] => {
+  if (derivation.rule.margin === GEMV_LOWEST_MARGIN) return [];
+  const { changed } = redecideLinearGemvChoices(derivation, GEMV_LOWEST_MARGIN);
+  const side = ({ choice, rowBlock }: { choice: string; rowBlock?: number }): string =>
+    rowBlock === undefined ? choice : `${choice} with row blocks of ${rowBlock}`;
+  return [
+    `- GEMV decisions that change at ${formatRatio(GEMV_LOWEST_MARGIN)} (GEMV_LOWEST_MARGIN, re-decided from this output): ${changed.length === 0 ? "none" : changed.length}`,
+    ...changed.map(
+      ({ field, shape, cases, from, to }) =>
+        `  - ${field} ${shape} (${cases.join(", ")}): ${side(from)} -> ${side(to)}`,
+    ),
+  ];
+};
+
 /**
  * The generator's GEMV step: `deriveLinearGemvChoices` over the loaded GEMV sweep records for
  * `table` (the tile geometry's derivation, or the registered table when only GEMV records are
- * given), and the table with the derived field in place. Its errors pass through unchanged.
+ * given) at `margin` (absent: the API's default), and the table with the derived field in place.
+ * Its errors pass through unchanged.
  */
 export const deriveGemvTable = (
   table: GeometryProfile,
   records: readonly LoadedRecord[],
+  margin?: number,
 ): { readonly profile: GeometryProfile; readonly derivation: LinearGemvDerivation } => {
   const derivation = deriveLinearGemvChoices(
     records.map(({ report, path, sha256 }) => ({ report, path, sha256 })),
-    { table },
+    { table, ...(margin === undefined ? {} : { margin }) },
   );
   return { profile: withLinearGemv(table, derivation.linearGemv), derivation };
 };
@@ -438,9 +498,21 @@ const run = async (argv: readonly string[], environment: CommandEnvironment): Pr
         });
   const tiled = geometry?.profile ?? base;
   if (tiled === undefined) throw new Error("No table to derive the GEMV choices for");
-  const gemv = gemvRecords.length === 0 ? undefined : deriveGemvTable(tiled, gemvRecords);
+  const gemv =
+    gemvRecords.length === 0 ? undefined : deriveGemvTable(tiled, gemvRecords, request.gemvMargin);
   const profile = gemv?.profile ?? tiled;
-  const verdicts = [...(geometry?.verdicts ?? []), ...(gemv?.derivation.verdicts ?? [])];
+  const warning = gemvMarginWarning(request.gemvMargin ?? GEMV_MARGIN);
+  if (gemv !== undefined && warning !== undefined) environment.stderr(warning);
+  const verdicts = [
+    ...(geometry?.verdicts ?? []),
+    ...(gemv === undefined
+      ? []
+      : [
+          ...(warning === undefined ? [] : [`- ${warning}`]),
+          ...gemv.derivation.verdicts,
+          ...lowestMarginLines(gemv.derivation),
+        ]),
+  ];
   const tablePath = `${PROFILES_DIRECTORY}/${request.id}.ts`;
   if (request.dryRun) {
     stdout(`Dry run: nothing written. The derived profile of '${request.id}':`);

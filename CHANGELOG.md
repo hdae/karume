@@ -101,7 +101,8 @@ measurements in `docs/research/`.
   a record's provenance its class. `planGemvMeasurements` counts by the rule the derivation
   takes for each decision: where a steady record timed the case at M = 1 only a steady record fills a gap
   (`missingSteady`, which the generator's `--gemv-plan` lists apart and puts in no batch step), elsewhere two records. The generator's header
-  states both rules. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
+  states both rules; its `--gemv-margin` sets the margin (a usage error where the API refuses it, `gemvMarginOf`, now
+  exported; a warning below ×1.03), and its GEMV verdict lines end with the decisions that change at ×1.03. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
   and, under the new rule, `tableChoice` and `evidence`.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
   (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group,

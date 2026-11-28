@@ -508,7 +508,10 @@ measures nothing and changes no default value.
   enters only where `decideOneRecord` reads them. `redecideLinearGemvChoices(derivation, margin)` decides every such
   decision again from the output alone, by the same function, builds the field again from the table's choices the
   derivation started from (`tableChoices`), and lists the decisions whose derived choice or row block changes; the
-  decisions of the rule of two records stay. At the derivation's own margin it gives the derivation back.
+  decisions of the rule of two records stay. At the derivation's own margin it gives the derivation back. A margin
+  below `GEMV_LOWEST_MARGIN` (×1.03) is taken, but the records hold no times at M = 4 and 8 for the parallel
+  candidates between it and ×1.03 (the sweep carries only those at least ×1.03 faster at M = 1), so such a
+  candidate is refused there for want of a time; the generator warns of it ([below](#the-command)).
 - **The rule of two records** — **the reference's time**: at a case and row count, the fastest `perDispatch` of the reference kernel over every
   current group of the given records in which its row is current, timed and without error. It is a time only when at
   least two different records hold a time within ×1.10 of it (`GEMV_REFERENCE_REPEAT`); otherwise no group at that
@@ -636,8 +639,8 @@ written.
 ## The command
 
 `node tools/geometry-profiles/generate.ts <profile id> [--records=<path>[,…]] [--attention-bench=<path>[,…]]
-[--gemv-records=<path>[,…]] [--vendor=<v> [--architecture=<a> [--description=<d>]]] [--min-speedup=<x>]
-[--dry-run]`
+[--gemv-records=<path>[,…] [--gemv-margin=<x>]] [--vendor=<v> [--architecture=<a> [--description=<d>]]]
+[--min-speedup=<x>] [--dry-run]`
 
 `node tools/geometry-profiles/generate.ts <profile id> --shared --records=<path>,<path>[,…]
 [--vendor=<v> --architecture=<a>] [--min-speedup=<x>] [--dry-run]`
@@ -649,6 +652,14 @@ written.
 - At least one of `--records` and `--gemv-records` is given. With `--gemv-records` alone, a registered table keeps its
   tile geometry and takes the derived GEMV choices; `--attention-bench` needs `--records`. `--min-speedup` is the tile
   geometry's threshold only.
+- `--gemv-margin` is the GEMV derivation's margin (`DeriveLinearGemvOptions.margin`, default ×1.065), refused as a
+  usage error where the API refuses it (`gemvMarginOf`: a finite number of at least 1) and without
+  `--gemv-records`. The lowest margin whose rows the records hold is `GEMV_LOWEST_MARGIN` (×1.03): the sweep times at
+  M = 4 and 8 only the reorder candidates at least that much faster than the default's choice at M = 1, so below it a
+  parallel row between the two margins is refused for want of a time there, not for its speed; the command says so
+  on stderr and in a verdict line beginning `WARNING:`. The GEMV verdict lines end with the decisions whose derived
+  choice changes at `GEMV_LOWEST_MARGIN` (`redecideLinearGemvChoices` of the output; none listed when the margin is
+  that one), so a table's header shows what the lower margin would move.
 - `--shared` derives a shared table ([above](#shared-tables)): a first one needs `--vendor` and `--architecture`, a
   registered one is regenerated on its table as base. `--description`, `--attention-bench`, `--gemv-records` and
   `--gemv-plan` beside it are usage errors, and so is `--shared` without `--records`.

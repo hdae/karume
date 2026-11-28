@@ -1113,6 +1113,10 @@
         "kind": "function"
       },
       {
+        "name": "gemvMarginOf",
+        "kind": "function"
+      },
+      {
         "name": "gemvReadingIsEvidence",
         "kind": "function"
       },
