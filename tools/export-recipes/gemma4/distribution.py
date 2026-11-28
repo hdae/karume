@@ -249,7 +249,7 @@ GEMMA4_TOKENIZER_ROLE = "tokenizer"
 #: asset's recorded source SHA-256 against the model's upstream `tokenizer.json`. The same check
 #: holds a model's own series to its current upstream file (a series compiled before that file was
 #: replaced is stale).
-#: Every model reads its own series: E4B shared E2B's until Google's glitch-token fixes of
+#: Every model reads its own series: E4B shared E2B's until the glitch-token fixes of
 #: 2026-11-03 gave E2B's and E4B's `tokenizer.json` different merges (E2B drops 267, E4B 253), and
 #: 12B's (fixed on 2026-10-30) drops 239 — the same vocabulary, but another model's asset would
 #: give other ids for some inputs. 26B's (`google/gemma-4-26B-A4B-it` at its pin) is still the file
@@ -628,9 +628,9 @@ class Gemma4Sources:
     model decides — {@link gemma4_text_config}) and `upstream_tokenizer` the `tokenizer.json` and
     `generation_config.json`. They are one checkpoint in the regular line. In the q4_0 QAT line the
     weights come from Google's QAT checkpoints, whose `tokenizer.json` is the one every Gemma 4
-    repository shipped before Google's glitch-token fixes (the QAT repositories have not received
-    them), so the tokenizer and the generation defaults are read from the regular `-it` repository
-    (`gemma4.sources.QAT_LINE_PINS`).
+    repository shipped before the glitch-token fixes (at their pinned commits the QAT repositories
+    ship the earlier file), so the tokenizer and the generation defaults are read from the regular
+    `-it` repository (`gemma4.sources.QAT_LINE_PINS`).
     """
 
     product: Path
@@ -1573,7 +1573,7 @@ def assert_gemma4_tokenizer_source(path: Path, checkpoint_tokenizer: Path) -> No
     `source` field; comparing that field with the model's upstream file is the only way to see
     both failures it guards against: a series borrowed from another model whose upstream is no
     longer the same bytes ({@link GEMMA4_TOKENIZER_SERIES}), and a model's own series compiled
-    before its upstream file was replaced (Google's glitch-token fixes of 2026-11-03 changed E2B's
+    before its upstream file was replaced (the glitch-token fixes of 2026-11-03 changed E2B's
     and E4B's `tokenizer.json`).
 
     MUST: matching the vocabulary size ({@link assert_gemma4_tokenizer}) is not enough — a
@@ -1963,7 +1963,7 @@ def gemma4_plan(
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     # MUST: every model's asset is held to the upstream `tokenizer.json` this plan reads for it,
     # in every line. A borrowed series whose upstream is other bytes, a model's own series compiled
-    # before its upstream file was replaced (Google's glitch-token fixes), and another model's or
+    # before its upstream file was replaced (the glitch-token fixes), and another model's or
     # another repository's file (the QAT weights' repositories ship the pre-fix tokenizer) all have
     # the right vocabulary and tokenize some inputs differently.
     assert_gemma4_tokenizer_source(

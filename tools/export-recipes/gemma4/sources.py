@@ -13,9 +13,10 @@ cache at pinned commits ({@link HUB_PINS}), from **two** repositories:
 - **the tokenizer, the chat template and the generation defaults** — `google/gemma-4-12B-it`.
   The QAT repository's `tokenizer_config.json`, `generation_config.json` and
   `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is the one every
-  Gemma 4 repository shipped before Google's glitch-token fixes (SHA-256 `cc8d3a0c…` — 12B-it's
-  own until its commit of 2026-10-30, `9788bdb6…` since, 239 merges fewer): the QAT repositories
-  have not received the fix.
+  Gemma 4 repository shipped before the glitch-token fixes (SHA-256 `cc8d3a0c…` — 12B-it's own
+  until its commit of 2026-10-30, "fix: Remediate 210 glitch tokens in tokenizer.json",
+  `9788bdb6…` since, 239 merges fewer): the QAT repository's file at its pinned commit is the one
+  from before that commit.
 
 26B A4B is read the same way ({@link HUB_PINS}): the weights (two shards and their index) and their
 config from `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`, the tokenizer, the chat template and
@@ -81,6 +82,22 @@ class SourcePinError(ValueError):
 
 
 @dataclass(frozen=True)
+class TokenizerFix:
+    """A tokenizer pin's commit when that commit is a glitch-token fix: it changed `tokenizer.json`
+    alone, and the weights' repository of a line that reads the pin ships, at its pinned commit,
+    the file from before it. The cards name the commit by these fields
+    (`gemma4.card.tokenizer_fix_clause`); they are the HF API's record of the commit
+    (`/api/models/<repo>/commits/main`, read on 2026-11-28)."""
+
+    #: The commit's title without its pull-request suffix (` (#51)`).
+    title: str
+    #: The number of the pull request the commit merged (`<repo>/discussions/<n>` on the Hub).
+    pull_request: int
+    #: The commit's date (UTC, `YYYY-MM-DD`).
+    date: str
+
+
+@dataclass(frozen=True)
 class HubPin:
     """One repository's commit in the hub cache."""
 
@@ -97,6 +114,9 @@ class HubPin:
     #: apart so the fingerprint's check (`gemma4.provenance.assert_pinned_fingerprint`) still
     #: covers exactly the fingerprinted files.
     also_checked: Mapping[str, str] = field(default_factory=dict)
+    #: The glitch-token fix {@link revision} is, for a tokenizer pin at one ({@link TokenizerFix});
+    #: `None` for every other pin.
+    tokenizer_fix: TokenizerFix | None = None
 
     @property
     def label(self) -> str:
@@ -134,11 +154,12 @@ class ModelPins:
 #:   `vocab_size_per_layer_input` (0 instead of 262144 — unread: the class has no per-layer
 #:   embeddings); the audio and vision sub-configs drop a few fields.
 #: - tokenizer: `main` of `google/gemma-4-12B-it` (the commit 12B was first pinned at) — the LFS
-#:   blob name of `tokenizer.json` (module docstring: the QAT repository's is the file from before
-#:   Google's glitch-token fixes), and the SHA-256 of `processor_config.json`'s bytes (1,382 B;
-#:   `max_soft_tokens` 280 — the image goldens of `gemma4.export_vision` are taken at its budget
-#:   and the distribution declares it, so the file is pinned though no fingerprint names it). The
-#:   cached file's git blob id was `b889adcd…`, the one the snapshot links it by.
+#:   blob name of `tokenizer.json` (module docstring: the commit is 12B-it's glitch-token fix, and
+#:   the QAT repository's file is the one from before it), and the SHA-256 of
+#:   `processor_config.json`'s bytes (1,382 B; `max_soft_tokens` 280 — the image goldens of
+#:   `gemma4.export_vision` are taken at its budget and the distribution declares it, so the file
+#:   is pinned though no fingerprint names it). The cached file's git blob id was `b889adcd…`, the
+#:   one the snapshot links it by.
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 _TWELVE_B_WEIGHTS = HubPin(
@@ -158,6 +179,11 @@ _TWELVE_B_TOKENIZER = HubPin(
             "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9"
         )
     },
+    tokenizer_fix=TokenizerFix(
+        title="fix: Remediate 210 glitch tokens in tokenizer.json",
+        pull_request=55,
+        date="2026-10-30",
+    ),
 )
 #: 26B A4B, both in the hub cache on 2026-11-08 (neither is gated):
 #:
@@ -167,11 +193,11 @@ _TWELVE_B_TOKENIZER = HubPin(
 #:   `config.json`'s bytes). Its text config is `google/gemma-4-26B-A4B-it`'s field for field (the
 #:   `gemma4_text` class with the expert block on — ADR 0145).
 #: - tokenizer: `main` of `google/gemma-4-26B-A4B-it` (ADR 0145 decision 5, as 12B pins 12B-it). At
-#:   this commit its `tokenizer.json` is still the file from before Google's glitch-token fixes
-#:   (`cc8d3a0c…`, the QAT repository's too), its `chat_template.jinja` is 12B's byte for byte
-#:   (`ae53464b…`), and its `generation_config.json` declares no `suppress_tokens` (stop ids
-#:   `[1, 106, 50]`); the QAT repository's `tokenizer_config.json` and `generation_config.json` are
-#:   other bytes.
+#:   this commit its `tokenizer.json` is the file from before the glitch-token fixes of the other
+#:   models (`cc8d3a0c…`, the QAT repository's too — so the pin has no {@link TokenizerFix}), its
+#:   `chat_template.jinja` is 12B's byte for byte (`ae53464b…`), and its `generation_config.json`
+#:   declares no `suppress_tokens` (stop ids `[1, 106, 50]`); the QAT repository's
+#:   `tokenizer_config.json` and `generation_config.json` are other bytes.
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 _TWENTY_SIX_B_WEIGHTS = HubPin(
@@ -202,10 +228,11 @@ HUB_PINS: Mapping[str, ModelPins] = {
 
 #: Model → the regular `-it` repository's tokenizer at the commit the hand-placed checkpoint was
 #: fetched at (the `.metadata` record of `inputs/gemma4/gemma-4-E{2,4}B-it/`) — the LFS blob name
-#: of `tokenizer.json`, in the hub cache on 2026-11-03. Both are Google's commits of 2026-11-03 that
-#: changed `tokenizer.json` alone ("Remediate 233 / 219 glitch tokens" — E2B drops 267 BPE merges
-#: and renames id 249788 to `<glitch_pruned_249788>`, E4B drops 253 merges), so E2B's and E4B's
-#: `tokenizer.json` are no longer the same bytes. The lines whose weights come from another
+#: of `tokenizer.json`, in the hub cache on 2026-11-03. Both are commits of 2026-11-03 that changed
+#: `tokenizer.json` alone, the glitch-token fixes each pin's {@link TokenizerFix} names ("Remediate
+#: 233 / 219 glitch tokens" — E2B drops 267 BPE merges and renames id 249788 to
+#: `<glitch_pruned_249788>`, E4B drops 253 merges), so E2B's and E4B's `tokenizer.json` are no
+#: longer the same bytes. The lines whose weights come from another
 #: repository read their tokenizer here: the q4_0 QAT line ({@link QAT_PINS}) and the mobile QAT
 #: line (`gemma4_qat.config.SOURCES`) — one spelling, so the lines cannot drift apart.
 #:
@@ -218,6 +245,11 @@ REGULAR_TOKENIZER_PINS: Mapping[str, HubPin] = {
         sha256={
             "tokenizer.json": "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2"
         },
+        tokenizer_fix=TokenizerFix(
+            title="fix: Remediate 233 glitch tokens in tokenizer.json",
+            pull_request=51,
+            date="2026-11-03",
+        ),
     ),
     "e4b": HubPin(
         repo=GEMMA4_UPSTREAM["e4b"],
@@ -225,6 +257,11 @@ REGULAR_TOKENIZER_PINS: Mapping[str, HubPin] = {
         sha256={
             "tokenizer.json": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc"
         },
+        tokenizer_fix=TokenizerFix(
+            title="fix: Remediate 219 glitch tokens in tokenizer.json",
+            pull_request=50,
+            date="2026-11-03",
+        ),
     ),
 }
 
@@ -236,7 +273,7 @@ REGULAR_TOKENIZER_PINS: Mapping[str, HubPin] = {
 #:   Against the regular `-it` config the text config differs in no field the export reads (the
 #:   `transformers_version` and two null MoE fields).
 #: - tokenizer: {@link REGULAR_TOKENIZER_PINS}. The QAT repositories still ship the tokenizer
-#:   from before Google's glitch-token fixes (SHA-256 `cc8d3a0c…`), and their
+#:   from before the glitch-token fixes at their pinned commits (SHA-256 `cc8d3a0c…`), and their
 #:   `tokenizer_config.json` and `generation_config.json` are other bytes; reading the tokenizer
 #:   files from the regular repository keeps the line's tokenizer the regular product's.
 #:

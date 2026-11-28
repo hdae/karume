@@ -111,7 +111,7 @@ type RealAsset = {
 };
 
 const GEMMA4_ASSET: RealAsset = {
-  // E2B's tokenizer. Every model has its own since Google's glitch-token fixes (E2B drops 267 BPE
+  // E2B's tokenizer. Every model has its own since the glitch-token fixes (E2B drops 267 BPE
   // merges, E4B 253 — {@link GEMMA4_E4B_ASSET}; 12B 239 — {@link GEMMA4_12B_ASSET}); the
   // vocabulary is the same. e2b is named so the selection is fixed.
   read: async () =>
@@ -580,7 +580,7 @@ test("EmbeddingGemma 2 fixture: the long case is more than 600 tokens with <bos>
   assertEquals(long.idsWithSpecials, [fixture.asset.bosId, ...long.ids, fixture.asset.eosId]);
 });
 
-// 26B's tokenizer.json is the file from before Google's glitch-token fixes, so it has its own series
+// 26B's tokenizer.json is the file from before the glitch-token fixes, so it has its own series
 // too: the 26B fixture's `12b-dropped-merge*` cases hit merges 12B's fix dropped and 26B keeps. On
 // 12B's full asset they must tokenize differently (E2B's fix kept those merges, so E2B's asset could
 // not tell the two apart).

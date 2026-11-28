@@ -228,6 +228,46 @@ class TestQatCardAttribution:
             assert "licensed **apache-2.0** (as of retrieval;" in bullet
             assert "a verbatim copy is in `LICENSE.md`" in bullet
 
+    @pytest.mark.parametrize(
+        ("model", "title", "pull_request"),
+        [
+            ("e2b", "fix: Remediate 233 glitch tokens in tokenizer.json", 51),
+            ("e4b", "fix: Remediate 219 glitch tokens in tokenizer.json", 50),
+        ],
+    )
+    def test_it_names_the_fix_commit_the_tokenizer_comes_from(
+        self, model: str, title: str, pull_request: int
+    ) -> None:
+        """The tokenizer is the base model's file at its glitch-token fix, and the mobile
+        repository's own file at its pin is the earlier one: the card names that commit by its
+        title and pull request, attributes it to no one, and states nothing that can go stale."""
+        attribution = _attribution(render_card(_two_model_manifest(), REPO))
+        bullet = attribution.split(f"- **`{model}`**")[1].split("\n- ")[0]
+        base = SOURCES[model].pins.tokenizer.repo
+
+        assert (
+            f"the tokenizer is `tokenizer.json` of its base model [{base}]"
+            f"(https://huggingface.co/{base}) at commit `{SOURCES[model].pins.tokenizer.revision}`,"
+            f' the commit "{title}" ([pull request #{pull_request}]'
+            f"(https://huggingface.co/{base}/discussions/{pull_request}), 2026-11-03), which"
+            " changed that file alone; the mobile repository's own `tokenizer.json` at the"
+            " commit above is the file from before that change. Both are licensed"
+        ) in bullet
+        assert "Google's glitch" not in attribution
+        assert "has not received" not in attribution
+
+    def test_a_tokenizer_pin_at_no_fix_fails_the_render(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sentence describes a change; a pin at another commit must not render it."""
+        source = SOURCES["e2b"]
+        tokenizer = dataclasses.replace(source.pins.tokenizer, tokenizer_fix=None)
+        pins = dataclasses.replace(source.pins, tokenizer=tokenizer)
+        monkeypatch.setitem(distribution.SOURCES, "e2b", dataclasses.replace(source, pins=pins))
+
+        with pytest.raises(ValueError, match="not a glitch-token fix"):
+            render_card(_qat_manifest("e2b"), REPO)
+
     def test_it_attributes_only_the_models_it_carries(self) -> None:
         """A model not in the manifest is not redistributed, so it is not named as a source."""
         card = render_card(_qat_manifest("e4b"), REPO)

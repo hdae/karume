@@ -38,7 +38,7 @@ group of 32 values — the linears, the tied embedding and the PLE table, PLE in
 two are not bit-identical: the export refits each group's step within 2^-7 of the group's largest
 magnitude. Both checkpoints come from the local Hugging Face cache at the commits
 `gemma4.sources` pins; the tokenizer is the regular `-it` one the line ships, not the QAT
-repository's (which predates Google's glitch-token fixes). Adding a profile adds a tokenizer to
+repository's (which predates the glitch-token fixes). Adding a profile adds a tokenizer to
 the suite, so prepare a new suite before scoring the new profiles.
 
 For `gemma4-qat-e2b` and `gemma4-qat-e4b`, use `--weights stored` once: the official checkpoint

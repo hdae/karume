@@ -429,7 +429,9 @@ maintainer's ruling of 2026-11-06).
     `gemma4_qat` recipes) on 2026-11-28: the mobile card's common sections, usage and tags, links in place of
     code-font repository IDs, the notices opened through one helper that names the models a build holds, Google's QAT
     note quoted on `karume-gemma4-qat`, and `karume-gemma4`'s attribution stating its int8 drafters (review material
-    `outputs/misc/cards-gemma4-2026-11-28/`, untracked).
+    `outputs/misc/cards-gemma4-2026-11-28/`, untracked). After that material was drawn, both Gemma 4 QAT cards came
+    to name each tokenizer pin's glitch-token fix by its commit title, pull request and date, attributed to no one
+    (ruling of 2026-11-28; `karume-gemma4-qat` for E2B, E4B and 12B, not 26B).
   - **Uploads**: each of the nineteen repositories needs one re-upload carrying every change. Where a preset
     description moved into a note, the manifest changes too (`karume-irodori-v4-small`, `karume-irodori-v4.1-small`,
     `karume-irodori-v4.1-small-mf`, `karume-sbv2-jvnv`, `karume-wan2.2` and the three Gemma 4 repositories), so those
@@ -442,11 +444,7 @@ maintainer's ruling of 2026-11-06).
       read); `karume-birefnet-hr`'s line that several datasets the BiRefNet repository draws on are distributed for
       research purposes (from the GitHub README, which has no pinned commit here); `karume-lucida`'s explanation that
       the m35 variant has `Normalize` folded into its first convolution (from a table cell of the upstream card);
-      `karume-anima-2.9b`'s summary of the upstream's recommended steps and guidance (numbers, not a sentence);
-      `karume-gemma4-qat-mobile`'s note that each tokenizer is that of "Google's glitch-token fixes of 2026-11-03, which
-      the mobile repository has not received" (the fixes and their date are the upstream's commit history — the
-      commits titled "Remediate 233 / 219 glitch tokens" — which no card of it states; that the mobile repository's
-      `tokenizer.json` is the older file is the recipe's own check of the digests).
+      `karume-anima-2.9b`'s summary of the upstream's recommended steps and guidance (numbers, not a sentence).
     - The NVIDIA notice of the Anima texts writes bare URLs; it is ruled wording (rulings 39 a / 40 a, 2026-10-29).
     - The changes bullet cites no clause on the MIT, Gemma and CircleStone cards; whether to cite one is a legal call.
     - `base_model_relation` is decided per family (derived in birefnet, from every stored dtype on the regular
