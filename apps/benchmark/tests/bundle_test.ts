@@ -148,7 +148,14 @@ describe("unpack", () => {
     const result = await unpackBundles(root, [file]);
     expect(result.code).toBe(0);
     const files = bundleRecordFiles(bundleOf(made));
-    expect(result.lines).toEqual(files.map(({ path }) => `wrote ${path}`));
+    // A GEMV record says its class beside its file (the trial's two cases: too few groups)
+    expect(result.lines).toEqual(
+      files.map(({ path }) =>
+        path.includes("/gemv-sweep_")
+          ? `wrote ${path} (GEMV too few groups for a class: read as unsteady)`
+          : `wrote ${path}`,
+      ),
+    );
     for (const [index, { path }] of files.entries()) {
       const bytes = new Uint8Array(await readFile(join(root, path)));
       const record = made[index];

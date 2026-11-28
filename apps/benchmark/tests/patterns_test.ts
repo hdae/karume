@@ -1,4 +1,10 @@
-import { GEMV_MIN_SPEEDUP, GEOMETRY_MIN_SPEEDUP } from "@karume/runtime/tune";
+import {
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
+  type GemvSweepCaseSummary,
+  type GemvSweepRow,
+  GEOMETRY_MIN_SPEEDUP,
+} from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import { gemvPatterns, geometryPatterns } from "../src/patterns.ts";
@@ -20,25 +26,37 @@ const references = (caseId: string) => [
 ];
 
 describe("gemvPatterns", () => {
-  it("counts a group whose sequential variant is the derivation's threshold faster than the baseline, its words the baseline's", () => {
+  // Every fake row's rounds are 80 ms and 80.1 ms: a gap of 1.00125, so a candidate's bar over its
+  // reference is the margin × 1.00125² (×1.0677 at ×1.065, ×1.0326 at ×1.03)
+  const BAR = GEMV_MARGIN * 1.00125 ** 2;
+  const LOW_BAR = GEMV_LOWEST_MARGIN * 1.00125 ** 2;
+  const count = (summaries: readonly GemvSweepCaseSummary[], rows: readonly GemvSweepRow[]) =>
+    gemvPatterns(summaries, rows, "ns");
+
+  it("counts a group whose sequential variant clears the bar at ×1.065 over the baseline, its words the baseline's — and at ×1.03 too", () => {
     const rows = [
       ...references(GEMV_A),
-      gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / (GEMV_MIN_SPEEDUP + 0.001) }),
+      gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / (BAR + 0.001) }),
     ];
-    expect(gemvPatterns([gemvSummary(GEMV_A)], rows)).toEqual({ found: 1, of: 1 });
+    expect(count([gemvSummary(GEMV_A)], rows)).toEqual({ atMargin: 1, atLowest: 1, of: 1 });
   });
 
-  it("does not count one just below the threshold, or one whose words differ (faults)", () => {
+  it("counts one between the two margins at ×1.03 only, and none below the lower bar or whose words differ (faults)", () => {
+    const between = [
+      ...references(GEMV_A),
+      gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / (BAR - 0.001) }),
+    ];
+    expect(count([gemvSummary(GEMV_A)], between)).toEqual({ atMargin: 0, atLowest: 1, of: 1 });
     const below = [
       ...references(GEMV_A),
-      gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / (GEMV_MIN_SPEEDUP - 0.001) }),
+      gemvRow(GEMV_A, "identical", { perDispatch: 20_000 / (LOW_BAR - 0.001) }),
     ];
     const differs = [
       ...references(GEMV_A),
-      gemvRow(GEMV_A, "identical", { identicalToBaseline: false }),
+      gemvRow(GEMV_A, "identical", { perDispatch: 10_000, identicalToBaseline: false }),
     ];
-    expect(gemvPatterns([gemvSummary(GEMV_A)], below).found).toBe(0);
-    expect(gemvPatterns([gemvSummary(GEMV_A)], differs).found).toBe(0);
+    expect(count([gemvSummary(GEMV_A)], below).atLowest).toBe(0);
+    expect(count([gemvSummary(GEMV_A)], differs).atLowest).toBe(0);
   });
 
   it("reads a parallel row against the default's choice at reorder, not the baseline, and holds it to the band", () => {
@@ -53,12 +71,12 @@ describe("gemvPatterns", () => {
       },
     });
     const summary = [gemvSummary(GEMV_A)];
-    // ×1.5 over the baseline but only ×1.09 over parallel-l4 at 12 µs: no pattern (fault: read against the baseline)
-    expect(gemvPatterns(summary, [...references(GEMV_A), parallel(12_000 / 1.09)]).found).toBe(0);
-    expect(gemvPatterns(summary, [...references(GEMV_A), parallel(12_000 / 1.2)]).found).toBe(1);
+    // ×1.9 over the baseline but only ×1.05 over parallel-l4 at 12 µs: no pattern at ×1.065 (fault: read against the baseline)
+    expect(count(summary, [...references(GEMV_A), parallel(12_000 / 1.05)]).atMargin).toBe(0);
+    expect(count(summary, [...references(GEMV_A), parallel(12_000 / 1.2)]).atMargin).toBe(1);
     expect(
-      gemvPatterns(summary, [...references(GEMV_A), parallel(12_000 / 1.2, { withinBand: false })])
-        .found,
+      count(summary, [...references(GEMV_A), parallel(12_000 / 1.2, { withinBand: false })])
+        .atLowest,
     ).toBe(0);
   });
 
@@ -66,20 +84,33 @@ describe("gemvPatterns", () => {
     const summary = [gemvSummary(GEMV_A)];
     const fast = { perDispatch: 1_000 };
     expect(
-      gemvPatterns(summary, [...references(GEMV_A), gemvRow(GEMV_A, "subgroup", fast)]).found,
+      count(summary, [...references(GEMV_A), gemvRow(GEMV_A, "subgroup", fast)]).atLowest,
     ).toBe(0);
     expect(
-      gemvPatterns(summary, [
+      count(summary, [
         ...references(GEMV_A),
         gemvRow(GEMV_A, "identical", { ...fast, screened: true }),
-      ]).found,
+      ]).atLowest,
     ).toBe(0);
     expect(
-      gemvPatterns(summary, [
+      count(summary, [
         ...references(GEMV_A),
         gemvRow(GEMV_A, "identical", { ...fast, error: "boom" }),
-      ]).found,
+      ]).atLowest,
     ).toBe(0);
+  });
+
+  it("is no evidence from a pass under 20 ms, a reference re-timed beyond the bar, or timing not in ns (faults: 10 ms rounds, a re-timing ×0.9, Deno's raw ticks)", () => {
+    const summary = [gemvSummary(GEMV_A)];
+    const fast = gemvRow(GEMV_A, "identical", { perDispatch: 10_000 });
+    expect(count(summary, [...references(GEMV_A), fast]).atMargin).toBe(1);
+    const short = gemvRow(GEMV_A, "identical", { perDispatch: 10_000, rounds: [10e6, 10.01e6] });
+    expect(count(summary, [...references(GEMV_A), short]).atLowest).toBe(0);
+    const [baseline, reorder] = references(GEMV_A);
+    if (baseline === undefined || reorder === undefined) throw new Error("no references");
+    const moved = { ...baseline, retimedPerDispatch: 20_000 * 0.9 };
+    expect(count(summary, [moved, reorder, fast]).atLowest).toBe(0);
+    expect(gemvPatterns(summary, [...references(GEMV_A), fast], "deno-raw-tick").atLowest).toBe(0);
   });
 
   it("reads only the groups at which the derivation picks a winner (M = 1), and none without a timed reference", () => {
@@ -87,19 +118,23 @@ describe("gemvPatterns", () => {
     const rows = [...references(GEMV_A), gemvRow(GEMV_A, "identical", { perDispatch: 1_000 })].map(
       (row) => ({ ...row, m: 4 }),
     );
-    expect(gemvPatterns([atFour], rows)).toEqual({ found: 0, of: 0 });
+    expect(count([atFour], rows)).toEqual({ atMargin: 0, atLowest: 0, of: 0 });
     const failedBaseline = [
       gemvRow(GEMV_A, "baseline", { error: "boom" }),
       gemvRow(GEMV_A, "identical", { perDispatch: 1_000 }),
     ];
-    expect(gemvPatterns([gemvSummary(GEMV_A)], failedBaseline)).toEqual({ found: 0, of: 1 });
+    expect(count([gemvSummary(GEMV_A)], failedBaseline)).toEqual({
+      atMargin: 0,
+      atLowest: 0,
+      of: 1,
+    });
   });
 
   it("reads against the current default profile's choice, whatever the group's summary names", () => {
     // The summary names the fast variant as the choice at exact; the derivation reads c32u4 there
     const summary = gemvSummary(GEMV_A, { profile: { exact: "c64u8", reorder: "parallel-l4" } });
     const rows = [...references(GEMV_A), gemvRow(GEMV_A, "identical", { perDispatch: 10_000 })];
-    expect(gemvPatterns([summary], rows)).toEqual({ found: 1, of: 1 });
+    expect(count([summary], rows)).toEqual({ atMargin: 1, atLowest: 1, of: 1 });
   });
 
   it("counts groups, not candidates: two cases, one with two winners", () => {
@@ -113,8 +148,9 @@ describe("gemvPatterns", () => {
       }),
       ...references(GEMV_B),
     ];
-    expect(gemvPatterns([gemvSummary(GEMV_A), gemvSummary(GEMV_B)], rows)).toEqual({
-      found: 1,
+    expect(count([gemvSummary(GEMV_A), gemvSummary(GEMV_B)], rows)).toEqual({
+      atMargin: 1,
+      atLowest: 1,
       of: 2,
     });
   });

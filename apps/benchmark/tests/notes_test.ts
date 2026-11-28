@@ -142,10 +142,53 @@ describe("afterRunNotes", () => {
     expect(notes[0]).not.toMatch(/tile geometry/);
   });
 
-  it("says nothing when the GEMV timing was not quantized, or the GEMV sweep measured nothing", async () => {
-    expect(afterRunNotes(await records(false))).toEqual([]);
+  /** A record's data that is a GEMV sweep record (the merged one of the run). */
+  const isGemvData = (data: unknown): data is GemvSweepReport =>
+    typeof data === "object" &&
+    data !== null &&
+    "format" in data &&
+    data.format === "karume-gemv-sweep/4";
+
+  it("says nothing when the GEMV timing was not quantized and the run was steady, or the GEMV sweep measured nothing", async () => {
+    const steady = (await records(false)).map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              steadiness: { class: "steady" as const, groups: 40, unsteadyGroups: 1, share: 0.025 },
+            },
+          }
+        : record,
+    );
+    expect(afterRunNotes(steady)).toEqual([]);
     const [gemv] = await records(true);
     if (gemv === undefined) throw new Error("no GEMV record");
     expect(afterRunNotes([{ ...gemv, data: undefined }])).toEqual([]);
+  });
+
+  it("asks for one more run after an unsteady GEMV run, and says when a short one has too few groups to tell (faults: unsteady, two cases)", async () => {
+    const made = await records(false);
+    // The trial's two cases: too few groups for a class
+    const [few] = afterRunNotes(made);
+    expect(few).toContain("too few groups");
+    const unsteady = made.map((record) =>
+      isGemvData(record.data)
+        ? {
+            ...record,
+            data: {
+              ...record.data,
+              steadiness: {
+                class: "unsteady" as const,
+                groups: 40,
+                unsteadyGroups: 20,
+                share: 0.5,
+              },
+            },
+          }
+        : record,
+    );
+    const [again] = afterRunNotes(unsteady);
+    expect(again).toContain("please run the page once more at another time");
   });
 });

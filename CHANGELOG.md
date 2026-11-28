@@ -98,6 +98,12 @@ measurements in `docs/research/`.
   a record's provenance its class. `planGemvMeasurements` takes one steady record as enough. The generator's header
   states both rules. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
   and, under the new rule, `tableChoice` and `evidence`.
+- The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
+  (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group),
+  at ×1.065 and at ×1.03 side by side, beside the run's class — steady, "this run alone is enough for a table";
+  unsteady, "please run the page once more at another time"; too few groups so far —, and a note after an unsteady
+  run asks for a second one. `unpack.ts` says each GEMV record's class beside the file it writes. The GEMV priors of
+  the time left are 28 and 16 s (were 27 and 15: the re-timing and the ×1.03 carry add about 4 % to a GEMV case).
 - `@karume/runtime/tune`: at 4 and 8 rows the GEMV sweep carries on every reorder candidate at least ×1.03 faster than
   the default's choice at M = 1 in a steady group (was ×1.10), so that a record holds what a derivation of one steady
   record — and its re-decision at ×1.03 — reads there.

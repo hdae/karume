@@ -40,7 +40,7 @@ import { holdWakeLock } from "./wake-lock.ts";
 declare const __BENCHMARK_CHECKOUT__: Checkout;
 
 const HONESTY =
-  "These are candidates from this one run: a table takes a pattern only after a second run on this machine agrees.";
+  "Where this run held steady, a table can take these from it alone; where it did not, only after a second run on this machine agrees.";
 
 /** The adapter, or why the page cannot run on this browser. */
 const probeGpu = async (): Promise<FoundAdapter | string> => {
@@ -256,7 +256,7 @@ const main = async (): Promise<void> => {
   const showEnding = (result: RunEnding, state: ProgressState): void => {
     ending.hidden = false;
     const { bundle } = result;
-    const counts = patternLines(plan, state.patterns).join(". ");
+    const counts = patternLines(plan, state).join(". ");
     endNotes.replaceChildren(
       ...afterRunNotes(bundle.records).map((text) =>
         element("p", { className: "warning", textContent: text }),

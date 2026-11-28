@@ -1635,11 +1635,20 @@ const steadyTime = (state: GroupState | undefined, name: string): SteadyTime => 
   if (state?.kind !== "current") return { kind: "none" };
   const row = state.group.rows.get(name);
   if (row === undefined || rowStaleness(row, state.kernels) !== undefined) return { kind: "none" };
+  return steadyRowTime(row);
+};
+
+/** A row's time, gap and re-timing as {@link steadyTime} reads them, whatever its group. */
+const steadyRowTime = (
+  row: Pick<RowObservation, "error" | "perDispatch" | "reps" | "rounds" | "retimedPerDispatch">,
+): SteadyTime => {
   const { perDispatch, reps } = row;
   if (row.error !== undefined || perDispatch === undefined || reps === undefined) {
     return { kind: "none" };
   }
-  if (perDispatch * reps < GEMV_MIN_PASS_MS * NS_PER_MS) return { kind: "none" };
+  // The pass the time is read from: the smallest positive round (perDispatch × reps)
+  const pass = Math.min(...(row.rounds ?? []).filter((round) => round > 0));
+  if (!(pass >= GEMV_MIN_PASS_MS * NS_PER_MS)) return { kind: "none" };
   const gap = gemvRoundsGap(row.rounds);
   if (gap === undefined) return { kind: "none" };
   return {
@@ -1652,6 +1661,26 @@ const steadyTime = (state: GroupState | undefined, name: string): SteadyTime => 
   };
 };
 
+/** The reading of two kernels' times in one group (`own` against `other`), or none. */
+const readingOf = (
+  own: SteadyTime,
+  other: SteadyTime,
+  where: { readonly record: string; readonly caseId: string; readonly m: number },
+): GemvPairReading[] => {
+  if (own.kind !== "time" || other.kind !== "time") return [];
+  const gain = other.time / own.time;
+  return [
+    {
+      ...where,
+      gain,
+      gap: own.gap,
+      referenceGap: other.gap,
+      ...(other.retime === undefined ? {} : { retime: other.retime }),
+      breakEven: gemvBreakEven(gain, own.gap, other.gap),
+    },
+  ];
+};
+
 /** One steady record's reading of `name` against `reference` in its group of a case at `m`. */
 const pairReading = (
   record: Labelled,
@@ -1661,22 +1690,66 @@ const pairReading = (
   reference: string,
 ): GemvPairReading[] => {
   const state = record.states.get(groupKey(caseId, m));
-  const own = steadyTime(state, name);
-  const other = steadyTime(state, reference);
-  if (own.kind !== "time" || other.kind !== "time") return [];
-  const gain = other.time / own.time;
-  return [
-    {
-      record: record.source.path,
-      caseId,
-      m,
-      gain,
-      gap: own.gap,
-      referenceGap: other.gap,
-      ...(other.retime === undefined ? {} : { retime: other.retime }),
-      breakEven: gemvBreakEven(gain, own.gap, other.gap),
-    },
-  ];
+  return readingOf(steadyTime(state, name), steadyTime(state, reference), {
+    record: record.source.path,
+    caseId,
+    m,
+  });
+};
+
+/**
+ * How the rule of one steady record reads a candidate's row against its class's reference row of
+ * the same group, as a reader of one record asks it (the benchmark page): the reading — gain, both
+ * gaps, the reference's re-timing and the break-even margin — when the reference's row is one
+ * (`gemvReferenceRefusal`), the candidate's row is evidence with its check held (`gemvRowReading`),
+ * and both rows have a time a steady record's group would be read by (no error, a pass of at least
+ * 20 ms, two positive rounds or more); none otherwise, and none for a record not timed in ns (its
+ * passes' length is not known). Whether the reading clears a margin is `gemvReadingIsEvidence` and
+ * its break-even margin. The derivation reads rows by the same functions, with whether each row is
+ * of the current runtime besides. `record` names the reading's record. Pure.
+ */
+export const gemvSteadyReading = (
+  row: Pick<
+    GemvSweepRow,
+    | "caseId"
+    | "m"
+    | "error"
+    | "screened"
+    | "skipped"
+    | "perDispatch"
+    | "reps"
+    | "rounds"
+    | "retimedPerDispatch"
+    | "isBaseline"
+    | "identicalToBaseline"
+    | "withinBand"
+  >,
+  reference: Pick<
+    GemvSweepRow,
+    | "error"
+    | "perDispatch"
+    | "reps"
+    | "rounds"
+    | "retimedPerDispatch"
+    | "isBaseline"
+    | "identicalToBaseline"
+  >,
+  candidateClass: GemvCandidateClass,
+  unit: string,
+  record = "",
+): GemvPairReading | undefined => {
+  if (unit !== "ns" || gemvReferenceRefusal(reference, candidateClass) !== undefined) {
+    return undefined;
+  }
+  if (gemvRowReading(row, candidateClass, reference.perDispatch).kind !== "evidence") {
+    return undefined;
+  }
+  const [reading] = readingOf(steadyRowTime(row), steadyRowTime(reference), {
+    record,
+    caseId: row.caseId,
+    m: row.m,
+  });
+  return reading;
 };
 
 /** Whether a group's reference for a class is usable (its row is a reference, timed or not repeated). */

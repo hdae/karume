@@ -10,8 +10,15 @@
  */
 
 import {
-  GEMV_MIN_SPEEDUP,
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
+  GEMV_STEADY_GROUP_SPREAD,
+  GEMV_STEADY_MAX_SHARE,
+  GEMV_STEADY_MIN_GROUPS,
+  type GemvSteadiness,
+  type GemvSweepCaseSummary,
   type GemvSweepPhase,
+  gemvSteadiness,
   GEOMETRY_MIN_SPEEDUP,
   type GeometrySweepPhase,
   type GeometrySweepReport,
@@ -20,7 +27,12 @@ import { cutShort } from "@karume/sweep-app-support/per-case-sweep";
 
 import type { BenchmarkEvent, StampedEvent } from "./controller.ts";
 import { durationText, remainingEstimate } from "./estimate.ts";
-import { gemvPatterns, geometryPatterns, type PatternCount } from "./patterns.ts";
+import {
+  type GemvPatternCount,
+  gemvPatterns,
+  geometryPatterns,
+  type PatternCount,
+} from "./patterns.ts";
 import type { BenchmarkPlan, CaseKind, SweepId } from "./plan.ts";
 
 /** The step a case is at: a phase of its sweep and the units of that phase done of all. */
@@ -55,7 +67,12 @@ export type ProgressState = {
    * The patterns of the finished cases. A GEMV group is one case's, so its count adds up case by
    * case; a geometry class spans cases, so its count is read again over every finished case's record.
    */
-  readonly patterns: { readonly gemv: PatternCount; readonly geometry: PatternCount };
+  readonly patterns: { readonly gemv: GemvPatternCount; readonly geometry: PatternCount };
+  /**
+   * The summaries of the finished GEMV cases, which the run's class is read from (the class of the
+   * record they merge into: `gemvSteadiness`).
+   */
+  readonly gemvSummaries: readonly GemvSweepCaseSummary[];
   /** The per-case records of the finished geometry cases. */
   readonly geometryRecords: readonly GeometrySweepReport[];
   readonly deviceLost?: { readonly reason: string; readonly message: string };
@@ -63,7 +80,8 @@ export type ProgressState = {
 
 export const INITIAL_PROGRESS: ProgressState = {
   finished: new Map(),
-  patterns: { gemv: { found: 0, of: 0 }, geometry: { found: 0, of: 0 } },
+  patterns: { gemv: { atMargin: 0, atLowest: 0, of: 0 }, geometry: { found: 0, of: 0 } },
+  gemvSummaries: [],
   geometryRecords: [],
 };
 
@@ -131,9 +149,10 @@ const caseProgressOf = (event: Extract<BenchmarkEvent, { kind: "progress" }>): C
   }
 };
 
-/** The sum of two counts. */
-const plus = (a: PatternCount, b: PatternCount): PatternCount => ({
-  found: a.found + b.found,
+/** The sum of two GEMV counts. */
+const plus = (a: GemvPatternCount, b: GemvPatternCount): GemvPatternCount => ({
+  atMargin: a.atMargin + b.atMargin,
+  atLowest: a.atLowest + b.atLowest,
   of: a.of + b.of,
 });
 
@@ -150,15 +169,16 @@ const finish = (
   if (cutShort(record.report)) return { ...state, current: undefined };
   const finished = new Map(state.finished).set(current.index, (at - current.startedAt) / 1000);
   if (record.sweep === "gemv") {
-    const { summaries, rows } = record.report;
+    const { summaries, rows, gpuTiming } = record.report;
     return {
       ...state,
       current: undefined,
       finished,
       patterns: {
         ...state.patterns,
-        gemv: plus(state.patterns.gemv, gemvPatterns(summaries, rows)),
+        gemv: plus(state.patterns.gemv, gemvPatterns(summaries, rows, gpuTiming.unit)),
       },
+      gemvSummaries: [...state.gemvSummaries, ...summaries],
     };
   }
   const geometryRecords = [...state.geometryRecords, record.report];
@@ -264,13 +284,45 @@ const PHASE_TEXT: Readonly<Record<GemvSweepPhase | GeometrySweepPhase, string>> 
 
 const ratio = (value: number): string => `×${value.toFixed(2)}`;
 
-/** The pattern lines of the sweeps a run plans (the same words live and at the end). */
-export const patternLines = (plan: BenchmarkPlan, patterns: ProgressState["patterns"]): string[] =>
-  plan.sweeps.map(({ sweep }) =>
+const ratio3 = (value: number): string => `×${value.toFixed(3)}`;
+
+/**
+ * What the GEMV run's class says to the person who runs it: steady — this run is enough for a
+ * table; unsteady — run the page once more at another time; no class yet — too few groups so far.
+ */
+export const steadinessLine = (steadiness: GemvSteadiness): string => {
+  const counted = `${steadiness.unsteadyGroups} of ${steadiness.groups} groups spread beyond ${ratio(GEMV_STEADY_GROUP_SPREAD)}`;
+  switch (steadiness.class) {
+    case "steady":
+      return `The GPU's timings held steady in this run (${counted}): this run alone is enough for a table`;
+    case "unsteady":
+      return `The GPU's timings moved during this run (${counted}, more than ${Math.round(GEMV_STEADY_MAX_SHARE * 100)} %): please run the page once more at another time — a table needs two such runs`;
+    case "unclassified":
+      return `Too few GEMV groups so far to tell whether the timings hold steady (${steadiness.groups} of the ${GEMV_STEADY_MIN_GROUPS} needed)`;
+  }
+};
+
+/**
+ * The pattern lines of the sweeps a run plans (the same words live and at the end): per sweep its
+ * count, and for the GEMV sweep its count at the default margin and the lowest one side by side and
+ * the run's class.
+ */
+export const patternLines = (
+  plan: BenchmarkPlan,
+  state: Pick<ProgressState, "patterns" | "gemvSummaries">,
+): string[] => {
+  const { patterns } = state;
+  return plan.sweeps.flatMap(({ sweep }) =>
     sweep === "gemv"
-      ? `GEMV: ${patterns.gemv.found} of ${patterns.gemv.of} shapes measured so far have a kernel at least ${ratio(GEMV_MIN_SPEEDUP)} faster than today's choice`
-      : `Tile geometry: ${patterns.geometry.found} of ${patterns.geometry.of} classes measured so far have a geometry at least ${ratio(GEOMETRY_MIN_SPEEDUP)} faster than the default in every case`,
+      ? [
+          `GEMV: ${patterns.gemv.atMargin} of ${patterns.gemv.of} shapes measured so far have a kernel that beats today's choice by ${ratio3(GEMV_MARGIN)} times its timing noise (${patterns.gemv.atLowest} by ${ratio3(GEMV_LOWEST_MARGIN)})`,
+          steadinessLine(gemvSteadiness(state.gemvSummaries)),
+        ]
+      : [
+          `Tile geometry: ${patterns.geometry.found} of ${patterns.geometry.of} classes measured so far have a geometry at least ${ratio(GEOMETRY_MIN_SPEEDUP)} faster than the default in every case`,
+        ],
   );
+};
 
 /** The case bar's title: its place in the run, its sweep, its id and what it measures. */
 const caseTitle = (plan: BenchmarkPlan, index: number): string => {
@@ -357,7 +409,7 @@ export const progressView = (
     },
     ...(caseView === undefined ? {} : { current: caseView }),
     remaining,
-    patterns: patternLines(plan, state.patterns),
+    patterns: patternLines(plan, state),
     ...(state.deviceLost === undefined
       ? {}
       : {

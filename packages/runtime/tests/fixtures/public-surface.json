@@ -1137,6 +1137,10 @@
         "kind": "function"
       },
       {
+        "name": "gemvSteadyReading",
+        "kind": "function"
+      },
+      {
         "name": "gemvSweepCandidateNames",
         "kind": "function"
       },

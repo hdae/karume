@@ -382,16 +382,20 @@ export type {
  * {@link gemvClassReference} (the kernel a class is read against at a case and row count: the
  * current default profile's choice at `exact` or at `reorder`, whatever a record's summary names),
  * {@link gemvReferenceRefusal} (why a group's row of that kernel is no reference, from the row
- * alone) and {@link gemvRowReading} (how a row reads against the reference's time: evidence with its
- * gain, ruled out by a failure or a failed check, or no evidence). The derivation also reads whether
- * a row is of the current runtime (its kernel fingerprint against the table it derives for) and
- * takes a reference's time only when a second record repeats it; neither is read by these.
+ * alone), {@link gemvRowReading} (how a row reads against the reference's time: evidence with its
+ * gain, ruled out by a failure or a failed check, or no evidence) and {@link gemvSteadyReading} (how
+ * the rule of one steady record reads a row against the reference's row of the same group: gain,
+ * both gaps, re-timing and break-even margin). The derivation also reads whether a row is of the
+ * current runtime (its kernel fingerprint against the table it derives for), and under the rule of
+ * two records takes a reference's time only when a second record repeats it; neither is read by
+ * these.
  */
 export {
   deriveLinearGemvChoices,
   gemvClassReference,
   gemvReferenceRefusal,
   gemvRowReading,
+  gemvSteadyReading,
   gemvTableCandidate,
   planGemvMeasurements,
   redecideLinearGemvChoices,

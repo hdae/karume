@@ -1,21 +1,24 @@
 /**
  * The optimisable patterns a run found, as the page counts them for the person who runs it: read by
- * the derivations' own threshold, predicates and exclusions (`@karume/runtime/tune`), over the
- * records of the cases that finished. They are candidates from one run: a table takes a pattern
- * only once a second run on the same machine agrees, which this count does not check. Pure.
+ * the derivations' own rules, predicates and exclusions (`@karume/runtime/tune`), over the records
+ * of the cases that finished. The GEMV count is the rule of one steady record's at M = 1, at the
+ * default margin and at the lowest one side by side, with the run's class beside it: on a steady run
+ * a table can take them from this run alone; on an unsteady one only after a second run agrees. The
+ * geometry count is a candidate from one run. Pure.
  *
  * SPEC: docs/spec/benchmark.md#the-patterns-found
  */
 
 import {
-  GEMV_MIN_SPEEDUP,
+  GEMV_LOWEST_MARGIN,
+  GEMV_MARGIN,
   type GemvSweepCaseSummary,
   type GemvSweepRow,
   GEOMETRY_MIN_SPEEDUP,
   gemvClassReference,
   gemvGroupRole,
-  gemvReferenceRefusal,
-  gemvRowReading,
+  gemvReadingIsEvidence,
+  gemvSteadyReading,
   gemvTableCandidate,
   geometryCaseClass,
   geometryCaseExclusion,
@@ -33,51 +36,73 @@ export type PatternCount = {
   readonly of: number;
 };
 
+/** The GEMV count: the groups that hold a pattern at the default margin and at the lowest one. */
+export type GemvPatternCount = {
+  /** At gemv-rule's `GEMV_MARGIN` (×1.065). */
+  readonly atMargin: number;
+  /** At `GEMV_LOWEST_MARGIN` (×1.03), the alternative the maintainer weighs. */
+  readonly atLowest: number;
+  /** The groups read. */
+  readonly of: number;
+};
+
 /**
- * Whether a group holds a pattern for one class: a candidate the derivation could adopt there — the
- * group's role for the class is `winner` (`gemvGroupRole`) and the row is one a table holds
- * (`gemvTableCandidate`) — that reads as evidence (`gemvRowReading`: timed, its check held) at least
- * `GEMV_MIN_SPEEDUP` faster than the class's reference (`gemvClassReference`, the current default
- * profile's choice), whose row in the group is one (`gemvReferenceRefusal`). The reference's time
- * is the group's own: one record has no second one to repeat it.
+ * The largest margin at which a group holds a pattern for one class (0 when it holds none): over the
+ * candidates the derivation could adopt there — the group's role for the class is `winner`
+ * (`gemvGroupRole`) and the row is one a table holds (`gemvTableCandidate`) —, read against the
+ * class's reference (`gemvClassReference`, the current default profile's choice) in the same group
+ * by the rule of one steady record (`gemvSteadyReading`: the reference's row is one, the candidate's
+ * check held, both rows long enough and with a gap), each reading's break-even margin, where its
+ * reference's re-timing lets it be evidence at that margin (`gemvReadingIsEvidence`).
  */
-const groupHolds = (
+const groupBreakEven = (
   summary: GemvSweepCaseSummary,
   rows: readonly GemvSweepRow[],
   candidateClass: GemvSweepRow["class"],
-): boolean => {
-  if (gemvGroupRole(summary.m, candidateClass) !== "winner") return false;
+  unit: string,
+): ((margin: number) => boolean) => {
+  if (gemvGroupRole(summary.m, candidateClass) !== "winner") return () => false;
   const name = gemvClassReference(summary.caseId, summary.m, candidateClass);
   const reference = rows.find((row) => row.candidate === name);
-  if (reference === undefined || gemvReferenceRefusal(reference, candidateClass) !== undefined) {
-    return false;
-  }
-  return rows.some((row) => {
-    if (row.class !== candidateClass || !gemvTableCandidate(row)) return false;
-    const reading = gemvRowReading(row, candidateClass, reference.perDispatch);
-    return reading.kind === "evidence" && reading.gain >= GEMV_MIN_SPEEDUP;
+  if (reference === undefined) return () => false;
+  const readings = rows.flatMap((row) => {
+    if (row.class !== candidateClass || !gemvTableCandidate(row)) return [];
+    const reading = gemvSteadyReading(row, reference, candidateClass, unit);
+    return reading === undefined ? [] : [reading];
   });
+  return (margin) =>
+    readings.some(
+      (reading) => reading.breakEven >= margin && gemvReadingIsEvidence(reading, margin),
+    );
 };
 
 /**
  * The GEMV sweep's count: of the (case, row count) groups of `summaries` at which the derivation
  * picks a winner (`gemvGroupRole`'s `winner`: M = 1), those in which a candidate a table could hold
- * beat its class's reference by at least the derivation's threshold with its check held.
+ * beat its class's reference by the rule of one steady record — at ×1.065 and at ×1.03 —, in a
+ * record timed in `unit`.
  */
 export const gemvPatterns = (
   summaries: readonly GemvSweepCaseSummary[],
   rows: readonly GemvSweepRow[],
-): PatternCount => {
+  unit: string,
+): GemvPatternCount => {
   const read = summaries.filter(
     (summary) =>
       gemvGroupRole(summary.m, "identical") === "winner" ||
       gemvGroupRole(summary.m, "reorder") === "winner",
   );
-  const found = read.filter((summary) => {
+  const holds = read.map((summary) => {
     const group = rows.filter((row) => row.caseId === summary.caseId && row.m === summary.m);
-    return groupHolds(summary, group, "identical") || groupHolds(summary, group, "reorder");
+    const identical = groupBreakEven(summary, group, "identical", unit);
+    const reorder = groupBreakEven(summary, group, "reorder", unit);
+    return (margin: number) => identical(margin) || reorder(margin);
   });
-  return { found: found.length, of: read.length };
+  return {
+    atMargin: holds.filter((holdsAt) => holdsAt(GEMV_MARGIN)).length,
+    atLowest: holds.filter((holdsAt) => holdsAt(GEMV_LOWEST_MARGIN)).length,
+    of: read.length,
+  };
 };
 
 /** A candidate's row that is ahead of the default by the derivation's threshold, its output the default's. */
