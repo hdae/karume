@@ -175,7 +175,7 @@ compared at one row differ from their baseline — every one a variant of 32 col
 no `c16` variant, no `u4` variant and no variant over a bf16 weight differs. So do the sequential row blocks of height
 2 and 4 on one shape, int4 g32 `2816 × 2112` at 4 and 8 rows, against height 1 (8 rows of two records). The sweep's
 verdict of such a record is `fail` (8 of the 14), and the derivation refuses a candidate that is not identical to its
-baseline, so no table holds one: none of the 87 sequential exceptions of `apple-metal-3` and none of the default
+baseline, so no table holds one: none of the 92 sequential exceptions of `apple-metal-3` and none of the default
 profile's 22 differs in those records. What it costs is the verdict of a sweep on Metal and the candidates the
 derivation can choose from there, not an output. On the Apple M5 (eight records of 2026-11-19 under the default
 profile) more variants differ: 1,165 of the 2,749 rows compared at one row, every one over an integer weight and with

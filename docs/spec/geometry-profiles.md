@@ -390,34 +390,44 @@ matched without a description: the predicted table of [the three levels](#the-th
     writes the words of the default's row: the staged form and the row-blocked form give the parallel GEMV's words
     at the same lanes.
 - `apple-metal-3`'s field is the default profile's choices with what the derivation adopts from 14 GEMV sweep
-  records of an Apple M2 in Chrome (Metal) in place — 80 sequential decisions and 65 parallel ones adopted:
-  - The default's 22 exceptions, in the default's order; 15 of them with the variant the records adopt over the
-    default's, of 32 to 256 columns per workgroup (`c128u8` on 5, `c128u16` on 4, `c256u8` on 4, `c64u2` on
-    `1536 × 256` and `c32u2` on `2560 × 256`, ×1.10 to ×1.54). On the other 7 no variant reaches ×1.10.
-  - 65 per-shape exceptions after them, on int4 (55) and int8 (10) shapes, all of 128 or 256 columns per workgroup:
-    `c128u4` on 48, `c256u4` on 14 and `c128u8` on 3 (the smallest gains of the 80 adopted exceptions ×1.10 to
-    ×2.54).
-  - 65 parallel rows apart from the default's. 52 of the default's 88 rows are changed — 48 integer-stored and 4
+  records of an Apple M2 in Chrome (Metal) in place — 87 sequential decisions and 69 parallel ones adopted. The
+  rule of two records adopted 80 and 65 of them (2026-11-21); the table was regenerated on 2026-11-28 by the rule of
+  one steady record (12 of the 14 records are steady) from those choices, which it keeps every one of, and that
+  added 7 sequential choices and 4 row blocks:
+  - The default's 22 exceptions, in the default's order; 17 of them with the variant the records adopt over the
+    default's, of 32 to 256 columns per workgroup (`c128u16` on 6, `c128u8` on 5, `c256u8` on 4, `c64u2` on
+    `1536 × 256` and `c32u2` on `2560 × 256`). Two of the 17 are the rule of one steady record's: `c128u16` on
+    `6144 × 1536` and `4096 × 2560`. On the other 5 no variant qualifies.
+  - 70 per-shape exceptions after them, on int4 (57), int8 (12) and int2 (1) shapes, all of 128 or 256 columns per
+    workgroup: `c128u4` on 53, `c256u4` on 14 and `c128u8` on 3. Five of the 70 are the rule of one steady record's,
+    all `c128u4`: int4 `6144 × 1536` and `4096 × 1536`, int8 `262144 × 1536` and `262144 × 256`, and int2
+    `12288 × 1536`. The smallest gains of the 80 exceptions of the rule of two records are ×1.10 to ×2.54, those of
+    the 7 of the rule of one steady record ×1.070 to ×1.366.
+  - 69 parallel rows apart from the default's. 56 of the default's 88 rows are changed — 52 integer-stored and 4
     bf16 (`256 × 1536` and `256 × 2560` from 32 lanes to 16, `512 × 1536` from 16 to 8, `1536 × 256` from 8 to 4):
-    other lanes on 35, the staged flag cleared on 16, another row block on 42 (39 without one take one — 2 on 23, 4
-    on 14, 8 on 2 — and three go from 2 to 4). 13 rows are on shapes the default has none for: int4 6 and int8 5
-    (shapes of the MTP drafters), and bf16 2 — `8960 × 1536` (8 lanes) and `2560 × 256` (4 lanes), each ×1.15 to
-    ×2.20 faster than the sequential GEMV at one row, ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.51 at
-    8, in four records at each row count. Of the 65, 48 gain at one row (×1.10 to ×11.2) and 17 change only the row
-    block.
+    other lanes on 35, the staged flag cleared on 16, another row block on 46 (39 without one take one — 2 on 23, 4
+    on 14, 8 on 2 —, three go from 2 to 4, and four go from 4 to 2: int4 g32 `8960 × 1536`, `12288 × 1536`,
+    `10752 × 2560` and `10240 × 2560`, by the rule of one steady record, ×1.062 to ×1.090 at 4 and 8 rows). 13 rows
+    are on shapes the default has none for: int4 6 and int8 5 (shapes of the MTP drafters), and bf16 2 —
+    `8960 × 1536` (8 lanes) and `2560 × 256` (4 lanes), each ×1.15 to ×2.20 faster than the sequential GEMV at one
+    row, ×4.16 to ×6.32 than the GEMM at 4 rows and ×2.68 to ×3.51 at 8, in four records at each row count. Of the
+    69, 48 gain at one row (×1.10 to ×11.2) and 21 change only the row block.
   - With linear at `reorder`, a Session on that adapter adds in another order than one on another adapter on the 35
-    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 17 changed rows it
+    rows with other lanes and on the 13 added ones, inside the band of `linear`. On the other 21 changed rows it
     writes the words of the default's row.
   - An exception is adopted only where its words equal the baseline's in every record, on Metal
     ([limitations](../limitations.md), the section on the linear GEMV family).
 - `apple-m5`'s field is the default profile's choices with what the derivation adopts from two GEMV sweep records of
-  the Apple M5 in Chrome (Metal) of 2026-11-23, each of the `full` set — 43 sequential decisions and 66 parallel
-  ones adopted:
-  - The default's 22 exceptions, in the default's order and with the default's variant: no variant reaches the ×1.10
-    that replaces one.
-  - 43 per-shape exceptions after them, on int4 (39) and int8 (4) shapes: `c32u2` on 15, `c16u2` on 11, `c64u2`,
-    `c256u2` and `c16u4` on 4 each, `c16u8` and `c32u8` on 2 each and `c128u8` on one (the smallest gains of the 43
-    ×1.10 to ×1.77).
+  the Apple M5 in Chrome (Metal) of 2026-11-23, each of the `full` set and steady — 45 sequential decisions and 66
+  parallel ones adopted. The rule of two records adopted 43 and 66 of them (2026-11-23); the table was regenerated
+  on 2026-11-28 by the rule of one steady record from those choices, which it keeps every one of, and that added 2
+  sequential choices:
+  - The default's 22 exceptions, in the default's order and with the default's variant: no variant qualifies to
+    replace one.
+  - 45 per-shape exceptions after them, on int4 (40) and int8 (5) shapes: `c32u2` on 16, `c16u2` on 11, `c16u4` on
+    5, `c64u2` and `c256u2` on 4 each, `c16u8` and `c32u8` on 2 each and `c128u8` on one. The smallest gains of the
+    43 of the rule of two records are ×1.10 to ×1.77; the rule of one steady record adds `c32u2` on int4
+    `12288 × 1536` (×1.123) and `c16u4` on int8 `256 × 2560` (×1.087).
   - 66 parallel rows apart from the default's. 49 of the default's 88 rows are changed — int4 42, int8 6 and int2 1,
     no bf16 row —, each with another row block (37 without one take one — 2 on 8, 4 on 29 — and 12 go from 2 to 4
     or, on one, to 8), 18 of them with other lanes, 4 with the staged flag set and 3 with it cleared. 17 rows are on
@@ -830,8 +840,8 @@ written.
   parallel rows in place and its 50 pinned exceptions and 11 pinned parallel rows after them; `nvidia-blackwell`'s,
   `apple-metal-3`'s and `apple-m5`'s hold the default's general variant and thread target, the default's 22
   exceptions in the default's order — each with the default's variant except the ones the case names with the
-  table's (two, 15 and none) —, the counted exceptions of their own after them (41, 65 and 43), and every parallel
-  row of the default in the default's order, a counted number of them changed (42, 52 and 49), with the counted rows
+  table's (two, 17 and none) —, the counted exceptions of their own after them (41, 70 and 45), and every parallel
+  row of the default in the default's order, a counted number of them changed (42, 56 and 49), with the counted rows
   added (20, 13 and 17); no registered table
   removes a parallel row of the default, moves a packed flag or adds a
   packed row; a profile with other choices changes the selection and the pipeline key (core lane).

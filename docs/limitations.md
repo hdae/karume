@@ -925,32 +925,35 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   default but in the table of the device that gains from it. Each of the four measured devices has a table derived
   from its own GEMV sweep records. Such a table starts from the default's exceptions: it keeps the ones its records
   give no evidence about, and replaces one only when its records adopt another variant over it, which takes ×1.10
-  in every group — a device on which an inherited exception is slower by less keeps it.
+  in every group under the rule of two records (`nvidia-ampere`, `nvidia-blackwell`), or ×1.065 times the two
+  kernels' gaps in every steady record under the rule of one steady record (`apple-metal-3` and `apple-m5`,
+  regenerated so on 2026-11-28) — a device on which an inherited exception is slower by less keeps it.
   - `nvidia-ampere` (RTX 3080 Ti, Node, Vulkan): the default's 22, and 50 of its own — 37 int4 and 11 int8 shapes of
     the QAT models and their MTP drafters, the bf16 output head of regular E2B, `262144 × 1536`, and bf16
     `10240 × 2560` (×1.10 to ×1.88).
   - `nvidia-blackwell` (RTX 5070 Ti, Chrome, D3D12): the default's 22, two of them with its own variant (bf16
     `1536 × 256` `c16u8` and `4096 × 2560` `c16u16`, ×1.11 to ×1.21), and 41 int4 and int8 shapes of its own.
-  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 15 of them with its own variant of 32 to 256
-    columns per workgroup (×1.10 to ×1.54), and 65 int4 and int8 shapes of its own. The M2's records compare every
-    sequential variant they time with the baseline (what an `exact` Session runs with the default profile) word for
-    word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So each of
-    the table's 80 adopted exceptions writes the baseline's words on Metal in every record that timed it (216
-    groups of its 14 records): the general variant's on its 65 own shapes, the default's exception's on the 15
+  - `apple-metal-3` (Apple M2, Chrome, Metal): the default's 22, 17 of them with its own variant of 32 to 256
+    columns per workgroup (×1.10 to ×1.54 on 15; ×1.070 and ×1.089 on bf16 `6144 × 1536` and `4096 × 2560`, which
+    the rule of one steady record replaced), and 70 int2, int4 and int8 shapes of its own. The M2's records compare
+    every sequential variant they time with the baseline (what an `exact` Session runs with the default profile)
+    word for word, on Metal, and the derivation adopts a variant only where the words are equal in every record. So
+    each of the table's 87 adopted exceptions writes the baseline's words on Metal in every record that timed it
+    (238 groups of its 14 records): the general variant's on its 70 own shapes, the default's exception's on the 17
     others. Not every variant does: 423 of the 2,768 sequential-variant rows the records time at one row besides the
     baseline — all of int2, int4 and int8 cases and all of read-ahead depths other than 4; no bf16 row — write other
     words than the baseline there, and none of them is adopted. On 13 of the default's 22 shapes the records also
     time the general variant against the default's exception, with the same words; on the other 9 the quick look
     left it untimed, so on those shapes the default's exception has not been compared with the general variant on
-    Metal. **The 7 exceptions of the default that the table keeps are not thereby shown faster on the M2**: they stay
-    because no variant reaches ×1.10 over them, and the general variant reads ×1.02 to ×1.04 faster than the
-    default's exception on `6144 × 1536` and `12288 × 1536`, ×1.04 to ×1.07 on `4096 × 2560`, ×0.995 to ×1.03 on
-    `10752 × 2560`, ×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to ×0.87 on `1536 × 2048` (`256 × 1536`: not
-    timed). Over the 13 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
+    Metal. **The 5 exceptions of the default that the table keeps are not thereby shown faster on the M2**: they stay
+    because no variant qualifies over them, and the general variant reads ×1.03 to ×1.04 faster than the default's
+    exception on `12288 × 1536`, ×0.995 to ×1.03 on `10752 × 2560`, ×0.94 to ×0.99 on `2048 × 2560` and ×0.84 to
+    ×0.87 on `1536 × 2048` (`256 × 1536`: not timed). Over the 13 shapes timed, the general variant is ×1.01 to ×1.26 faster than the default's exception on
     11 on the M2: there the default's exceptions do not meet the default's rule that no measured device is slower
     with a row.
-  - `apple-m5` (Apple M5, Chrome, Metal): the default's 22, each with the default's variant (no variant reaches
-    ×1.10 over one), and 43 int4 and int8 shapes of its own (×1.10 to ×1.77). As on the M2, a variant is adopted
+  - `apple-m5` (Apple M5, Chrome, Metal): the default's 22, each with the default's variant (no variant qualifies
+    over one), and 45 int4 and int8 shapes of its own (×1.10 to ×1.77 on 43; ×1.123 and ×1.087 on int4
+    `12288 × 1536` and int8 `256 × 2560`, which the rule of one steady record added). As on the M2, a variant is adopted
     only where its words equal the baseline's in every record: 1,466 of the 3,524 sequential-variant rows its two
     records compare with the baseline at one row write other words there — int2, int4 and int8 cases at 1, 2, 8
     and 16 words read ahead; none at 4 and no bf16 row — and none of them is adopted.
@@ -958,7 +961,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   default's (other lanes on 14 of the default's rows, one of them bf16; 11 rows on shapes the default has none for, 2
   of them bf16; the staged form or another row block on the rest); `nvidia-blackwell` 62 apart from the default's
   (other lanes on 23 of the default's rows, one of them bf16; 20 rows on shapes the default has none for, 5 of them
-  bf16; the staged form or another row block on the rest); `apple-metal-3` 65 apart from the default's (other lanes
+  bf16; the staged form or another row block on the rest); `apple-metal-3` 69 apart from the default's (other lanes
   on 35 of the default's rows, 4 of them bf16; 13 rows on shapes the default has none for, 2 of them bf16; the staged
   form cleared or another row block on the rest); `apple-m5` 66 apart from the default's (other lanes on 18 of the
   default's rows, none of them bf16; 17 rows on shapes the default has none for, 6 of them bf16; another row block on
@@ -971,7 +974,8 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 4 by-design 
   E2B, E4B and 12B, the same tokens — [research](research/2026-11-18-blackwell-gemv-table-decode.md)); with the rows
   derived on 2026-11-19, `nvidia-blackwell` and `apple-metal-3` were measured end to end on E2B alone and
   `nvidia-ampere` was not ([research](research/2026-11-19-gemv-tables-across-devices.md) §3) — measurements taken
-  before the derivation of 2026-11-21 that the three tables hold now —, and no test runs a
+  before the derivation of 2026-11-21 that the three tables hold now (`apple-metal-3` with what the rule of one
+  steady record added on 2026-11-28) —, and no test runs a
   table's rows on their own shapes on the development machine — the records hold their band readings. A parallel row is reached
   only by a Session that runs linear at `reorder`: of regular (bf16) Gemma 4's presets only `bf16-fast` declares
   that level (in the recipe and the local mirror, not published yet), so only its Sessions run the bf16 rows.

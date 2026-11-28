@@ -128,6 +128,13 @@ measurements in `docs/research/`.
   states both rules; its `--gemv-margin` sets the margin (a usage error where the API refuses it, `gemvMarginOf`, now
   exported; a warning below ×1.03), and its GEMV verdict lines end with the decisions that change at ×1.03. **Breaking** (tune surface): `LinearGemvDerivation.rule` holds more fields, a decision has `path`
   and, under the new rule, `tableChoice` and `evidence`.
+- `@karume/runtime`: the embedded tables `apple-m5` and `apple-metal-3` hold GEMV choices derived again by the rule
+  of one steady record at ×1.065 from the GEMV records their headers cite, every choice they held kept: `apple-m5`
+  adds two sequential exceptions (int4 `12288 × 1536`, int8 `256 × 2560`); `apple-metal-3` adds five (int4, int8 and
+  int2), gives two bf16 exceptions another variant (`6144 × 1536` and `4096 × 2560`, `c128u16`) and moves four int4
+  g32 parallel rows from a row block of 4 to 2. A sequential variant and a row block write the words of the choice
+  they replace, so no Session's numbers change on those adapters. `nvidia-ampere` (its records are unsteady, so the
+  rule of two records gives its field back) and `nvidia-blackwell` (waiting for a second measurement) are unchanged.
 - The benchmark app (private): the GEMV patterns are counted by the rule of one steady record
   (`gemvSteadyReading` of `@karume/runtime/tune`: a candidate's row against the reference's row of the same group,
   and against the device table's choice where the record names it, as the derivation keeps a table's choice),

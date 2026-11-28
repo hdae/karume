@@ -259,15 +259,15 @@ maintainer's ruling of 2026-11-06).
          sweeps measured four hand-picked variants (the planner still lists the others);
        - **the rule of one steady record (built 2026-11-28 —
          [spec](spec/geometry-profiles.md#deriving-the-gemv-choices),
-         [research](research/2026-11-28-gemv-adoption-rule.md)) and the embedded tables**: the four tables that carry
-         GEMV choices were derived under the rule of two records and are not regenerated yet. What the existing records
-         derive under the new rule, per device and against each embedded table, at ×1.065 and at ×1.03, is in
-         `outputs/misc/gemv-rule-2026-11-28/impl/table-diff-<device>.md` (outside git) for the maintainer to rule on —
-         the margin among it (×1.065 by default; ×1.03 is the alternative). Until `apple-m5` is regenerated, its
-         regeneration case (`tools/geometry-profiles/tests/regeneration_test.ts`) is red on a machine that has its two
-         GEMV records: they now derive other choices than the table holds. A table derived at another margin takes it
-         on the generator's command line (`--gemv-margin`, 2026-11-28), whose verdict lines also list what ×1.03 would
-         change;
+         [research](research/2026-11-28-gemv-adoption-rule.md)) and the embedded tables**: `apple-m5` and
+         `apple-metal-3` are regenerated under it at ×1.065 from the GEMV records their headers cite (the maintainer's
+         ruling of 2026-11-28; 2 and 11 rows changed, each choice the tables held kept). `nvidia-ampere`'s records are
+         unsteady, so the rule of two records decides its every shape and gives its field back byte for byte. Left:
+         **`nvidia-blackwell` is not regenerated** — the maintainer waits for a second measurement on the RTX 5070 Ti;
+         the 84 records its header cites would change 6 rows under the new rule (one bf16 exception's read-ahead and
+         five int4 exceptions added, `outputs/misc/gemv-rule-2026-11-28/impl/table-diff-nvidia-blackwell.md`, outside
+         git). A table derived at another margin takes it on the generator's command line (`--gemv-margin`), whose
+         verdict lines also list what ×1.03 would change;
        - left as they are after the implementation's reviews (2026-11-28), each open:
          - a reference whose re-timing pass throws makes its row a failure row, as a failed round does, so the group
            loses its candidates' gains and its class count (the conservative choice; leaving the re-timing absent would

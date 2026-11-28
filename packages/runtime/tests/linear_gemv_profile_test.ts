@@ -1335,12 +1335,13 @@ describe("a table without the GEMV choices runs with the default profile's, reso
     );
   });
 
-  it("apple-metal-3's are the default's with what the Apple M2's records adopt in place: 15 of the default's exceptions with another variant, 65 more sequential exceptions, and 65 parallel rows changed or added", () => {
+  it("apple-metal-3's are the default's with what the Apple M2's records adopt in place: 17 of the default's exceptions with another variant, 70 more sequential exceptions, and 69 parallel rows changed or added", () => {
     assertDerivedFrom(
       "apple-metal-3",
       new Map([
         ["bf16 8960 1536", { cols: 128, unroll: 16 }],
         ["bf16 2048 1536", { cols: 256, unroll: 8 }],
+        ["bf16 6144 1536", { cols: 128, unroll: 16 }],
         ["bf16 1536 6144", { cols: 256, unroll: 8 }],
         ["bf16 1536 256", { cols: 64, unroll: 2 }],
         ["bf16 4096 1536", { cols: 128, unroll: 16 }],
@@ -1352,15 +1353,16 @@ describe("a table without the GEMV choices runs with the default profile's, reso
         ["bf16 2560 2048", { cols: 128, unroll: 8 }],
         ["bf16 2560 10240", { cols: 128, unroll: 16 }],
         ["bf16 2560 256", { cols: 32, unroll: 2 }],
+        ["bf16 4096 2560", { cols: 128, unroll: 16 }],
         ["bf16 1024 2560", { cols: 256, unroll: 8 }],
         ["bf16 2560 4096", { cols: 128, unroll: 16 }],
       ]),
-      { ownExceptions: 65, changed: 52, added: 13 },
+      { ownExceptions: 70, changed: 56, added: 13 },
     );
   });
 
-  it("apple-m5's are the default's with what the Apple M5's records adopt in place: none of the default's exceptions with another variant, 43 more sequential exceptions, and 66 parallel rows changed or added", () => {
-    assertDerivedFrom("apple-m5", new Map(), { ownExceptions: 43, changed: 49, added: 17 });
+  it("apple-m5's are the default's with what the Apple M5's records adopt in place: none of the default's exceptions with another variant, 45 more sequential exceptions, and 66 parallel rows changed or added", () => {
+    assertDerivedFrom("apple-m5", new Map(), { ownExceptions: 45, changed: 49, added: 17 });
   });
 
   it("no embedded table removes a parallel row of the default or moves a packed-activation flag: the shapes that read packed activations are the default's on every adapter", () => {
