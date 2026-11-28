@@ -7,23 +7,16 @@
  * the reference GEMM of the same storage and tile geometry, and against an f64 evaluation over the
  * weights as the kernels decode them (`helpers/linear-storage-weights.ts`).
  *
- * 1. Against the f64 reference: every output inside the op's band (`GEMM_TOLERANCE`).
- * 2. Against the reference kernel on the same input: inside {@link SPLITK_AB_BAND} times that band
- *    (a declaration — its derivation is the constant's doc).
- * 3. Structure, checked exactly: with one slice the two dispatches give the reference GEMM's words
- *    for every storage on every tile geometry the linear GEMM has, scalar and vec4 (the split shares
- *    the GEMM's loop and only regroups it); on inputs whose products and sums are exact in f32 the
- *    order of the additions cannot matter, so the output equals the reference kernel's bit for bit
- *    at every slice count, a tile count no slice count divides and a partial last K tile included (a
- *    dropped term, a wrong slice or a missed edge element shows here); on all-ones inputs each
- *    slice's partial sums count its own terms (the first and last slices' lengths, more slices than
- *    tiles); a NaN in one input row reaches every output of that row and no other; two runs give the
- *    same bits; nothing is written past the outputs or the partial sums.
- * 4. Fault injection (recorded 2026-11-28, RTX 3080 Ti, Dawn / Vulkan): with every slice starting
- *    one K tile late (`t_first = wid.z * slice_tiles + min(wid.z, slice_extra) + 1u` in the
- *    generator, so each slice drops its first tile and reads the next slice's first) the f64 band
- *    failed at the first shape (k = 512: worst |error| 2.57, about 12,100 times the band), the exact
- *    check failed, and the one-slice identity failed at the first geometry it compared.
+ * 1. to 3. The class-R check of `@karume/kernel-checks` (`checkLinearSplitK` — the cases the
+ *    workbench's kernel-check entry runs): the f64 band, the A/B band against the reference GEMM
+ *    (`LINEAR_SPLITK_AB_BAND`, a declaration whose derivation is the constant's doc), the one-slice
+ *    identity on every tile geometry, exact sums, the NaN row, each slice's term count, repeats and
+ *    nothing written past the outputs; and the same bands through a Session.
+ * 4. Fault injection, through the check's `mutate`: every slice starting one K tile late (each
+ *    slice drops its first tile and reads the next slice's first) turns the f64 band red on every
+ *    case of the bands part, and the one-slice identity and the exact sums red as well. Recorded
+ *    2026-11-28 on an RTX 3080 Ti (Dawn / Vulkan) through a Session with the same edit made in the
+ *    generator: at k = 512 the worst |error| was 2.57, about 12,100 times the band.
  *
  * It also checks where the strategy applies: only under the private option `LINEAR_SPLIT_K`, under
  * f32 compute for a reduction long enough to cut, and never for a single row (the GEMV family keeps
@@ -31,28 +24,23 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
+import {
+  type CheckPart,
+  checkLinearSplitK,
+  LINEAR_SPLITK_AB_BAND,
+  LINEAR_SPLITK_CASES,
+  LINEAR_SPLITK_F64_BAND,
+} from "@karume/kernel-checks";
 import { describe, it } from "vite-plus/test";
 import type { GpuContext } from "../src/gpu/device.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import {
-  defaultGemmGeometry,
-  type GemmGeometry,
-  gemmTileM,
-  gemmTileN,
-} from "../src/kernels/gemm-geometry.ts";
-import { gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { linearSplitKCombineKey, linearSplitKSlices } from "../src/kernels/linear-splitk.ts";
 import { GEMM_TOLERANCE } from "../src/reference/op-tolerance.ts";
 import { createSessionFromContainer, LINEAR_SPLIT_K } from "../src/runtime/executor.ts";
 import type { EncodingInput, TensorInput } from "./helpers/container-write.ts";
-import { linearGemmGeometries } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import {
-  type SplitKDispatchCase,
-  SPLITK_UNWRITTEN,
-  splitKRunner,
-} from "./helpers/linear-splitk-dispatch.ts";
+import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 import {
   type EncodedLinearWeight,
   encodeLinearWeight,
@@ -66,23 +54,6 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-
-/**
- * The A/B band against the reference kernel, as a multiple of the op band at the f64 value
- * (`GEMM_TOLERANCE.atol + rtol · |f64|`). A declaration (ADR 0147 decision 2: at least 4 × the worst
- * measured, at most 2 × the f64 band):
- *
- * | Case | Worst \|split − reference\| / op band |
- * | --- | --- |
- * | f32 through a Session, 3 × 512 × 5 / 16 × 1536 × 64 / 9 × 8960 × 37 (m × k × n) at 2 / 4 / 16 slices | 0.028 / 0.144 / 0.393 |
- * | every storage through a Session, 128 × 1536 × 64 at 4 slices | 0.122 (i4 g16) to 0.192 (i2) |
- * | every storage by raw dispatches, 37 × 4096 × 68 and 37 × 4300 (i4: 4224) × 69, 2 to 16 slices, two geometries | 0.390 (bf16, K 4096, 4 slices) |
- *
- * Measured 2026-11-28 on an RTX 3080 Ti (Dawn / Vulkan; the Session cases at the nvidia-ampere
- * profile's geometries) with the `irregular` fixtures: the worst is 0.393, so the band is at least
- * 1.57 and at most 2.
- */
-const SPLITK_AB_BAND = 2;
 
 type Shape = { readonly m: number; readonly n: number; readonly k: number };
 
@@ -154,9 +125,6 @@ const worst = (
   }
   return { maxAbs, bandUse };
 };
-
-const floats = (words: Uint32Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
-  new Float32Array(words.buffer, words.byteOffset, words.length);
 
 const bits = (values: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
   new Uint32Array(values.buffer, values.byteOffset, values.length).slice();
@@ -279,7 +247,7 @@ describe.skipIf(!GPU_AVAILABLE)("the split-K linear through a Session (real GPU)
         );
         assert(ofSplit.bandUse <= 1, `${where}: outside the band against f64 (${ofSplit.maxAbs})`);
         assert(
-          between.bandUse <= SPLITK_AB_BAND,
+          between.bandUse <= LINEAR_SPLITK_AB_BAND,
           `${where}: outside the A/B band against the reference kernel (${between.maxAbs})`,
         );
       }
@@ -317,7 +285,7 @@ describe.skipIf(!GPU_AVAILABLE)("the split-K linear through a Session (real GPU)
             `against the reference kernel ${(between.bandUse * 100).toFixed(1)}%`,
         );
         assert(ofSplit.bandUse <= 1, `${where}: outside the band against f64 (${ofSplit.maxAbs})`);
-        assert(between.bandUse <= SPLITK_AB_BAND, `${where}: outside the A/B band`);
+        assert(between.bandUse <= LINEAR_SPLITK_AB_BAND, `${where}: outside the A/B band`);
         assertEquals(bits(split.again), bits(split.y), `${where}: a second run`);
       }
     } finally {
@@ -395,251 +363,69 @@ describe.skipIf(!GPU_AVAILABLE)("the split-K linear through a Session (real GPU)
   });
 });
 
-// ── By raw dispatches ────────────────────────────────────────────────────────────────────────────
+// ── The shared check ────────────────────────────────────────────────────────────────────────────
 
-/** A raw case of a storage and fixture at a geometry and slice count. */
-const rawCase = (
-  storage: LinearWeightStorage,
-  fixture: WeightFixture,
-  geometry: GemmGeometry,
-  shape: Shape,
-  slices: number,
-): SplitKDispatchCase => ({
-  geometry,
-  ...shape,
-  slices,
-  weight: encodeLinearWeight(storage, shape.n, shape.k, fixture),
-  x: activations(shape, fixture),
-  bias: biasOf(shape.n, fixture),
-});
-
-/** The rows of a raw case's output whose words hold a NaN. */
-const nanRows = (words: Uint32Array<ArrayBuffer>, n: number): Set<number> => {
-  const values = floats(words);
-  const rows = new Set<number>();
-  for (let i = 0; i < values.length; i += 1)
-    if (Number.isNaN(values[i])) rows.add(Math.floor(i / n));
-  return rows;
+/** Replaces `from` once; a missing anchor throws instead of leaving the kernel unmutated. */
+const mustReplace = (wgsl: string, from: string, to: string): string => {
+  if (!wgsl.includes(from)) throw new Error(`mutation anchor not found: ${from}`);
+  return wgsl.replace(from, to);
 };
 
-/** A K whose tile count every slice count divides, and one it does not (with a partial last tile where the storage allows). */
-const evenK = (): number => 4096;
-const unevenK = ({ storage, groupSize }: LinearWeightStorage): number =>
-  storage === "i4" ? 33 * Math.max(groupSize, 128) : 4300;
+/** Every slice starts one K tile late: it drops its first tile and reads the next slice's first. */
+const sliceOneTileLate = (wgsl: string): string =>
+  mustReplace(
+    wgsl,
+    "let t_first = wid.z * slice_tiles + min(wid.z, slice_extra);",
+    "let t_first = wid.z * slice_tiles + min(wid.z, slice_extra) + 1u;",
+  );
 
-/**
- * The tile geometries of the bands: the default 128 × 128 and the 16 × 16 of up to 64 rows. The
- * bands are a property of the slices' grouping, which no geometry changes (a geometry only
- * reassigns outputs to threads); the other geometries and the skeleton forms are covered by the
- * one-slice identity and the exact sums.
- */
-const BAND_GEOMETRIES: readonly GemmGeometry[] = [
-  defaultGemmGeometry(),
-  { regM: 1, regN: 4, wgX: 4, wgY: 16 },
-];
-
-const SLICE_COUNTS = [2, 4, 8, 16] as const;
-
-describe.skipIf(!GPU_AVAILABLE)("the split-K linear by raw dispatches (real GPU)", () => {
-  it("gives the reference GEMM's words at one slice for every storage on every tile geometry the linear GEMM has, scalar and vec4", async () => {
-    const gpu = await acquireGpu();
-    try {
-      const run = splitKRunner(gpu);
-      const geometries = linearGemmGeometries();
-      // The embedded profiles hold this many today; a new one joins the loop by itself.
-      assert(geometries.length >= 10, `${geometries.length} geometries`);
-      for (const storage of STORAGES) {
-        // A partial last K tile where the storage allows (i4's K is a multiple of its group).
-        const k = storage.storage === "i4" ? 2 * storage.groupSize : 100;
-        for (const geometry of geometries) {
-          const rows = gemmTileM(geometry) + 3;
-          // Two row tiles and two column tiles with ragged edges: vec4 for every storage, and the
-          // scalar kernel for f32 on every geometry and for the other storages on the default.
-          const scalar =
-            storage.storage === "f32" ||
-            JSON.stringify(geometry) === JSON.stringify(defaultGemmGeometry());
-          const columns = [gemmTileN(geometry) + 4, ...(scalar ? [gemmTileN(geometry) + 5] : [])];
-          for (const n of columns) {
-            const shape = { m: rows, n, k };
-            const where = `${storageLabel(storage)} ${linearKey(storage.storage, gemmUsesVec4(k, n), "f32", undefined, storage.groupSize, geometry)} ${rows}×${n}×${k}`;
-            const result = await run(rawCase(storage, "irregular", geometry, shape, 1));
-            assert(!result.reference.includes(SPLITK_UNWRITTEN), `${where}: unwritten outputs`);
-            assertEquals(result.split, result.reference, where);
-          }
-        }
-      }
-    } finally {
-      gpu.destroy();
-    }
+/** The failures of one criterion in every case of a part. */
+const failuresOf = (part: CheckPart | undefined, criterion: string): readonly number[] => {
+  assert(part !== undefined, "the part is missing");
+  return part.cases.map(({ label, criteria }) => {
+    const found = criteria.find(({ name }) => name === criterion);
+    assert(found !== undefined, `${label}: no '${criterion}' criterion`);
+    return found.failures;
   });
+};
 
-  it("stays inside both bands at every slice count for every storage, a tile count no count divides included, repeats its words and writes nothing past its outputs", async () => {
+describe.skipIf(!GPU_AVAILABLE)("the split-K linear: the class-R check (real GPU)", () => {
+  it("passes every criterion of every case of every part of the shared check", async () => {
     const gpu = await acquireGpu();
     try {
-      const run = splitKRunner(gpu);
-      let worstAb = 0;
-      let worstAbWhere = "";
-      let worstF64 = 0;
-      for (const storage of STORAGES) {
-        // A vec4 shape at the even K, a scalar one at the uneven K; m and n off every tile.
-        for (const shape of [
-          { m: 37, n: 68, k: evenK() },
-          { m: 37, n: 69, k: unevenK(storage) },
-        ]) {
-          const base = rawCase(storage, "irregular", BAND_GEOMETRIES[0], shape, 1);
-          const reference = referenceF64(shape, base.x, base.weight.values, base.bias);
-          for (const geometry of BAND_GEOMETRIES) {
-            for (const slices of SLICE_COUNTS) {
-              const where = `${storageLabel(storage)} ${shape.m}×${shape.n}×${shape.k} ${linearKey(storage.storage, gemmUsesVec4(shape.k, shape.n), "f32", undefined, storage.groupSize, geometry)} s${slices}`;
-              const result = await run({ ...base, geometry, slices });
-              const ofSplit = worst(floats(result.split), reference, reference);
-              const between = worst(floats(result.split), floats(result.reference), reference);
-              worstF64 = Math.max(worstF64, ofSplit.bandUse);
-              if (between.bandUse > worstAb) {
-                worstAb = between.bandUse;
-                worstAbWhere = where;
-              }
-              assert(
-                ofSplit.bandUse <= 1,
-                `${where}: outside the band against f64 (${ofSplit.maxAbs})`,
-              );
-              assert(
-                between.bandUse <= SPLITK_AB_BAND,
-                `${where}: outside the A/B band (${between.maxAbs})`,
-              );
-              assertEquals(result.again, result.split, `${where}: a second dispatch`);
-              assert(
-                result.tails.every((word) => word === SPLITK_UNWRITTEN),
-                `${where}: written past m · n`,
-              );
-              assert(
-                result.partials
-                  .subarray(slices * shape.m * shape.n)
-                  .every((word) => word === SPLITK_UNWRITTEN),
-                `${where}: written past the partial sums`,
-              );
-            }
-          }
-        }
-      }
-      console.log(
-        `[linear-splitk] raw bands: worst against f64 ${(worstF64 * 100).toFixed(1)}% of the band; ` +
-          `worst against the reference GEMM ${(worstAb * 100).toFixed(1)}% (${worstAbWhere})`,
+      const parts = await checkLinearSplitK(gpu);
+      // Every part ran its whole grid (the counts are pinned in the package's own test).
+      assertEquals(
+        Object.fromEntries(parts.map((part) => [part.id, part.cases.length])),
+        LINEAR_SPLITK_CASES,
       );
+      for (const part of parts) assertCheckPart(part);
     } finally {
       gpu.destroy();
     }
   });
 
-  it("equals the reference GEMM's words and the exact value on exact sums at every slice count for every storage, and on every tile geometry", async () => {
+  it("is not vacuous: a slice starting one K tile late fails the f64 band on every bands case, the one-slice identity and the exact sums", async () => {
     const gpu = await acquireGpu();
     try {
-      const run = splitKRunner(gpu);
-      // Every geometry and skeleton form (vec4, so the forms apply), where the slices' bases are
-      // what a one-slice run cannot reach: f32 at 4 and 16 slices of a tile count neither divides.
-      for (const geometry of linearGemmGeometries()) {
-        const shape = { m: gemmTileM(geometry) + 3, n: gemmTileN(geometry) + 4, k: 4300 };
-        const base = rawCase(F32, "exact", geometry, shape, 1);
-        const expected = Float32Array.from(
-          referenceF64(shape, base.x, base.weight.values, base.bias),
-        );
-        for (const slices of [4, 16]) {
-          const where = `${linearKey("f32", true, "f32", undefined, undefined, geometry)} s${slices}`;
-          const result = await run({ ...base, slices });
-          assertEquals(result.split, result.reference, where);
-          assertEquals(result.split, bits(expected), `${where}: the exact value`);
-        }
-      }
-      for (const storage of STORAGES) {
-        const shape = { m: 37, n: 69, k: unevenK(storage) };
-        const base = rawCase(storage, "exact", BAND_GEOMETRIES[0], shape, 1);
-        const expected = Float32Array.from(
-          referenceF64(shape, base.x, base.weight.values, base.bias),
-        );
-        for (const slices of SLICE_COUNTS) {
-          const where = `${storageLabel(storage)} K${shape.k} s${slices}`;
-          const result = await run({ ...base, slices });
-          assertEquals(result.split, result.reference, where);
-          assertEquals(result.split, bits(expected), `${where}: the exact value`);
-        }
-      }
-    } finally {
-      gpu.destroy();
-    }
-  });
-
-  it("carries a NaN of one input row to every output of that row and no other, for every storage", async () => {
-    const gpu = await acquireGpu();
-    try {
-      const run = splitKRunner(gpu);
-      for (const storage of STORAGES) {
-        const shape = { m: 37, n: 68, k: evenK() };
-        const testCase = rawCase(storage, "irregular", BAND_GEOMETRIES[0], shape, 4);
-        // The last element of row 21: read by the last slice only.
-        testCase.x[21 * shape.k + shape.k - 1] = Number.NaN;
-        const result = await run(testCase);
-        const rows = nanRows(result.split, shape.n);
-        assertEquals([...rows], [21], storageLabel(storage));
-        const values = floats(result.split).subarray(21 * shape.n, 22 * shape.n);
-        assert(
-          values.every(Number.isNaN),
-          `${storageLabel(storage)}: a column of row 21 is not NaN`,
-        );
-      }
-    } finally {
-      gpu.destroy();
-    }
-  });
-
-  it("deals the K tiles out in whole tiles: each slice's partial sums count its own terms", async () => {
-    const gpu = await acquireGpu();
-    try {
-      const run = splitKRunner(gpu);
-      // 269 tiles, the last of 12 terms, in 16 slices of 17 and 16 tiles; 63 tiles in 2 slices of
-      // 32 and 31, the last of 8 terms; 32 tiles in 8 slices of 4; 2 tiles in 4 slices, two of them
-      // empty (K smaller than the slices).
-      for (const [k, slices] of [
-        [4300, 16],
-        [1000, 2],
-        [512, 8],
-        [20, 4],
-      ] as const) {
-        const shape = { m: 5, n: 8, k };
-        const w = new Float32Array(shape.n * k).fill(1);
-        const result = await run({
-          geometry: BAND_GEOMETRIES[0],
-          ...shape,
-          slices,
-          weight: { storage: "f32", words: new Uint32Array(w.buffer), scale: undefined, values: w },
-          x: new Float32Array(shape.m * k).fill(1),
-          bias: new Float32Array(shape.n),
-        });
-        const tiles = Math.ceil(k / 16);
-        const per = Math.floor(tiles / slices);
-        const extra = tiles % slices;
-        let first = 0;
-        let total = 0;
-        for (let slice = 0; slice < slices; slice += 1) {
-          const end = first + per + (slice < extra ? 1 : 0);
-          const terms = Math.max(0, Math.min(end * 16, k) - first * 16);
-          const counts = floats(result.partials).subarray(
-            slice * shape.m * shape.n,
-            (slice + 1) * shape.m * shape.n,
-          );
-          assert(
-            counts.every((count) => count === terms),
-            `K${k} s${slices}: slice ${slice} counts ${counts[0]}, not ${terms}`,
-          );
-          total += counts[0];
-          first = end;
-        }
-        // The GPU's counts add up to K: no term dropped, none taken twice.
-        assertEquals(total, k);
-        assert(
-          floats(result.split).every((value) => value === k),
-          `K${k} s${slices}: the sums`,
-        );
-      }
+      const parts = await checkLinearSplitK(gpu, { mutate: sliceOneTileLate });
+      const byId = new Map(parts.map((part) => [part.id, part]));
+      const bands = failuresOf(byId.get("linear-splitk-bands"), LINEAR_SPLITK_F64_BAND);
+      assertEquals(bands.length, LINEAR_SPLITK_CASES["linear-splitk-bands"]);
+      assert(
+        bands.every((failures) => failures > 0),
+        `${bands.filter((f) => f === 0).length} bands cases passed`,
+      );
+      const identity = failuresOf(
+        byId.get("linear-splitk-identity"),
+        "one slice: the reference GEMM's words (u32)",
+      );
+      assert(identity.every((failures) => failures > 0));
+      const exact = failuresOf(
+        byId.get("linear-splitk-exact"),
+        "exact sums: the exact value (u32)",
+      );
+      assert(exact.every((failures) => failures > 0));
     } finally {
       gpu.destroy();
     }

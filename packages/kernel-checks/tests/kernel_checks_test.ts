@@ -9,6 +9,7 @@ import {
   GEMV_PARALLEL_ROWS_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
+  LINEAR_SPLITK_CASES,
   RMS_NORM_PREFETCH_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
@@ -170,6 +171,15 @@ describe("the expected case counts each check exports", () => {
       "attention-online-tiled-sg32": 28,
     });
     assertEquals(ATTENTION_BAND_CASES, { "attention-band": 14 });
+    // 12 tile geometries in the default and embedded profiles (a table with another geometry moves
+    // the identity and exact counts) × 8 storages × 4 slice counts
+    assertEquals(LINEAR_SPLITK_CASES, {
+      "linear-splitk-identity": 115,
+      "linear-splitk-bands": 128,
+      "linear-splitk-exact": 56,
+      "linear-splitk-nan": 8,
+      "linear-splitk-slices": 4,
+    });
     assertEquals(FUSION_TWIN_CASES, {
       "fusion-gated-residual": 9,
       "fusion-silu": 3,

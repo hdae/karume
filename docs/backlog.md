@@ -144,7 +144,7 @@ maintainer's ruling of 2026-11-06).
        verification cache do not read dispatch programs yet.
      - The split-K linear (the split of the GEMM skeleton since 2026-11-28 —
        [research 2026-11-28](research/2026-11-28-splitk-gemm-skeleton.md), every storage under f32 compute): not counted by the memory
-       estimate; no module in `packages/kernel-checks` (so no browser check); no level selects it (perf-ledger K-115:
+       estimate; no level selects it (perf-ledger K-115:
        a per-profile thread target, the per-device evidence, and the sha rows of the `reorder` presets it would move).
      - WGSL snapshots of strategies other than reference kernels are still byte fixtures.
   4. **Requirement levels** ([spec/numerics.md](spec/numerics.md)):

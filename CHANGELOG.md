@@ -93,7 +93,8 @@ measurements in `docs/research/`.
   int8, int4, int2 as well as f32); its slices are whole K tiles, so a tile count the slice count does not divide is
   cut too. On an RTX 3080 Ti it takes 0.24 to 0.84 of the reference GEMM's kernel time where
   the reference's grid is under-filled (Gemma 4 prefill's narrow projections), and is up to 1.33 times slower where
-  the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change.
+  the grid is full. No level, preset or geometry profile selects it, so no Session's numbers change. The workbench's
+  `kernel-check` entry runs a fifteenth check, `linear-splitk`.
 
 ## [0.24.0] - 2026-11-25
 

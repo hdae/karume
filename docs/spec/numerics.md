@@ -92,7 +92,9 @@ class R (only the order of the additions differs):
 - It reads every weight storage the reference GEMM reads under f32 compute: f32, f16, bf16, int8, int4 at any group
   length, int2. The f16 compute variant has no split.
 - `exact` never selects it. With one slice its two passes give the reference GEMM's words on every tile geometry the
-  linear GEMM takes; that is the kernel's structural check, not a form any Session runs.
+  linear GEMM takes; that is the kernel's structural check, not a form any Session runs. Its four-point check is the
+  `linear-splitk` kernel check (`packages/kernel-checks`), which the runtime's GPU test and the workbench's
+  `kernel-check` entry run.
 - No level, preset or geometry profile selects it. It runs only through the private Session key `LINEAR_SPLIT_K`,
   which its kernel tests pass; it is not part of the public surface. Under that key a linear takes it when it
   computes in f32 (`linearCompute: "f32"`, or `"a8"` for a float-stored weight, which a8 leaves in f32), neither the
