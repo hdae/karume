@@ -88,7 +88,8 @@ measurements in `docs/research/`.
   26B's `i4-fast` now says it is of the decode without the drafter.
 - `@karume/runtime`: a geometry profile may carry the grid-fill rule of the GEMM (`gemmGrid`, type `GemmGridRule`): a
   ladder of tiles walked by the dispatch grid's workgroup count, which in such a table replaces the row-count buckets
-  of linear (and its split-K partial), matmul and bmm. A table injected with `acquireGpu({ geometryProfile })` may
+  of linear (and its split-K partial), matmul and bmm; a GEMM with a zero dimension (a zero-element tensor's) takes
+  the row-count bucket of M under the rule too. A table injected with `acquireGpu({ geometryProfile })` may
   carry it, and `parseGeometryProfileJson` of `@karume/runtime/tune` reads it. Neither the default profile nor any
   built-in table carries one, so no Session's keys or kernels change.
 - `@karume/runtime/tune`: the geometry sweep's `grid` candidate set (`runGeometrySweep({ candidateSet: "grid" })`):

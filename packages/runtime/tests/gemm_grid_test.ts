@@ -3,7 +3,9 @@
 //
 // 1. The walk down the ladder: the largest tile on a full grid with K at its floor, a smaller tile
 //    where the grid is under-filled, the last tile when none fills, the padding bound and the K floor
-//    at their edges, the batch counted on the z axis.
+//    at their edges, the batch counted on the z axis. A shape with a zero dimension (M, N, K or the
+//    batch) takes the bucket tile of M, as a zero-element tensor's GEMM did before the rule (the
+//    public-API regression of a symbolic dimension of 0 runs it on a Session).
 // 2. On the recon's 125 shapes of 2026-11-28 (the default presets' GEMM-path linears and bmms,
 //    outputs/misc/gemm-geometry-recon-2026-11-28/shapes.ts), through an injected test profile with
 //    the fitted integers (256, 48), the rule picks the tile the recon's own fitting script (fit.ts,
@@ -262,6 +264,63 @@ describe("the walk down the grid-fill ladder", () => {
     assertEquals(gemmGridWorkgroups(LADDER[3], shape(64, 64, 128, 16)), 64);
     assertEquals(tile(gemmShapeGeometry(profile, shape(64, 64, 128, 16))), "32x32");
     assertEquals(tile(gemmShapeGeometry(profile, shape(64, 64, 128, 1))), "16x16");
+  });
+});
+
+describe("a GEMM with a zero dimension under the rule", () => {
+  // One bucket of 64×32 for every M: no walk of these shapes gives it (a zero M, N or batch has
+  // no workgroups and walks to 16×16; K = 0 on 768 × 256 is below the K floor and walks to 64×64)
+  const profile: GeometryProfile = {
+    ...withGrid(FITTED),
+    gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: LADDER[2] }],
+  };
+  const zero = [
+    ["M", shape(0, 256, 1536)],
+    ["N", shape(768, 0, 1536)],
+    ["K", shape(768, 256, 0)],
+    ["batch", shape(768, 256, 1536, 0)],
+  ] as const;
+
+  it("takes the bucket tile of M, the same object as the lookup without the rule", () => {
+    for (const [name, value] of zero) {
+      const geometry = gemmShapeGeometry(profile, value);
+      assert(geometry === gemmRowsGeometry(profile, value.m), `${name} is 0`);
+      assertEquals(tile(geometry), "64x32", `${name} is 0`);
+    }
+  });
+
+  it("gives a zero-row linear's dispatch program the bucket tile in its GEMM key", () => {
+    const [n, k] = [256, 1536];
+    const v4 = gemmUsesVec4(k, n);
+    const program = linearProgramFor(
+      { id: "gemm-f32", compute: "f32", v4, groupSize: undefined },
+      {
+        x: [0, k],
+        weight: [n, k],
+        m: 0,
+        n,
+        k,
+        weightStorage: "f32",
+        groupSize: undefined,
+        packedScale: undefined,
+        prologue: undefined,
+        geometryProfile: profile,
+        linearI8a8Dot: "dp4a",
+      },
+    );
+    assertEquals(
+      program.dispatches.map((dispatch) => dispatch.key),
+      [linearKey("f32", v4, "f32", 0, undefined, LADDER[2])],
+    );
+  });
+
+  it("still refuses a broken rule before it falls back", () => {
+    const broken = { ...profile, gemmGrid: { ...FITTED, ladder: [LADDER[1], LADDER[0]] } };
+    assertThrows(
+      () => gemmShapeGeometry(broken, shape(0, 256, 1536)),
+      CodegenError,
+      "strictly decreasing tile area",
+    );
   });
 });
 
