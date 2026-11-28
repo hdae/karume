@@ -90,8 +90,11 @@ time.
   decode in both `conv2d` fields. `nvidia-ampere` and `apple-metal-3` carry none; a table takes one when its family is
   derived from a sweep that measured it.
 - `quick+` and the evaluation set `k88` take every registered table's geometries, so registering a table can grow
-  them: 152 of the 1,656 rows of `quick+` come from `apple-m5` and `apple-metal-3-shared` (1,504 without them), and
-  3 of the 213 rows `k88` forms over its own 19 cases (210 without them).
+  them: 152 of the 1,656 rows of `quick+` come from `apple-m5` and `apple-metal-3-shared` (1,504 without them). A
+  `k88` linear / matmul case takes the geometry each table gives its shape (`gemmShapeGeometry`, the call sites' one
+  lookup), so its candidate list moves with a table's grid-fill rule as well as with its `gemmRows`: of the 234 rows
+  `k88` forms over its own 19 cases, 3 come from `apple-m5` and `apple-metal-3-shared` and 21 from `nvidia-ampere`'s
+  grid-fill rule (213 without the rule, 210 without either). `quick+` reads the `gemmRows` rules only.
 
 ## The grid-fill rule of the GEMM
 
@@ -107,19 +110,31 @@ count instead of the row count alone (`gemmGrid` — ADR [0157](../decisions/015
   padding is at most `maxPadding`; otherwise the first smaller tile whose grid has at least `minWorkgroups` workgroups
   and whose padding is at most `maxPadding`; otherwise the last tile. The padding is compared as a product of
   integers, so a padding of exactly the bound is taken.
+- **A shape with a zero dimension** (M, N, K or the batch is 0 — the GEMM of a zero-element tensor, such as a
+  symbolic dimension of 0) has no grid to fill: after the rule is checked, the lookup gives the `gemmRows` rule of M,
+  the same object as without the field. The call sites' one lookup takes it, so such a Session runs the kernels it
+  runs on a table without the field.
 - **Where it applies**: the GEMM of linear (every weight storage, f32 and f16 compute, over the flattened rows, a batch
   of 1), the split-K partial (the tile of the reference GEMM of the same shape, so that its one-slice identity stays
   the identity with the GEMM the Session would run), matmul (a batch of 1) and bmm (M of one matrix, its batch on the
-  z axis). In a table that carries the field these ops do not read `gemmRows`. Nothing else reads the field: the i8a8
+  z axis). In a table that carries the field these ops read `gemmRows` only for a shape with a zero dimension.
+  Nothing else reads the field: the i8a8
   paths, the fused attention, conv and the states-shaped and row-block attention select as before.
 - **Without the field** the lookup is the `gemmRows` rule of M, the same object as before the field existed, so a
-  table without it keeps every pipeline key, WGSL text and dispatch. The default profile carries no rule, and no
-  registered table carries one: no Session's kernels change.
+  table without it keeps every pipeline key, WGSL text and dispatch. The default profile carries no rule.
+- **The table that carries it**: `nvidia-ampere`, with the code's ladder, K floor and padding bound and the integers
+  (256, 48) derived from two grid records of the RTX 3080 Ti (Node, Vulkan) of 2026-11-28 against its bucket-only
+  table — the generator given the grid records and the 24 GEMV sweep records its header cites, its tile families
+  carried over and its GEMV choices derived again unchanged. On its adapter linear, matmul and bmm take the rule's
+  tile; their output words are the bucket tile's (on the development machine the corpus's output rows are unchanged
+  and 8 of its 22 census rows moved by the tile alone). The table is matched by vendor and architecture
+  (`nvidia` / `ampere`), not by a description, so every Ampere adapter that reports the architecture runs it, and a
+  smaller Ampere GPU (fewer SMs than the RTX 3080 Ti) gets integers measured on the RTX 3080 Ti, whose workgroup
+  counts are fitted to that device's grid. The other tables carry none.
 - **Checks** (at injection, selection and JSON reading): the ladder has two tiles or more in strictly decreasing tile
   area, each passes the geometry check, and may carry the skeleton form but not the counter decode; the counts are
-  positive integers; the padding bound is a finite number of at least 1. A lookup refuses a shape whose M, N, K or
-  batch is 0. The limit check names a ladder tile past the device's workgroup limits. The JSON reader rejects unknown
-  fields inside the rule.
+  positive integers; the padding bound is a finite number of at least 1. The limit check names a ladder tile past the
+  device's workgroup limits. The JSON reader rejects unknown fields inside the rule.
 - **Identity**: a tile the rule picks writes the bucket tile's words by construction of the WGSL (the geometry decides
   which thread computes which output, not the order of a K reduction); below the WGSL it is a fact of the device's
   compiler, checked by a GPU test on the development machine (every storage, every step of the ladder, matmul, bmm and
@@ -822,15 +837,17 @@ written.
   kernel takes it, and a table that carries the fields written by the generator, read back, and matching its adapter
   by the fingerprints of the kernels it runs.
 - The grid-fill rule's derivation (core lane): replaying the recon's interleaved medians of the ladder on the grid
-  cases against `nvidia-ampere`'s tiles adopts (256, 48); a ladder row not identical to the default refuses every
+  cases against `nvidia-ampere`'s M buckets (the table without the field it carries since) adopts (256, 48); a ladder row not identical to the default refuses every
   pair that picks it there; a tile slower than today beyond the bar refuses the pairs that pick it and not the others;
   a weighted gain below the threshold refuses every pair; one unsteady record is no evidence and two are; today's tile
   is the table's own; the refusals. The generator's `--grid-records`: the dry run, the written field and header, the
   field carried through a regeneration of the tile geometry, and the usage errors.
 - The grid-fill rule (core lane): the walk at its edges (the K floor, the least workgroup count, a padding of exactly
-  the bound, the batch on the z axis, the last tile); on the recon's 125 shapes of 2026-11-28 the tile the recon's own
-  fitting script picked; the lookup without the field equal to the `gemmRows` rule of M on every registered table and
-  the default; the refusals of a broken rule, among them a ladder out of order; the JSON round trip; the linear's
+  the bound, the batch on the z axis, the last tile); a shape with a zero M, N, K or batch taking the bucket tile of
+  M (the lookup and a zero-row linear's dispatch program); on the recon's 125 shapes of 2026-11-28 the tile the recon's own
+  fitting script picked; `nvidia-ampere` the one registered table that carries the field; the lookup without the
+  field equal to the `gemmRows` rule of M on every registered table (the field taken off `nvidia-ampere`) and the
+  default; the refusals of a broken rule, among them a ladder out of order; the JSON round trip; the linear's
   dispatch program naming the rule's tile, and the split-K partial the reference GEMM's tile. On the development
   machine's GPU, a Session with the rule writes the default profile's words on every storage and step (GPU tests).
 - The default profile's GEMV choices equal, row for row, a pinned copy — the values the GEMV kernel module held before

@@ -49,7 +49,7 @@ import {
   attentionStatsKey,
   attentionStatsRegCache,
 } from "../src/kernels/attention.ts";
-import { gemmRowsGeometry } from "../src/kernels/geometry-profile.ts";
+import { gemmShapeGeometry } from "../src/kernels/geometry-profile.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import {
   createSessionFromContainer,
@@ -315,13 +315,22 @@ test.skipIf(!F16_GPU)(
         assertDiffers(actual.output, plain.output, `linear ${name}`);
 
         const v4 = k % 4 === 0 && n % 4 === 0;
-        // MUST: pass **m** to the expected key too (the executor resolves the geometry from the row count
-        // with linearKey(..., m, ...) — src/runtime/recipe-builder.ts). Leaving it out gives the spelling of
-        // the default geometry, and the comparison would be against a key with a different geometry.
+        // MUST: pass **m** to the expected key too, and take the geometry from the call sites' one lookup
+        // (gemmShapeGeometry: the table's grid-fill rule where it carries one, else the row count's
+        // bucket). Leaving m out gives the spelling of the default geometry, and the comparison would be
+        // against a key with a different geometry.
         assertEquals(
           actual.keys.filter(
             (key) =>
-              key === linearKey("f32", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
+              key ===
+              linearKey(
+                "f32",
+                v4,
+                "f16",
+                m,
+                undefined,
+                gemmShapeGeometry(profile, { m, n, k, batch: 1 }),
+              ),
           ).length,
           1,
           `linear ${name}: the f16 variant's key did not run (${actual.keys.join(", ")})`,
@@ -329,7 +338,15 @@ test.skipIf(!F16_GPU)(
         assertEquals(
           actual.keys.filter(
             (key) =>
-              key === linearKey("f32", v4, "f32", m, undefined, gemmRowsGeometry(profile, m)),
+              key ===
+              linearKey(
+                "f32",
+                v4,
+                "f32",
+                m,
+                undefined,
+                gemmShapeGeometry(profile, { m, n, k, batch: 1 }),
+              ),
           ).length,
           0,
           `linear ${name}: an f32 variant's key remains`,
@@ -381,7 +398,15 @@ test.skipIf(!F16_GPU)(
         assertEquals(
           actual.keys.filter(
             (key) =>
-              key === linearKey("f16", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
+              key ===
+              linearKey(
+                "f16",
+                v4,
+                "f16",
+                m,
+                undefined,
+                gemmShapeGeometry(profile, { m, n, k, batch: 1 }),
+              ),
           ).length,
           1,
           `linear wf16 ${name}: the f16 compute key did not run`,
@@ -588,7 +613,14 @@ test.skipIf(!F16_GPU)(
         assertDiffers(actual.output, plain.output, `linear wbf16 ${name}`);
 
         const v4 = k % 4 === 0 && n % 4 === 0;
-        const expected = linearKey("bf16", v4, "f16", m, undefined, gemmRowsGeometry(profile, m));
+        const expected = linearKey(
+          "bf16",
+          v4,
+          "f16",
+          m,
+          undefined,
+          gemmShapeGeometry(profile, { m, n, k, batch: 1 }),
+        );
         assertEquals(
           actual.keys.filter((key) => key === expected).length,
           1,
@@ -648,7 +680,7 @@ test.skipIf(!F16_GPU)(
 
         // Each run read its own storage (not one shared expansion to f32).
         const v4 = k % 4 === 0 && n % 4 === 0;
-        const geometry = gemmRowsGeometry(profile, m);
+        const geometry = gemmShapeGeometry(profile, { m, n, k, batch: 1 });
         assertEquals(fromBf16.keys, [linearKey("bf16", v4, "f16", m, undefined, geometry)]);
         assertEquals(fromF16.keys, [linearKey("f16", v4, "f16", m, undefined, geometry)]);
       }

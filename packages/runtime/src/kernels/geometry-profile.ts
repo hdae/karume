@@ -1739,7 +1739,9 @@ export const gemmGridStep = (rule: GemmGridRule, shape: GemmShape): number => {
  * ({@link gemmGridStep}); without it, the `gemmRows` rule of the row count M
  * ({@link gemmRowsGeometry} — exactly the lookup before the rule existed, so a table without the
  * field keeps every key and byte of WGSL). bmm's M is the row count of one matrix and its batch
- * the grid's z axis; linear and matmul have a batch of 1.
+ * the grid's z axis; linear and matmul have a batch of 1. A shape with a zero dimension (a
+ * zero-element tensor's GEMM) takes the `gemmRows` rule of M under the rule too: it has no grid to
+ * fill, and the bucket lookup is the one a Session with such a tensor always ran.
  *
  * MUST: the derivation phase passes **the return value of this one call** to the key, the WGSL and
  * the dispatch alike (the same discipline as {@link gemmRowsGeometry}).
@@ -1748,26 +1750,16 @@ export const gemmGridStep = (rule: GemmGridRule, shape: GemmShape): number => {
 export const gemmShapeGeometry = (profile: GeometryProfile, shape: GemmShape): GemmGeometry => {
   const rule = profile.gemmGrid;
   if (rule === undefined) return gemmRowsGeometry(profile, shape.m);
-  const where = `Geometry profile '${profile.id}'`;
   assertU32Params("Geometry selection", {
     "row count M": shape.m,
     "column count N": shape.n,
     "reduction length K": shape.k,
     batch: shape.batch,
   });
-  for (const [name, value] of [
-    ["M", shape.m],
-    ["N", shape.n],
-    ["K", shape.k],
-    ["batch", shape.batch],
-  ] as const) {
-    if (value < 1) {
-      throw new CodegenError(
-        `Geometry selection: ${name} is ${value} (a GEMM without outputs or terms has no grid to fill)`,
-      );
-    }
+  assertGemmGridRule(rule, `Geometry profile '${profile.id}'`);
+  if (shape.m === 0 || shape.n === 0 || shape.k === 0 || shape.batch === 0) {
+    return gemmRowsGeometry(profile, shape.m);
   }
-  assertGemmGridRule(rule, where);
   return rule.ladder[gemmGridStep(rule, shape)];
 };
 

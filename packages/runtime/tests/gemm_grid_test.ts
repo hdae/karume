@@ -3,13 +3,16 @@
 //
 // 1. The walk down the ladder: the largest tile on a full grid with K at its floor, a smaller tile
 //    where the grid is under-filled, the last tile when none fills, the padding bound and the K floor
-//    at their edges, the batch counted on the z axis.
+//    at their edges, the batch counted on the z axis. A shape with a zero dimension (M, N, K or the
+//    batch) takes the bucket tile of M, as a zero-element tensor's GEMM did before the rule (the
+//    public-API regression of a symbolic dimension of 0 runs it on a Session).
 // 2. On the recon's 125 shapes of 2026-11-28 (the default presets' GEMM-path linears and bmms,
 //    outputs/misc/gemm-geometry-recon-2026-11-28/shapes.ts), through an injected test profile with
 //    the fitted integers (256, 48), the rule picks the tile the recon's own fitting script (fit.ts,
 //    `two(256, 48, 1.5, 256)`) picked — an oracle written apart from this implementation.
-// 3. Without the field nothing moves: on every registered table and the default profile, for every
-//    shape of a grid, the lookup is the `gemmRows` rule of M (the call sites' keys follow it).
+// 3. Without the field nothing moves: on every registered table (the field taken off the one that
+//    carries it, `nvidia-ampere`) and the default profile, for every shape of a grid, the lookup is
+//    the `gemmRows` rule of M (the call sites' keys follow it).
 // 4. A broken rule fails loudly at the check and at the lookup (fault injection: a ladder out of
 //    order); the JSON of a table with the rule reads back to the same rule.
 // 5. The linear's dispatch program takes the rule's tile in its GEMM key, and the split-K partial
@@ -265,6 +268,63 @@ describe("the walk down the grid-fill ladder", () => {
   });
 });
 
+describe("a GEMM with a zero dimension under the rule", () => {
+  // One bucket of 64×32 for every M: no walk of these shapes gives it (a zero M, N or batch has
+  // no workgroups and walks to 16×16; K = 0 on 768 × 256 is below the K floor and walks to 64×64)
+  const profile: GeometryProfile = {
+    ...withGrid(FITTED),
+    gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: LADDER[2] }],
+  };
+  const zero = [
+    ["M", shape(0, 256, 1536)],
+    ["N", shape(768, 0, 1536)],
+    ["K", shape(768, 256, 0)],
+    ["batch", shape(768, 256, 1536, 0)],
+  ] as const;
+
+  it("takes the bucket tile of M, the same object as the lookup without the rule", () => {
+    for (const [name, value] of zero) {
+      const geometry = gemmShapeGeometry(profile, value);
+      assert(geometry === gemmRowsGeometry(profile, value.m), `${name} is 0`);
+      assertEquals(tile(geometry), "64x32", `${name} is 0`);
+    }
+  });
+
+  it("gives a zero-row linear's dispatch program the bucket tile in its GEMM key", () => {
+    const [n, k] = [256, 1536];
+    const v4 = gemmUsesVec4(k, n);
+    const program = linearProgramFor(
+      { id: "gemm-f32", compute: "f32", v4, groupSize: undefined },
+      {
+        x: [0, k],
+        weight: [n, k],
+        m: 0,
+        n,
+        k,
+        weightStorage: "f32",
+        groupSize: undefined,
+        packedScale: undefined,
+        prologue: undefined,
+        geometryProfile: profile,
+        linearI8a8Dot: "dp4a",
+      },
+    );
+    assertEquals(
+      program.dispatches.map((dispatch) => dispatch.key),
+      [linearKey("f32", v4, "f32", 0, undefined, LADDER[2])],
+    );
+  });
+
+  it("still refuses a broken rule before it falls back", () => {
+    const broken = { ...profile, gemmGrid: { ...FITTED, ladder: [LADDER[1], LADDER[0]] } };
+    assertThrows(
+      () => gemmShapeGeometry(broken, shape(0, 256, 1536)),
+      CodegenError,
+      "strictly decreasing tile area",
+    );
+  });
+});
+
 describe("the grid-fill rule on the recon's 125 shapes (RTX 3080 Ti, 2026-11-28)", () => {
   it("picks, through an injected test profile, the tile the recon's fitting script picked on every shape", () => {
     assertEquals(RECON_SHAPES.length, 125);
@@ -290,8 +350,17 @@ describe("the grid-fill rule on the recon's 125 shapes (RTX 3080 Ti, 2026-11-28)
 describe("without the field, the lookup is the gemmRows rule of M", () => {
   it("gives, on the default profile and every registered table, the gemmRows geometry of M for every shape of a grid", () => {
     const rows = [1, 16, 17, 64, 65, 300, 512, 513, 768, 4096, 65536];
-    for (const profile of [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES]) {
-      assertEquals(profile.gemmGrid, undefined, `${profile.id} carries no grid-fill rule`);
+    // nvidia-ampere carries the field (from the RTX 3080 Ti's grid records); its buckets are read
+    // with the field taken off, as every other table's are without one
+    assertEquals(
+      BUILTIN_GEOMETRY_PROFILES.filter(({ gemmGrid }) => gemmGrid !== undefined).map(
+        ({ id }) => id,
+      ),
+      ["nvidia-ampere"],
+    );
+    assertEquals(DEFAULT_GEOMETRY_PROFILE.gemmGrid, undefined);
+    for (const table of [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES]) {
+      const { gemmGrid: _rule, ...profile } = table;
       for (const m of rows) {
         for (const [n, k, batch] of [
           [32, 64, 1],
@@ -378,17 +447,6 @@ describe("a broken grid-fill rule fails loudly", () => {
           name,
         );
       }
-    }
-  });
-
-  it("refuses a shape without outputs or terms at the lookup", () => {
-    for (const [name, value] of [
-      ["M", shape(0, 64, 64)],
-      ["N", shape(64, 0, 64)],
-      ["K", shape(64, 64, 0)],
-      ["batch", shape(64, 64, 64, 0)],
-    ] as const) {
-      assertThrows(() => gemmShapeGeometry(withGrid(FITTED), value), CodegenError, `${name} is 0`);
     }
   });
 

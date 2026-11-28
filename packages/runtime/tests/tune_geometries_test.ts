@@ -23,6 +23,7 @@ import {
   conv2dProfileGeometry,
   DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
+  gemmShapeGeometry,
   type GeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
@@ -397,12 +398,13 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
         index,
     );
 
-  it("a linear / matmul case: the tile of the gemmRows geometry of the default and every registered table for its M (a rule that carries a form counts as its tile), each tile once, without the form and with each form, the default first", () => {
+  it("a linear / matmul case: the tile of the geometry the default and every registered table give its shape (gemmShapeGeometry — the gemmRows rule of its M, or a table's grid-fill rule; a geometry that carries a form counts as its tile), each tile once, without the form and with each form, the default first", () => {
     for (const rows of [64, 512, 768, 4096]) {
+      const shape = { m: rows, n: 3072, k: 1024, batch: 1 };
       const bases = distinct(
-        PROFILES.map((profile) => gemmTileGeometry(gemmRowsGeometry(profile, rows))),
+        PROFILES.map((profile) => gemmTileGeometry(gemmShapeGeometry(profile, shape))),
       );
-      const candidates = k88GemmCandidates({ m: rows, n: 3072, k: 1024, batch: 1 });
+      const candidates = k88GemmCandidates(shape);
       assertEquals(
         names(candidates),
         bases.flatMap((base) => [
@@ -412,7 +414,7 @@ describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the
         ]),
         `M ${rows}`,
       );
-      assertEquals(candidates[0]?.geometry, gemmRowsGeometry(DEFAULT_GEOMETRY_PROFILE, rows));
+      assertEquals(candidates[0]?.geometry, gemmShapeGeometry(DEFAULT_GEOMETRY_PROFILE, shape));
       for (const { name, geometry } of candidates) assertGemmGeometry(geometry, name);
     }
   });
