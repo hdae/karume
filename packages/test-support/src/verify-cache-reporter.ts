@@ -42,11 +42,13 @@ import {
   keyOf,
   keyVariablesOf,
   type Layers,
+  moduleIdentityOf,
   type Outcome,
   reasonsNotReusable,
   RECORD_SCHEMA,
   roleOfCommand,
   sha256Of,
+  SOURCE_TEXT_TESTS,
   reusedTitleOf,
   stubModuleText,
   summarize,
@@ -152,69 +154,101 @@ const readWorkspace = (): Workspace => {
   return packages;
 };
 
-/** The static import closure of entry files, with each module read and parsed once per run. */
+/** One edge of the closure: the module it reaches and whether it was imported with a query. */
+type ImportEdge = { readonly target: string; readonly queried: boolean };
+
+/**
+ * The static import closure of entry files and the code layer over it, with each module read and
+ * parsed once per run.
+ */
 export class ImportClosures {
   readonly #workspace: Workspace;
   readonly #read: ReadModule;
-  readonly #imports = new Map<string, readonly string[]>();
-  readonly #hashes = new Map<string, string>();
+  readonly #bytes = new Map<string, Uint8Array<ArrayBuffer> | undefined>();
+  readonly #imports = new Map<string, readonly ImportEdge[]>();
+  readonly #identities = new Map<string, string>();
 
   constructor(workspace: Workspace, read: ReadModule) {
     this.#workspace = workspace;
     this.#read = read;
   }
 
-  hashOfModule(path: string): string {
-    let hash = this.#hashes.get(path);
-    if (hash === undefined) {
-      const bytes = this.#read(path);
-      hash = bytes === undefined ? "missing" : sha256Of(bytes);
-      this.#hashes.set(path, hash);
-    }
-    return hash;
+  #bytesOf(path: string): Uint8Array<ArrayBuffer> | undefined {
+    if (!this.#bytes.has(path)) this.#bytes.set(path, this.#read(path));
+    return this.#bytes.get(path);
   }
 
-  #resolve(from: string, written: string): string | undefined {
+  /** The module's identity in the code layer ({@link moduleIdentityOf}). */
+  identityOf(path: string, byBytes: boolean): string {
+    const cacheKey = `${byBytes ? "bytes" : "any"}:${path}`;
+    let identity = this.#identities.get(cacheKey);
+    if (identity === undefined) {
+      identity = moduleIdentityOf(path, this.#bytesOf(path), byBytes);
+      this.#identities.set(cacheKey, identity);
+    }
+    return identity;
+  }
+
+  #resolve(from: string, written: string): ImportEdge | undefined {
     // A query (`.wgsl?raw`) asks Vite for another form of the same file: the file is the module.
     const queryAt = written.indexOf("?");
     const specifier = queryAt === -1 ? written : written.slice(0, queryAt);
+    const queried = queryAt !== -1;
     if (specifier.startsWith("./") || specifier.startsWith("../")) {
-      return join(dirname(from), specifier);
+      return { target: join(dirname(from), specifier), queried };
     }
-    if (specifier.startsWith("file:")) return fileURLToPath(specifier);
+    if (specifier.startsWith("file:")) return { target: fileURLToPath(specifier), queried };
     const parts = specifier.split("/");
     const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
     const rest = specifier.slice(name.length);
-    return this.#workspace.get(name)?.get(rest === "" ? "." : `.${rest}`);
+    const target = this.#workspace.get(name)?.get(rest === "" ? "." : `.${rest}`);
+    return target === undefined ? undefined : { target, queried };
   }
 
-  #importsOf(path: string): readonly string[] {
+  #importsOf(path: string): readonly ImportEdge[] {
     const known = this.#imports.get(path);
     if (known !== undefined) return known;
-    let resolved: string[] = [];
+    let resolved: ImportEdge[] = [];
     // Only TypeScript sources are parsed; a JSON or WGSL module is a leaf of the graph.
-    const bytes = /\.[cm]?tsx?$/.test(path) ? this.#read(path) : undefined;
+    const bytes = /\.[cm]?tsx?$/.test(path) ? this.#bytesOf(path) : undefined;
     if (bytes !== undefined) {
       resolved = importSpecifiersOf(path, SOURCE_TEXT.decode(bytes))
         .map((written) => this.#resolve(path, written))
-        .filter((target): target is string => target !== undefined);
+        .filter((edge): edge is ImportEdge => edge !== undefined);
     }
     this.#imports.set(path, resolved);
     return resolved;
   }
 
-  /** Every module reachable from `entries` (absolute paths), sorted. */
-  closureOf(entries: readonly string[]): string[] {
+  /**
+   * Every module reachable from `entries` (absolute paths), sorted, and those of them that a module
+   * of this closure imports with a query (`?raw`: the test sees the file's text).
+   */
+  closureOf(entries: readonly string[]): { modules: string[]; queried: ReadonlySet<string> } {
     const seen = new Set(entries);
+    const queried = new Set<string>();
     const pending = [...entries];
     for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
-      for (const target of this.#importsOf(next)) {
+      for (const { target, queried: withQuery } of this.#importsOf(next)) {
+        if (withQuery) queried.add(target);
         if (seen.has(target)) continue;
         seen.add(target);
         pending.push(target);
       }
     }
-    return [...seen].sort();
+    return { modules: [...seen].sort(), queried };
+  }
+
+  /**
+   * The code layer's content over the closure of `entries`: each module (absolute path) with its
+   * identity. A module imported with a query keeps byte identity, and so does every module when
+   * `byBytes` is set (a test that bundles sources — {@link SOURCE_TEXT_TESTS}).
+   */
+  codeOf(entries: readonly string[], byBytes: boolean): (readonly [string, string])[] {
+    const { modules, queried } = this.closureOf(entries);
+    return modules.map(
+      (path) => [path, this.identityOf(path, byBytes || queried.has(path))] as const,
+    );
   }
 }
 
@@ -351,16 +385,12 @@ export default class VerifyCacheReporter implements Reporter {
     return { content, hash: hashOf(content) };
   }
 
-  /** The import closure of a test file (with the setup file) and the code layer's content. */
-  #codeOf(moduleId: string): {
-    modules: readonly string[];
-    code: readonly (readonly [string, string])[];
-  } {
-    const modules = this.#closures.closureOf([moduleId, SETUP_FILE]);
-    const code = modules.map(
-      (path) => [repoPath(path), this.#closures.hashOfModule(path).slice(0, 16)] as const,
-    );
-    return { modules, code };
+  /** The code layer's content: the import closure of a test file (with the setup file). */
+  #codeOf(moduleId: string): readonly (readonly [string, string])[] {
+    const byBytes = SOURCE_TEXT_TESTS.includes(repoPath(moduleId));
+    return this.#closures
+      .codeOf([moduleId, SETUP_FILE], byBytes)
+      .map(([path, identity]) => [repoPath(path), identity] as const);
   }
 
   /**
@@ -375,7 +405,7 @@ export default class VerifyCacheReporter implements Reporter {
     return {
       environment: environmentHash,
       data: dataLayerOver(record),
-      code: hashOf(this.#codeOf(moduleId).code),
+      code: hashOf(this.#codeOf(moduleId)),
     };
   }
 
@@ -463,8 +493,7 @@ export default class VerifyCacheReporter implements Reporter {
     const { adapter } = observed;
     const { content: environment, hash: environmentHash } = this.#environmentOf(adapter);
 
-    const { modules, code } = this.#codeOf(testModule.moduleId);
-    const inClosure = new Set(modules);
+    const code = this.#codeOf(testModule.moduleId);
 
     const unknownCommands: string[] = [];
     const inputCommands: (readonly string[])[] = [];
@@ -473,9 +502,9 @@ export default class VerifyCacheReporter implements Reporter {
       if (role === "unknown") unknownCommands.push(command.join(" "));
       else if (role === "input") inputCommands.push(command);
     }
-    const files = observed.inputs.files.filter(
-      (path) => !inClosure.has(path) && repoRelative(path) !== undefined,
-    );
+    // MUST: a module of the closure that the test also read stays in the data layer, by its bytes.
+    // The code layer sees the module's syntax tree; the test saw its text, comments included.
+    const files = observed.inputs.files.filter((path) => repoRelative(path) !== undefined);
     const directories = observed.inputs.directories.filter(
       (path) => repoRelative(path) !== undefined,
     );

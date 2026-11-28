@@ -17,15 +17,21 @@
  * | --- | --- |
  * | environment | the adapter's identity, features and limits; Node; the lockfile and the Vitest config; every `KARUME_*` variable except `KARUME_VERIFY_CACHE`. Not the driver version (kept in the record, outside the key) |
  * | data | each file the test read (content hash, or size and modification time above a size limit), each directory it listed, each `git ls-files` it ran |
- * | code | the test file's static import closure |
+ * | code | the test file's static import closure, each module by its syntax tree or its bytes ({@link moduleIdentityOf}) |
  */
 
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { parseSync } from "oxc-parser";
 import type { InputRecord } from "./input-record.ts";
 import type { KernelUse } from "./kernel-record.ts";
 
-export const RECORD_SCHEMA = 1;
+/**
+ * The record format. 2: the code layer identifies a module by its syntax tree (`ast:`) or its bytes
+ * (`bytes:`); a schema-1 record identified every module by its bytes, so its code layer cannot be
+ * compared with one computed now.
+ */
+export const RECORD_SCHEMA = 2;
 
 /** What the test worker hands to the reporter when a test file ends. */
 export type WorkerRecord = {
@@ -91,7 +97,7 @@ export type CacheRecord = {
   /** The environment layer's content (so a miss can say what moved). */
   readonly environment: unknown;
   readonly data: readonly DataInput[];
-  /** The import closure: repository-relative module path and the first 16 hex digits of its sha256. */
+  /** The import closure: repository-relative module path and its identity ({@link moduleIdentityOf}). */
   readonly code: readonly (readonly [string, string])[];
   readonly kernels: readonly KernelUse[];
   readonly kernelFingerprint: string;
@@ -107,6 +113,89 @@ export const hashOf = (value: unknown): string => sha256Of(JSON.stringify(value)
 
 export const keyOf = (layers: Layers): string =>
   hashOf([layers.environment, layers.data, layers.code]);
+
+/** Sources the parser reads; any other module (JSON, WGSL, …) is identified by its bytes. */
+const PARSED_SOURCE = /\.(?:[cm]?[jt]sx?)$/;
+
+/**
+ * The properties of the parser's nodes that say where a node is. oxc-parser 0.153 puts `start` and
+ * `end` on every node and nothing else positional; `range` appears only with its option (passed
+ * `false` below) and `loc` is never emitted. No node has a property of these names that is not a
+ * position.
+ */
+const POSITION_KEYS = new Set(["start", "end", "range", "loc"]);
+
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * The syntax tree of a source without positions, as JSON text (pure function), or `undefined` when
+ * the module is not a source the parser reads.
+ *
+ * Comments are not in the tree and whitespace between tokens leaves no trace once positions are
+ * dropped, so neither changes the text. Everything else is in it: the raw text and the value of every
+ * literal (string, number, bigint, regular expression), the raw and cooked text of every template
+ * literal part (the WGSL a module writes, its comments included), directives, decorators,
+ * parentheses and type annotations.
+ *
+ * `undefined` when the bytes are not UTF-8 or the parser reports an error: such a module keeps byte
+ * identity instead of a tree the parser only half read.
+ */
+export const syntaxTreeTextOf = (
+  path: string,
+  bytes: Uint8Array<ArrayBuffer>,
+): string | undefined => {
+  if (!PARSED_SOURCE.test(path)) return undefined;
+  let source: string;
+  try {
+    source = UTF8.decode(bytes);
+  } catch {
+    return undefined;
+  }
+  const result = parseSync(path, source, { range: false, preserveParens: true });
+  if (result.errors.length > 0) return undefined;
+  // MUST: a bigint value and a regular expression value are not JSON; the node's `bigint` and
+  // `regex` properties carry them as text too.
+  return JSON.stringify(result.program, (key, value: unknown) => {
+    if (POSITION_KEYS.has(key)) return undefined;
+    if (typeof value === "bigint") return `${value}n`;
+    if (value instanceof RegExp) return String(value);
+    return value;
+  });
+};
+
+/**
+ * A module's identity in the code layer (pure function): `ast:` and 16 hex digits of the sha256 of
+ * its syntax tree without positions ({@link syntaxTreeTextOf}), or `bytes:` and 16 hex digits of the
+ * sha256 of its bytes — when `byBytes` is set, when the module is not a source the parser reads, or
+ * when it does not parse. `missing` when there are no bytes.
+ *
+ * `byBytes` is for a module whose text, not only its code, decides the test's result: one imported
+ * with a query (`?raw`), or one in the closure of a test that bundles sources
+ * ({@link SOURCE_TEXT_TESTS}).
+ */
+export const moduleIdentityOf = (
+  path: string,
+  bytes: Uint8Array<ArrayBuffer> | undefined,
+  byBytes: boolean,
+): string => {
+  if (bytes === undefined) return "missing";
+  const tree = byBytes ? undefined : syntaxTreeTextOf(path, bytes);
+  return tree === undefined
+    ? `bytes:${sha256Of(bytes).slice(0, 16)}`
+    : `ast:${sha256Of(tree).slice(0, 16)}`;
+};
+
+/**
+ * Test files (repository-relative) whose result depends on the text of the sources they bundle, which
+ * the bundler (Rolldown, native code) reads outside Node's `fs`, so the data layer never sees the
+ * read: a `@__PURE__` annotation, a comment, decides what tree-shaking keeps. Every module of such a
+ * file's closure keeps byte identity. `verify_cache_test.ts` fails on a test source that imports a
+ * bundler and is not listed here.
+ */
+export const SOURCE_TEXT_TESTS: readonly string[] = [
+  "packages/hub/tests/hub_barrel_surface_test.ts",
+  "packages/models/tests/models_barrel_tree_shaking_test.ts",
+];
 
 /** The variable that chooses the mode. */
 export const CACHE_MODE_VARIABLE = "KARUME_VERIFY_CACHE";

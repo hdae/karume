@@ -5,7 +5,12 @@
  * and the code layer's import closure.
  */
 
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { parseSync } from "oxc-parser";
 import { describe, it } from "vite-plus/test";
 import {
   cacheModeOf,
@@ -17,13 +22,16 @@ import {
   keyOf,
   keyVariablesOf,
   type Layers,
+  moduleIdentityOf,
   reasonsNotReusable,
   RECORD_SCHEMA,
   roleOfCommand,
+  SOURCE_TEXT_TESTS,
   stubModuleText,
   summarize,
   sha256Of,
   summarizeReuse,
+  syntaxTreeTextOf,
 } from "../src/verify-cache.ts";
 import { ImportClosures } from "../src/verify-cache-reporter.ts";
 
@@ -334,6 +342,125 @@ describe("keyOf / summarize", () => {
   });
 });
 
+const bytesOf = (text: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(text);
+
+/** The code-layer identity of a TypeScript source given as text. */
+const identityOfSource = (text: string, path = "/repo/m.ts"): string =>
+  moduleIdentityOf(path, bytesOf(text), false);
+
+const SOURCE = [
+  'import { gemv } from "./gemv.ts";',
+  "",
+  "/** Rows per workgroup. */",
+  "export const ROWS = 4;",
+  "",
+  "export const shader = (n: number): string => `",
+  "  // one row per invocation",
+  "  @compute @workgroup_size(${ROWS}) fn main() { let n = ${n}u; }",
+  "`;",
+  "",
+  'export const name: string = gemv("linear");',
+  "",
+].join("\n");
+
+describe("moduleIdentityOf: what a source's identity sees", () => {
+  it("is the source's syntax tree: a TypeScript source parses to an `ast:` identity", () => {
+    assert(identityOfSource(SOURCE).startsWith("ast:"));
+  });
+
+  it("keeps the identity when only comments change", () => {
+    const edited = SOURCE.replace("/** Rows per workgroup. */", "// The rows a workgroup takes.")
+      .replace("export const ROWS", "/* tuned on one GPU */ export const ROWS")
+      .concat("// a trailing note\n");
+    assertEquals(identityOfSource(edited), identityOfSource(SOURCE));
+  });
+
+  it("keeps the identity when only whitespace between tokens changes", () => {
+    const edited = SOURCE.replace("export const ROWS = 4;", "export   const ROWS=\n    4 ;")
+      .replace('gemv("linear")', 'gemv(\n  "linear",\n)')
+      .replaceAll("\n\n", "\n\n\n");
+    assertEquals(identityOfSource(edited), identityOfSource(SOURCE));
+  });
+
+  it("holds no position: the same code moved down a file by a comment above it keeps the key", () => {
+    const moved = `// SPEC: docs/spec/verification.md#the-key\n//\n// ${"x".repeat(200)}\n\n${SOURCE}`;
+    assertEquals(identityOfSource(moved), identityOfSource(SOURCE));
+    const text = syntaxTreeTextOf("/repo/m.ts", bytesOf(SOURCE));
+    assert(text !== undefined);
+    for (const key of ["start", "end", "range", "loc"]) {
+      assertEquals(text.includes(`"${key}":`), false, `the tree text carries "${key}"`);
+    }
+  });
+
+  it("changes when a template literal's text changes, a WGSL comment inside it included", () => {
+    const wgslComment = SOURCE.replace("// one row per invocation", "// one row per lane");
+    const wgslCode = SOURCE.replace("let n = ${n}u;", "let n = ${n}i;");
+    const indent = SOURCE.replace("  @compute", "    @compute");
+    for (const edited of [wgslComment, wgslCode, indent]) {
+      assert(identityOfSource(edited) !== identityOfSource(SOURCE), edited);
+    }
+  });
+
+  it("changes when a string, a number, a type or an import changes", () => {
+    const edits = [
+      SOURCE.replace('"linear"', '"linear2"'),
+      SOURCE.replace('"linear"', "'linear'"),
+      SOURCE.replace("ROWS = 4", "ROWS = 8"),
+      SOURCE.replace("ROWS = 4", "ROWS = 4.0"),
+      SOURCE.replace("(n: number)", "(n: bigint)"),
+      SOURCE.replace("name: string", "name: String"),
+      SOURCE.replace('"./gemv.ts"', '"./gemv-v2.ts"'),
+      SOURCE.replace("import { gemv }", "import { gemm, gemv }"),
+      SOURCE.replace("import { gemv }", "import type { gemv }"),
+    ];
+    for (const edited of edits) {
+      assert(identityOfSource(edited) !== identityOfSource(SOURCE), edited);
+    }
+  });
+
+  it("changes on a regular expression, a bigint, a directive, a decorator or parentheses", () => {
+    const pairs = [
+      ["const r = /a+/g;", "const r = /a+/i;"],
+      ["const b = 1n;", "const b = 2n;"],
+      ['"use strict";\nf();', '"use client";\nf();'],
+      ["@sealed class A {}", "@frozen class A {}"],
+      ["const a = (b + c) * d;", "const a = ((b + c)) * d;"],
+    ];
+    for (const [before, after] of pairs) {
+      assert(identityOfSource(before) !== identityOfSource(after), `${before} / ${after}`);
+    }
+  });
+
+  it("keeps byte identity for a module that is not a parsed source: JSON, WGSL, Python", () => {
+    for (const path of ["/repo/table.json", "/repo/k.wgsl", "/repo/recipe.py"]) {
+      const text = '{ "a": 1 }\n';
+      assertEquals(
+        moduleIdentityOf(path, bytesOf(text), false),
+        `bytes:${sha256Of(text).slice(0, 16)}`,
+      );
+      assert(
+        moduleIdentityOf(path, bytesOf(text), false) !==
+          moduleIdentityOf(path, bytesOf(text.replace("\n", " \n")), false),
+      );
+    }
+  });
+
+  it("keeps byte identity for a source the parser cannot read, so a comment there still counts", () => {
+    const broken = "export const a = ;\n";
+    assertEquals(identityOfSource(broken), `bytes:${sha256Of(broken).slice(0, 16)}`);
+    assert(identityOfSource(broken) !== identityOfSource(`// note\n${broken}`));
+    const notUtf8 = new Uint8Array([0x63, 0x6f, 0x6e, 0x73, 0x74, 0x20, 0xff, 0x3b]);
+    assert(moduleIdentityOf("/repo/m.ts", notUtf8, false).startsWith("bytes:"));
+  });
+
+  it("keeps byte identity when asked to, and says when there is no file", () => {
+    const asked = moduleIdentityOf("/repo/m.ts", bytesOf(SOURCE), true);
+    assertEquals(asked, `bytes:${sha256Of(SOURCE).slice(0, 16)}`);
+    assert(asked !== moduleIdentityOf("/repo/m.ts", bytesOf(`// note\n${SOURCE}`), true));
+    assertEquals(moduleIdentityOf("/repo/m.ts", undefined, false), "missing");
+  });
+});
+
 describe("ImportClosures", () => {
   it("takes a module imported with a query (`?raw`) as its file, identified by the file's bytes", () => {
     const wgsl = "@compute @workgroup_size(1) fn main() {}\n";
@@ -341,7 +468,67 @@ describe("ImportClosures", () => {
       new Map(),
       filesOf({ "/repo/a.ts": 'import text from "./k.wgsl?raw";\n', "/repo/k.wgsl": wgsl }),
     );
-    assertEquals(closures.closureOf(["/repo/a.ts"]), ["/repo/a.ts", "/repo/k.wgsl"]);
-    assertEquals(closures.hashOfModule("/repo/k.wgsl"), sha256Of(wgsl));
+    assertEquals(closures.codeOf(["/repo/a.ts"], false), [
+      ["/repo/a.ts", identityOfSource('import text from "./k.wgsl?raw";\n', "/repo/a.ts")],
+      ["/repo/k.wgsl", `bytes:${sha256Of(wgsl).slice(0, 16)}`],
+    ]);
+  });
+
+  it("keeps byte identity for a source imported as text, in the closures that import it so", () => {
+    const helper = "// the helper\nexport const x = 1;\n";
+    const read = filesOf({
+      "/repo/raw.ts": 'import text from "./helper.ts?raw";\n',
+      "/repo/plain.ts": 'import { x } from "./helper.ts";\n',
+      "/repo/helper.ts": helper,
+    });
+    const identityIn = (entry: string): string | undefined =>
+      new ImportClosures(new Map(), read)
+        .codeOf([entry], false)
+        .find(([path]) => path === "/repo/helper.ts")?.[1];
+    assertEquals(identityIn("/repo/raw.ts"), `bytes:${sha256Of(helper).slice(0, 16)}`);
+    assertEquals(identityIn("/repo/plain.ts"), identityOfSource(helper, "/repo/helper.ts"));
+  });
+
+  it("keeps byte identity for every module of a test that bundles sources", () => {
+    const closures = new ImportClosures(
+      new Map([["@karume/x", new Map([[".", "/repo/x/mod.ts"]])]]),
+      filesOf({
+        "/repo/t_test.ts": 'import { a } from "@karume/x";\n',
+        "/repo/x/mod.ts": "export const a = /* @__PURE__ */ Object.freeze([]);\n",
+      }),
+    );
+    const code = closures.codeOf(["/repo/t_test.ts"], true);
+    assertEquals(
+      code.map(([path]) => path),
+      ["/repo/t_test.ts", "/repo/x/mod.ts"],
+    );
+    for (const [path, identity] of code) assert(identity.startsWith("bytes:"), path);
+  });
+});
+
+/** Packages whose build API reads the sources it bundles in native code, outside Node's `fs`. */
+const BUNDLERS = new Set(["vite-plus", "vite", "rolldown", "rollup", "esbuild"]);
+
+describe("SOURCE_TEXT_TESTS", () => {
+  it("lists every test source that imports a bundler, and nothing else", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const sources = execFileSync(
+      "git",
+      ["ls-files", "packages/*/tests/*.ts", "tools/*/tests/*.ts"],
+      { cwd: root, encoding: "utf8" },
+    )
+      .split("\n")
+      .filter((path) => path.endsWith(".ts"));
+    assert(sources.length > 100, `only ${sources.length} test sources listed`);
+    const bundling = sources.filter((path) => {
+      const { module, errors } = parseSync(path, readFileSync(join(root, path), "utf8"));
+      assertEquals(errors, [], path);
+      return module.staticImports.some(
+        (statement) =>
+          BUNDLERS.has(statement.moduleRequest.value) &&
+          (statement.entries.length === 0 || statement.entries.some((entry) => !entry.isType)),
+      );
+    });
+    assertEquals(bundling.sort(), [...SOURCE_TEXT_TESTS].sort());
   });
 });

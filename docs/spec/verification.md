@@ -152,10 +152,37 @@ The unit is one test file. After a file runs, a reporter writes a record of what
 | Layer | What it holds |
 | --- | --- |
 | environment | The adapter's identity, features and limits; the Node version and platform; the lockfile and `vite.config.ts`; every `KARUME_*` variable except `KARUME_VERIFY_CACHE`. The driver version is recorded and is not part of the key. |
-| data | Each file the test read, by content hash (by size and modification time above 32 MiB); each directory it listed; each `git ls-files` it ran. |
-| code | The static import closure of the test file and the setup file, the runtime's sources included. A module imported with a query (`.wgsl?raw`) is its file. |
+| data | Each file the test read, by content hash (by size and modification time above 32 MiB), a module of its import closure included; each directory it listed; each `git ls-files` it ran. |
+| code | The static import closure of the test file and the setup file, the runtime's sources included, each module by its identity (below). A module imported with a query (`.wgsl?raw`) is its file. |
 
 A record also keeps the WGSL texts the file dispatched. They are not part of the key.
+
+### A module's identity
+
+The code layer identifies a JavaScript or TypeScript source by the sha256 of its syntax tree (oxc-parser) without
+positions, written `ast:` in a record:
+
+- Comments are not in the tree, and whitespace between tokens leaves nothing once the positions are dropped: a change
+  of either keeps the identity.
+- Everything else is in it: the raw text and the value of every literal (strings, numbers, bigints, regular
+  expressions), the text of every template literal (the WGSL a module writes, its comments included), directives,
+  decorators, parentheses and type annotations. A change to a type re-runs the files that import the module.
+
+Every other module keeps the sha256 of its bytes, written `bytes:`:
+
+- A module that is not a JavaScript or TypeScript source (JSON, WGSL).
+- A source that is not UTF-8 or does not parse.
+- A module imported with a query (`?raw`): the test sees its text.
+- Every module of a test file that bundles sources (`SOURCE_TEXT_TESTS` in `verify-cache.ts`: the barrel tests of
+  `packages/hub` and `packages/models`). The bundler reads them in native code, outside Node's `fs`, and a comment —
+  a `@__PURE__` annotation — decides what it keeps. `verify_cache_test.ts` fails on a test source that imports a
+  bundler and is not listed.
+
+A module of the closure that the test also read through `fs` (the language gate, the link checker, the import
+checks, the generated geometry tables' regeneration check) is in the data layer by its bytes as well, so a comment
+change re-runs that test and no other.
+
+A record of an earlier schema (1: every module by its bytes) is not reused; the next run of its file replaces it.
 
 ### When a record may be reused
 
@@ -196,4 +223,7 @@ outcome or the kernels move.
 - Files read outside the repository, and under `outputs/verify/`, `outputs/references/` and `node_modules/`.
 - The content of a file above 32 MiB whose size and modification time are unchanged.
 - A dynamic import whose specifier is not a literal.
+- A comment or whitespace change in a module that the test reads only by importing it: a line number in a stack
+  trace, the text `Function.prototype.toString` gives, and any read of a module's text outside Node's `fs` by a test
+  that `SOURCE_TEXT_TESTS` does not list.
 - Environment variables that are not `KARUME_*`; the clock; randomness; the driver version.
