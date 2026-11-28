@@ -251,6 +251,9 @@ maintainer's ruling of 2026-11-06).
          - a reading of the rule of one steady record names its record by path; the kernel fingerprint and the
            record's sha256 are reached through the row and the provenance, and a held check shows only as no
            `ruledOut`;
+         - the explore set's quick look still screens at ×1.10 against the fastest of the class
+           (`EXPLORE_QUICK_LOOK_MARGIN`), so a runner-up that either margin would adopt after the fastest fails at
+           M = 4 or 8 may already be screened at M = 1 — not measured;
        - a device between steady and unsteady has no record: the class's 20 % is a point inside an empty band (the
          steady devices' records read at most 15.2 %, the RTX 3080 Ti's at least 31.8 %), no integrated GPU, no thermally
          limited laptop and no unsteady device in a browser was measured, and the six RTX 3080 Ti records of 12 or 13
